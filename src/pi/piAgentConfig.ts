@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ModelInfo, PiAgentConfigData } from '../shared/protocol';
 import type { PiChatSession } from './slashCommands';
-import { getPiAgentDir } from './piCliPaths';
+import { getAgentLayout, getPiAgentDir } from './piCliPaths';
+import type { AgentBackend } from './agentBackend';
 import { normalizePiPackageSource } from './piPackageCatalog';
 import { installPiPackage, removePiPackageBySource } from './piPackageInstall';
 import {
@@ -12,6 +13,15 @@ import {
     writePiSettingsJson,
     type PiSettingsJson,
 } from './piSettingsJson';
+import {
+    addOmpSkillPath,
+    readOmpAgentConfigData,
+    removeOmpSkillPathAt,
+    setOmpEnableSkillCommands,
+    setOmpFollowUpMode,
+    setOmpSteeringMode,
+    updateOmpDefaults,
+} from './ompAgentConfig';
 
 export interface PiAuthProviderInfo {
     id: string;
@@ -129,14 +139,26 @@ function readSettingsJsonFallback(agentDir: string): PiAgentConfigData {
 /** Load config for settings panel; never throws — returns partial data + error message on failure. */
 export async function loadPiAgentConfigForSettings(
     sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
 ): Promise<{ config: PiAgentConfigData; error?: string }> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        try {
+            const config = await readOmpAgentConfigData(sessionManager, layout.agentDir);
+            return { config };
+        } catch (err: any) {
+            return {
+                config: emptyPiAgentConfig(),
+                error: err?.message ?? String(err),
+            };
+        }
+    }
     try {
         const snap = await loadPiAgentConfigSnapshot(sessionManager);
         return { config: snapshotToConfigData(snap) };
     } catch (err: any) {
-        const agentDir = getPiAgentDir();
         return {
-            config: readSettingsJsonFallback(agentDir),
+            config: readSettingsJsonFallback(layout.agentDir),
             error: err?.message ?? String(err),
         };
     }
@@ -211,7 +233,13 @@ async function persistSettingsManager(_sm: unknown): Promise<void> {
 export async function updatePiDefaults(
     fields: { provider?: string; model?: string; thinkingLevel?: string },
     sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
 ): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        await updateOmpDefaults(fields, sessionManager, layout.agentDir);
+        return;
+    }
     writePiSettingsJson((current) => {
         const next = { ...current };
         if (fields.provider !== undefined) {
@@ -225,7 +253,7 @@ export async function updatePiDefaults(
         }
         return next;
     });
-    await applyDefaultsToActiveSession(sessionManager);
+    await applyDefaultsToActiveSession(sessionManager, layout.backend);
 }
 
 export async function setPiPackages(packages: string[], sessionManager?: PiChatSession): Promise<void> {
@@ -296,7 +324,16 @@ export async function setPiSkillPaths(paths: string[], sessionManager?: PiChatSe
     void sessionManager;
 }
 
-export async function addPiSkillPath(skillPath: string, sessionManager?: PiChatSession): Promise<void> {
+export async function addPiSkillPath(
+    skillPath: string,
+    sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
+): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        await addOmpSkillPath(skillPath, layout.agentDir);
+        return;
+    }
     const trimmed = skillPath.trim();
     if (!trimmed) {
         throw new Error('Skill path is empty');
@@ -311,7 +348,16 @@ export async function addPiSkillPath(skillPath: string, sessionManager?: PiChatS
     void sessionManager;
 }
 
-export async function removePiSkillPathAt(index: number, sessionManager?: PiChatSession): Promise<void> {
+export async function removePiSkillPathAt(
+    index: number,
+    sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
+): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        await removeOmpSkillPathAt(index, layout.agentDir);
+        return;
+    }
     writePiSettingsJson((current) => {
         const paths = [...(current.skills ?? [])];
         if (index < 0 || index >= paths.length) {
@@ -326,7 +372,13 @@ export async function removePiSkillPathAt(index: number, sessionManager?: PiChat
 export async function setPiEnableSkillCommands(
     enabled: boolean,
     sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
 ): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        await setOmpEnableSkillCommands(enabled, layout.agentDir);
+        return;
+    }
     writePiSettingsJson((current) => ({ ...current, enableSkillCommands: enabled }));
     schedulePiSessionReload(sessionManager);
 }
@@ -334,42 +386,81 @@ export async function setPiEnableSkillCommands(
 export async function setPiSteeringMode(
     mode: 'all' | 'one-at-a-time',
     sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
 ): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        await setOmpSteeringMode(mode, layout.agentDir);
+        return;
+    }
     writePiSettingsJson((current) => ({ ...current, steeringMode: mode }));
-    await applyDefaultsToActiveSession(sessionManager);
+    await applyDefaultsToActiveSession(sessionManager, layout.backend);
 }
 
 export async function setPiFollowUpMode(
     mode: 'all' | 'one-at-a-time',
     sessionManager?: PiChatSession,
+    preferredBackend?: AgentBackend,
 ): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        await setOmpFollowUpMode(mode, layout.agentDir);
+        return;
+    }
     writePiSettingsJson((current) => ({ ...current, followUpMode: mode }));
-    await applyDefaultsToActiveSession(sessionManager);
+    await applyDefaultsToActiveSession(sessionManager, layout.backend);
 }
 
-export async function openPiAgentFile(file: 'settings' | 'auth' | 'mcp'): Promise<void> {
-    const agentDir = getPiAgentDir();
-    const names: Record<typeof file, string> = {
-        settings: 'settings.json',
-        auth: 'auth.json',
-        mcp: 'mcp.json',
-    };
-    const filePath = path.join(agentDir, names[file]);
-    if (!fs.existsSync(filePath) && file !== 'settings') {
-        fs.writeFileSync(filePath, file === 'mcp' ? '{\n  "mcpServers": {}\n}\n' : '{}\n', 'utf8');
+export async function openPiAgentFile(
+    file: 'settings' | 'auth' | 'mcp',
+    preferredBackend?: AgentBackend,
+): Promise<void> {
+    const layout = getAgentLayout(preferredBackend);
+    const agentDir = layout.agentDir;
+    let targetName: string;
+    if (layout.backend === 'omp') {
+        const ompNames: Record<typeof file, string> = {
+            settings: 'config.yml',
+            auth: 'models.yml',
+            mcp: 'mcp.json',
+        };
+        targetName = ompNames[file];
+    } else {
+        const piNames: Record<typeof file, string> = {
+            settings: 'settings.json',
+            auth: 'auth.json',
+            mcp: 'mcp.json',
+        };
+        targetName = piNames[file];
+    }
+    const filePath = path.join(agentDir, targetName);
+    if (!fs.existsSync(filePath)) {
+        fs.mkdirSync(agentDir, { recursive: true });
+        if (file === 'mcp') {
+            fs.writeFileSync(filePath, '{\n  "mcpServers": {}\n}\n', 'utf8');
+        } else if (file === 'auth' && layout.backend === 'omp') {
+            fs.writeFileSync(filePath, '# Custom providers and models for omp\nproviders: {}\n', 'utf8');
+        } else if (file === 'settings' && layout.backend === 'omp') {
+            fs.writeFileSync(filePath, '# Configuration for omp\n', 'utf8');
+        } else {
+            fs.writeFileSync(filePath, '{}\n', 'utf8');
+        }
     }
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     await vscode.window.showTextDocument(doc, { preview: false });
 }
 
-async function applyDefaultsToActiveSession(sessionManager?: PiChatSession): Promise<void> {
+async function applyDefaultsToActiveSession(
+    sessionManager?: PiChatSession,
+    backend?: AgentBackend,
+): Promise<void> {
     if (!sessionManager) {
         return;
     }
-    const { readPiCliSettingsSummary } = await import('./piCliSync');
-    const summary = readPiCliSettingsSummary();
+    const { readAgentSettingsSummary } = await import('./piCliSync');
+    const summary = readAgentSettingsSummary(backend);
     if (summary.defaultProvider && summary.defaultModel) {
-        await sessionManager.setModel(summary.defaultProvider, summary.defaultModel);
+        await sessionManager.setModel(summary.defaultProvider, summary.defaultModel).catch(() => {});
     }
     if (summary.defaultThinkingLevel) {
         sessionManager.setThinkingLevel(summary.defaultThinkingLevel);

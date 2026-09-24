@@ -3,7 +3,7 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
-import { getPiAgentDir, piCliChildEnv, type PiCliInvocation, resolvePiCliInvocation } from './piCliPaths';
+import { getPiAgentDir, piCliChildEnv, type PiNodeInvocation, resolvePiCliInvocation } from './piCliPaths';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,9 +45,9 @@ export function hintForExtensionCategory(category: ExtensionLoadIssue['category'
         case 'tui':
             return 'Package targets Pi terminal UI. In VS Code only tools using ctx.ui dialogs work; footers/overlays are CLI-only.';
         case 'sdk':
-            return 'Update vs-pi-agent and Pi packages to matching versions, then reload session.';
+            return 'Update Oh My Pi Chater and Pi packages to matching versions, then reload session.';
         default:
-            return 'See Output → vs-pi-agent. Fix or remove the package in ~/.pi/agent/settings.json.';
+            return 'See Output → Oh My Pi Chater. Fix or remove the package in ~/.pi/agent/settings.json.';
     }
 }
 
@@ -102,13 +102,13 @@ export async function notifyExtensionLoadIssues(
     const action = nativeCount > 0 ? 'Rebuild native modules' : 'Open Output';
     const pick = await vscode.window.showWarningMessage(headline, { modal: false }, action, 'Dismiss');
     if (pick === 'Rebuild native modules') {
-        await vscode.commands.executeCommand('pi-agent.rebuildNativeModules');
+        await vscode.commands.executeCommand('oh-my-pi-chater.rebuildNativeModules');
     } else if (pick === 'Open Output') {
         outputChannel.show(true);
     }
 }
 
-function piNpmEnv(invocation: PiCliInvocation, npmDir: string): NodeJS.ProcessEnv {
+function piNpmEnv(invocation: PiNodeInvocation, npmDir: string): NodeJS.ProcessEnv {
     return {
         ...piCliChildEnv(invocation),
         NODE_PATH: path.join(npmDir, 'node_modules'),
@@ -117,7 +117,7 @@ function piNpmEnv(invocation: PiCliInvocation, npmDir: string): NodeJS.ProcessEn
 
 /** True when better-sqlite3 loads under the pi CLI Node (not the VS Code extension host). */
 export async function canLoadPiNativeModules(
-    invocation: PiCliInvocation,
+    invocation: PiNodeInvocation,
     npmDir: string,
 ): Promise<boolean> {
     const sqliteDir = path.join(npmDir, 'node_modules', 'better-sqlite3');
@@ -151,7 +151,7 @@ async function findPythonForNodeGyp(): Promise<string | undefined> {
     return undefined;
 }
 
-function resolvePiNpmCommand(invocation: PiCliInvocation): string {
+function resolvePiNpmCommand(invocation: PiNodeInvocation): string {
     const npmBin = path.join(invocation.binDir, process.platform === 'win32' ? 'npm.cmd' : 'npm');
     return fs.existsSync(npmBin) ? npmBin : 'npm';
 }
@@ -173,21 +173,28 @@ async function runNativeRebuild(
 export async function rebuildAgentNativeModules(
     outputChannel: vscode.OutputChannel,
 ): Promise<void> {
+    let resolved;
+    try {
+        resolved = await resolvePiCliInvocation();
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Cannot rebuild native modules: ${msg}`);
+        outputChannel.appendLine(msg);
+        return;
+    }
+    if (resolved.backend === 'omp') {
+        const msg = 'omp is a self-contained binary; there are no Node native modules to rebuild.';
+        outputChannel.appendLine(msg);
+        vscode.window.showInformationMessage(msg);
+        return;
+    }
+    const invocation = resolved;
+
     const agentDir = getPiAgentDir();
     const npmDir = path.join(agentDir, 'npm');
     if (!fs.existsSync(npmDir)) {
         const msg = `Pi npm dir not found: ${npmDir}`;
         vscode.window.showErrorMessage(msg);
-        outputChannel.appendLine(msg);
-        return;
-    }
-
-    let invocation: PiCliInvocation;
-    try {
-        invocation = await resolvePiCliInvocation();
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Cannot rebuild native modules: ${msg}`);
         outputChannel.appendLine(msg);
         return;
     }
@@ -219,7 +226,7 @@ export async function rebuildAgentNativeModules(
             'Rebuild Anyway',
         );
         if (reload === 'Reload Session') {
-            await vscode.commands.executeCommand('pi-agent.reloadSession');
+            await vscode.commands.executeCommand('oh-my-pi-chater.reloadSession');
             return;
         }
         if (reload !== 'Rebuild Anyway') {
@@ -233,7 +240,7 @@ export async function rebuildAgentNativeModules(
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'vs-pi-agent: rebuilding Pi native modules...',
+            title: 'Oh My Pi Chater: rebuilding Pi native modules...',
             cancellable: false,
         },
         async () => {
@@ -275,7 +282,7 @@ export async function rebuildAgentNativeModules(
                 const msg = err instanceof Error ? err.message : String(err);
                 outputChannel.appendLine(`Native rebuild failed: ${msg}`);
                 vscode.window.showErrorMessage(
-                    `Native rebuild failed. See Output → vs-pi-agent. ${msg.slice(0, 240)}`,
+                    `Native rebuild failed. See Output → Oh My Pi Chater. ${msg.slice(0, 240)}`,
                 );
                 throw err;
             }
@@ -288,7 +295,7 @@ export async function rebuildAgentNativeModules(
             'Reload Session',
         );
         if (reload === 'Reload Session') {
-            await vscode.commands.executeCommand('pi-agent.reloadSession');
+            await vscode.commands.executeCommand('oh-my-pi-chater.reloadSession');
         }
     }
 }

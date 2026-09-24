@@ -1,9 +1,7 @@
-import type { SessionListPayload, SessionListScope, SessionListSort } from '../shared/protocol';
+import type { SessionListPayload } from '../shared/protocol';
 import { vscode } from './vscodeApi';
 
 let panelOpen = false;
-let scope: SessionListScope = 'current';
-let sort: SessionListSort = 'threaded';
 let query = '';
 let loadDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let panelEl: HTMLElement | null = null;
@@ -57,18 +55,6 @@ function wirePanel(panel: HTMLElement): void {
         e.stopPropagation();
         cancelPendingActions();
         vscode.postMessage({ type: 'closeSessionPanel' });
-    });
-
-    panel.querySelector('[data-action="scope"]')?.addEventListener('click', () => {
-        scope = scope === 'current' ? 'all' : 'current';
-        cancelPendingActions();
-        requestLoad();
-    });
-
-    panel.querySelector('[data-action="sort"]')?.addEventListener('click', () => {
-        sort = sort === 'threaded' ? 'recent' : 'threaded';
-        cancelPendingActions();
-        requestLoad();
     });
 
     const search = panel.querySelector('#session-panel-search') as HTMLInputElement | null;
@@ -227,14 +213,13 @@ function ensurePanel(): HTMLElement {
     panel.hidden = !panelOpen;
     panel.innerHTML = `
         <div class="session-panel-header">
-            <span class="session-panel-title">Resume session</span>
+            <div class="session-panel-title-wrap">
+                <span class="session-panel-title">Resume session</span>
+                <span class="session-panel-backend-badge" id="session-panel-backend-badge" hidden></span>
+            </div>
             <button type="button" class="session-panel-close icon-btn" title="Close" aria-label="Close">×</button>
         </div>
         <div class="session-panel-subtitle" id="session-panel-cwd"></div>
-        <div class="session-panel-toolbar">
-            <button type="button" class="session-panel-chip" data-action="scope" title="Current folder / All">Current folder</button>
-            <button type="button" class="session-panel-chip" data-action="sort" title="Threaded / Recent">Threaded</button>
-        </div>
         <input type="search" class="session-panel-search" id="session-panel-search" placeholder="Search sessions…" autocomplete="off" />
         <div class="session-panel-status" id="session-panel-status"></div>
         <div class="session-panel-list" id="session-panel-list" role="listbox"></div>
@@ -250,10 +235,10 @@ function requestLoad(): void {
         clearTimeout(loadDebounceTimer);
         loadDebounceTimer = undefined;
     }
-    vscode.postMessage({ type: 'loadSessionList', scope, sort, query });
+    vscode.postMessage({ type: 'loadSessionList', query });
 }
 
-/** Debounce search typing; scope/sort changes load immediately. */
+/** Debounce search typing. */
 function scheduleLoad(delayMs = 200): void {
     if (loadDebounceTimer) {
         clearTimeout(loadDebounceTimer);
@@ -262,17 +247,6 @@ function scheduleLoad(delayMs = 200): void {
         loadDebounceTimer = undefined;
         requestLoad();
     }, delayMs);
-}
-
-function updateToolbar(): void {
-    const scopeBtn = panelEl?.querySelector('[data-action="scope"]');
-    const sortBtn = panelEl?.querySelector('[data-action="sort"]');
-    if (scopeBtn) {
-        scopeBtn.textContent = scope === 'current' ? 'Current folder' : 'All folders';
-    }
-    if (sortBtn) {
-        sortBtn.textContent = sort === 'threaded' ? 'Threaded' : 'Recent';
-    }
 }
 
 function createActionButton(
@@ -302,19 +276,20 @@ function renderList(data: SessionListPayload): void {
         return;
     }
     const panel = ensurePanel();
-    scope = data.scope;
-    sort = data.sort;
-    updateToolbar();
+
+    const badgeEl = panel.querySelector('#session-panel-backend-badge');
+    if (badgeEl) {
+        if (data.backend) {
+            badgeEl.textContent = data.backend;
+            badgeEl.removeAttribute('hidden');
+        } else {
+            badgeEl.setAttribute('hidden', '');
+        }
+    }
 
     const cwdEl = panel.querySelector('#session-panel-cwd');
     if (cwdEl) {
-        const label =
-            data.scope === 'current'
-                ? data.workspaceCwd
-                    ? shortenCwd(data.workspaceCwd)
-                    : 'No workspace folder'
-                : 'All projects';
-        cwdEl.textContent = label;
+        cwdEl.textContent = data.workspaceCwd ? shortenCwd(data.workspaceCwd) : 'No workspace folder';
     }
 
     const statusEl = panel.querySelector('#session-panel-status');
@@ -341,8 +316,7 @@ function renderList(data: SessionListPayload): void {
     }
 
     if (data.items.length === 0) {
-        statusEl.textContent =
-            data.scope === 'current' ? 'No sessions in this folder' : 'No sessions found';
+        statusEl.textContent = 'No sessions in this folder';
         statusEl.hidden = false;
         listEl.innerHTML = '';
         return;
@@ -363,10 +337,6 @@ function renderList(data: SessionListPayload): void {
             row.classList.add('session-panel-item--confirm-delete');
         }
         row.dataset.sessionPath = item.sessionPath;
-
-        const prefix = document.createElement('span');
-        prefix.className = 'session-panel-prefix';
-        prefix.textContent = item.prefix;
 
         const main = document.createElement('div');
         main.className = 'session-panel-main';
@@ -390,17 +360,18 @@ function renderList(data: SessionListPayload): void {
             label.className = 'session-panel-label';
             label.textContent =
                 confirmingDeletePath === item.sessionPath ? `Delete "${item.label}"?` : item.label;
+            label.title = item.label;
+            main.appendChild(label);
+        }
 
+        row.appendChild(main);
+
+        if (renamingPath !== item.sessionPath) {
             const meta = document.createElement('span');
             meta.className = 'session-panel-meta';
             meta.textContent = item.meta;
-
-            main.appendChild(label);
-            main.appendChild(meta);
+            row.appendChild(meta);
         }
-
-        row.appendChild(prefix);
-        row.appendChild(main);
 
         const actions = document.createElement('div');
         actions.className = 'session-panel-actions';
@@ -466,24 +437,13 @@ function renderList(data: SessionListPayload): void {
         }
 
         row.appendChild(actions);
-
-        if (item.isCurrent && renamingPath !== item.sessionPath && confirmingDeletePath !== item.sessionPath) {
-            const dot = document.createElement('span');
-            dot.className = 'session-panel-dot';
-            dot.title = 'Current session';
-            row.appendChild(dot);
-        }
-
         listEl.appendChild(row);
     }
 }
 
 export function setSessionPanelOpen(open: boolean): void {
     panelOpen = open;
-    if (open) {
-        scope = 'current';
-        updateToolbar();
-    } else {
+    if (!open) {
         cancelPendingActions();
     }
     ensureBackdrop();
@@ -511,7 +471,7 @@ export function onAppShellRebuilt(): void {
         return;
     }
     setSessionPanelOpen(true);
-    vscode.postMessage({ type: 'loadSessionList', scope: 'current', sort, query });
+    vscode.postMessage({ type: 'loadSessionList', query });
 }
 
 export function applySessionList(data: SessionListPayload): void {

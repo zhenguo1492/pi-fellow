@@ -54,4 +54,21 @@ describe('readPlanModeInfo', () => {
         expect(info.hasPlan).toBe(true);
         expect(info.statusLabel).toBe('ready');
     });
+
+    it('ignores <proposed_plan> in assistant text unless plan mode is on', () => {
+        const messages = [
+            { role: 'assistant', content: [{ type: 'text', text: 'The parser matches `<proposed_plan>…</proposed_plan>` tags.' }] },
+        ];
+        const off = readPlanModeInfo(mockSession({ messages }));
+        expect(off.hasPlan).toBe(false);
+        expect(off.planMarkdown).toBe('');
+
+        const on = readPlanModeInfo(
+            mockSession({
+                messages,
+                entries: [{ type: 'custom', customType: 'plan-mode-state', data: { enabled: true } }],
+            }),
+        );
+        expect(on.hasPlan).toBe(true);
+    });
 });

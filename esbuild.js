@@ -9,6 +9,9 @@ const extensionConfig = {
     bundle: true,
     outfile: 'out/extension.js',
     external: ['vscode'],
+    // The bundle is CJS, but `import` statements would pick ort's ESM node build,
+    // which needs import.meta.url; use its CommonJS node build instead.
+    alias: { 'onnxruntime-web': './node_modules/onnxruntime-web/dist/ort.node.min.js' },
     format: 'cjs',
     platform: 'node',
     target: 'node22',
@@ -45,11 +48,25 @@ async function copyStyles() {
     for (const file of await fs.promises.readdir(srcDir)) {
         await fs.promises.copyFile(path.join(srcDir, file), path.join(stylesDir, file));
     }
+    await fs.promises.copyFile(
+        require.resolve('@xterm/xterm/css/xterm.css'),
+        path.join(stylesDir, 'xterm.css'),
+    );
+}
+
+/** onnxruntime-web loads these at runtime for the voice-input VAD (src/voice/sileroVad.ts). */
+async function copyOrtRuntime() {
+    const outDir = path.join('out', 'vad');
+    await fs.promises.mkdir(outDir, { recursive: true });
+    const distDir = path.dirname(require.resolve('onnxruntime-web/ort-wasm-simd-threaded.wasm'));
+    for (const file of ['ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm']) {
+        await fs.promises.copyFile(path.join(distDir, file), path.join(outDir, file));
+    }
 }
 
 async function build() {
     if (isWatch) {
-        await copyStyles();
+        await Promise.all([copyStyles(), copyOrtRuntime()]);
         const extCtx = await esbuild.context(extensionConfig);
         const webCtx = await esbuild.context(webviewConfig);
         const settingsCtx = await esbuild.context(settingsWebviewConfig);
@@ -59,7 +76,7 @@ async function build() {
         await esbuild.build(extensionConfig);
         await esbuild.build(webviewConfig);
         await esbuild.build(settingsWebviewConfig);
-        await copyStyles();
+        await Promise.all([copyStyles(), copyOrtRuntime()]);
         console.log('Build complete.');
     }
 }

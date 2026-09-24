@@ -25,7 +25,10 @@ export type SettingsFocusSection =
     | 'defaults'
     | 'skills'
     | 'extensions'
-    | 'commands';
+    | 'commands'
+    | 'stt'
+    | 'tts'
+    | 'voice';
 
 /** Slash commands that need a VS Code panel instead of Pi TUI (RPC has no terminal UI). */
 const GUI_SLASH: Record<string, SettingsFocusSection | 'settings' | 'sessions' | 'fork'> = {
@@ -36,6 +39,9 @@ const GUI_SLASH: Record<string, SettingsFocusSection | 'settings' | 'sessions' |
     fork: 'fork',
     'setup-custom-providers': 'defaults',
     profile: 'defaults',
+    stt: 'stt',
+    tts: 'stt',
+    voice: 'stt',
 };
 
 function parseSlash(text: string): { command: string; args: string } {
@@ -49,7 +55,7 @@ function parseSlash(text: string): { command: string; args: string } {
 async function openSettingsSection(section: SettingsFocusSection | 'settings'): Promise<void> {
     const { SettingsPanel } = await import('../providers/settings-panel');
     if (section === 'settings') {
-        await vscode.commands.executeCommand('pi-agent.openSettings');
+        await vscode.commands.executeCommand('oh-my-pi-chater.openSettings');
         return;
     }
     SettingsPanel.showWithSection(section);
@@ -81,7 +87,7 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
     const gui = GUI_SLASH[command];
     if (gui) {
         if (gui === 'settings') {
-            await vscode.commands.executeCommand('pi-agent.openSettings');
+            await vscode.commands.executeCommand('oh-my-pi-chater.openSettings');
             return true;
         }
         if (gui === 'fork') {
@@ -89,7 +95,12 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
             return true;
         }
         await openSettingsSection(gui);
-        vscode.window.setStatusBarMessage(`vs-pi-agent: /${command} → settings`, 3000);
+        vscode.window.setStatusBarMessage(`Oh My Pi Chater: /${command} → settings`, 3000);
+        return true;
+    }
+
+    if (command === 'tree') {
+        await manager.showSessionTree();
         return true;
     }
 

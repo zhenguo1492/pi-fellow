@@ -4,36 +4,49 @@ import { stat } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
-import type { SessionInfo, SessionListSort } from '../shared/protocol';
+import type { SessionInfo } from '../shared/protocol';
+import type { AgentBackend, AgentLayout } from './agentBackend';
 
-function getPiAgentDir(): string {
-    const env = process.env.PI_CODING_AGENT_DIR?.trim();
-    if (env) {
-        return env;
+function realpathOrResolve(p: string): string {
+    const resolved = path.resolve(p);
+    try {
+        return fs.realpathSync(resolved);
+    } catch {
+        return resolved;
     }
-    return path.join(os.homedir(), '.pi', 'agent');
 }
 
-/** Same encoding as Pi CLI `getDefaultSessionDirPath`. */
-export function encodePiSessionCwd(cwd: string): string {
-    const resolvedCwd = path.resolve(cwd);
-    return `--${resolvedCwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+/**
+ * Per-cwd session directory name, matching each CLI.
+ * - pi: `--<abs path, separators → '-'>--`.
+ * - omp: home-relative `-<rel>` (home itself `-`), tmp-relative `-tmp-<rel>`, else the pi form.
+ */
+export function encodeSessionCwd(
+    cwd: string,
+    backend: AgentBackend,
+    home: string = os.homedir(),
+    tmp: string = os.tmpdir(),
+): string {
+    const absForm = (p: string): string => `--${p.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+    if (backend === 'pi') {
+        return absForm(path.resolve(cwd));
+    }
+    const resolved = realpathOrResolve(cwd);
+    for (const [root, prefix] of [[home, '-'], [tmp, '-tmp']] as const) {
+        const rel = path.relative(realpathOrResolve(root), resolved);
+        if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+            const suffix = rel.replace(/[/\\:]/g, '-');
+            if (!suffix) {
+                return prefix;
+            }
+            return prefix.endsWith('-') ? `${prefix}${suffix}` : `${prefix}-${suffix}`;
+        }
+    }
+    return absForm(resolved);
 }
 
-export function getPiSessionDirForCwd(cwd: string, agentDir = getPiAgentDir()): string {
-    return path.join(agentDir, 'sessions', encodePiSessionCwd(cwd));
-}
-
-export interface SessionTreeNode {
-    session: SessionInfo;
-    children: SessionTreeNode[];
-}
-
-export interface FlatSessionTreeItem {
-    session: SessionInfo;
-    depth: number;
-    isLast: boolean;
-    ancestorContinues: boolean[];
+export function getSessionDirForCwd(cwd: string, layout: AgentLayout): string {
+    return path.join(layout.agentDir, 'sessions', encodeSessionCwd(cwd, layout.backend));
 }
 
 /** Match Pi CLI session selector (realpath when possible). */
@@ -123,6 +136,7 @@ async function buildSessionInfoFromFileLiteAsync(filePath: string): Promise<Sess
     return new Promise((resolve) => {
         let header: Record<string, unknown> | null = null;
         let messageCount = 0;
+        let turnCount = 0;
         let firstMessage = '';
         let name: string | undefined;
         let lastActivity = fileStat.mtimeMs;
@@ -154,9 +168,9 @@ async function buildSessionInfoFromFileLiteAsync(filePath: string): Promise<Sess
                 name: name ?? id,
                 path: filePath,
                 cwd: typeof header.cwd === 'string' ? header.cwd : undefined,
-                parentSessionPath:
-                    typeof header.parentSession === 'string' ? header.parentSession : undefined,
                 messageCount,
+                turnCount,
+                sizeBytes: fileStat.size,
                 firstMessage: firstMessage || '(no messages)',
                 created: !Number.isNaN(headerTs) ? headerTs : fileStat.mtimeMs,
                 lastModified: modified,
@@ -175,6 +189,7 @@ async function buildSessionInfoFromFileLiteAsync(filePath: string): Promise<Sess
                 return;
             }
 
+            // pi: header is line 1. omp: a `title` entry precedes it.
             if (!header && entry.type === 'session') {
                 header = entry;
                 const headerTs =
@@ -187,6 +202,9 @@ async function buildSessionInfoFromFileLiteAsync(filePath: string): Promise<Sess
                 return;
             }
 
+            if (entry.type === 'title' && typeof entry.title === 'string' && entry.title.trim()) {
+                name = entry.title.trim();
+            }
             if (entry.type === 'session_info') {
                 const raw = (entry as { name?: string }).name?.trim();
                 if (raw) {
@@ -214,6 +232,9 @@ async function buildSessionInfoFromFileLiteAsync(filePath: string): Promise<Sess
                 }
             }
 
+            if (message?.role === 'user') {
+                turnCount++;
+            }
             if (!firstMessage && message?.role === 'user') {
                 const textContent = extractTextContent(message)
                     .replace(/[\x00-\x1f\x7f]/g, ' ')
@@ -272,10 +293,10 @@ export function buildSessionInfoFromFile(filePath: string): SessionInfo | null {
         return null;
     }
 
-    return parseSessionInfoFromText(filePath, text, statResult.mtimeMs);
+    return parseSessionInfoFromText(filePath, text, statResult);
 }
 
-function parseSessionInfoFromText(filePath: string, text: string, statsMtimeMs: number): SessionInfo | null {
+function parseSessionInfoFromText(filePath: string, text: string, fileStat: fs.Stats): SessionInfo | null {
     const entries: Array<Record<string, unknown>> = [];
     for (const line of text.split('\n')) {
         const trimmed = line.trim();
@@ -293,16 +314,21 @@ function parseSessionInfoFromText(filePath: string, text: string, statsMtimeMs: 
         return null;
     }
 
-    const header = entries[0];
-    if (header.type !== 'session') {
+    // pi: header is line 1. omp: a `title` entry precedes it.
+    const header = entries.find((entry) => entry.type === 'session');
+    if (!header) {
         return null;
     }
 
     let messageCount = 0;
+    let turnCount = 0;
     let firstMessage = '';
     let name: string | undefined;
 
     for (const entry of entries) {
+        if (entry.type === 'title' && typeof entry.title === 'string' && entry.title.trim()) {
+            name = entry.title.trim();
+        }
         if (entry.type === 'session_info') {
             const raw = (entry as { name?: string }).name?.trim();
             name = raw || undefined;
@@ -315,6 +341,9 @@ function parseSessionInfoFromText(filePath: string, text: string, statsMtimeMs: 
         }
         messageCount++;
         const message = entry.message as { role?: string } | undefined;
+        if (message?.role === 'user') {
+            turnCount++;
+        }
         const textContent = extractTextContent(message).replace(/[\x00-\x1f\x7f]/g, ' ').trim();
         if (!textContent) {
             continue;
@@ -331,7 +360,7 @@ function parseSessionInfoFromText(filePath: string, text: string, statsMtimeMs: 
             ? lastActivity
             : !Number.isNaN(headerTs)
               ? headerTs
-              : statsMtimeMs;
+              : fileStat.mtimeMs;
 
     const match = /^(.+)_(.+)\.jsonl$/.exec(path.basename(filePath));
     const id = typeof header.id === 'string' ? header.id : match?.[2] ?? path.basename(filePath);
@@ -341,10 +370,11 @@ function parseSessionInfoFromText(filePath: string, text: string, statsMtimeMs: 
         name: name ?? id,
         path: filePath,
         cwd: typeof header.cwd === 'string' ? header.cwd : undefined,
-        parentSessionPath: typeof header.parentSession === 'string' ? header.parentSession : undefined,
         messageCount,
+        turnCount,
+        sizeBytes: fileStat.size,
         firstMessage: firstMessage || '(no messages)',
-        created: !Number.isNaN(headerTs) ? headerTs : statsMtimeMs,
+        created: !Number.isNaN(headerTs) ? headerTs : fileStat.mtimeMs,
         lastModified: modified,
     };
 }
@@ -409,12 +439,13 @@ function sortSessionsByModified(sessions: SessionInfo[]): SessionInfo[] {
     return sessions.sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0));
 }
 
-/** Sessions for one workspace cwd (Pi CLI "current folder" scope). */
+/** Sessions for one workspace cwd (the CLI's `/resume` current-folder scope). */
 export async function listPiSessionsForCwdAsync(
     cwd: string,
+    layout: AgentLayout,
     onProgress?: (loaded: number, total: number) => void,
 ): Promise<SessionInfo[]> {
-    const sessionDir = getPiSessionDirForCwd(cwd);
+    const sessionDir = getSessionDirForCwd(cwd, layout);
     const files = listSessionFilesInDir(sessionDir);
     let loaded = 0;
     const results = await buildSessionInfosWithConcurrency(files, () => {
@@ -422,127 +453,6 @@ export async function listPiSessionsForCwdAsync(
         onProgress?.(loaded, files.length);
     });
     return sortSessionsByModified(results.filter((info): info is SessionInfo => info !== null));
-}
-
-/** All sessions across every project folder (Pi CLI "all" scope). */
-export async function listAllPiSessionsAsync(
-    onProgress?: (loaded: number, total: number) => void,
-): Promise<SessionInfo[]> {
-    const root = path.join(getPiAgentDir(), 'sessions');
-    if (!fs.existsSync(root)) {
-        return [];
-    }
-
-    const allFiles: string[] = [];
-    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-        if (!entry.isDirectory()) {
-            continue;
-        }
-        allFiles.push(...listSessionFilesInDir(path.join(root, entry.name)));
-    }
-
-    let loaded = 0;
-    const results = await buildSessionInfosWithConcurrency(allFiles, () => {
-        loaded++;
-        onProgress?.(loaded, allFiles.length);
-    });
-    return sortSessionsByModified(results.filter((info): info is SessionInfo => info !== null));
-}
-
-/** @deprecated Use listPiSessionsForCwdAsync */
-export function listPiSessionsForCwd(cwd: string): SessionInfo[] {
-    const sessionDir = getPiSessionDirForCwd(cwd);
-    const sessions: SessionInfo[] = [];
-    for (const filePath of listSessionFilesInDir(sessionDir)) {
-        const info = buildSessionInfoFromFile(filePath);
-        if (info) {
-            sessions.push(info);
-        }
-    }
-    return sortSessionsByModified(sessions);
-}
-
-/** @deprecated Use listAllPiSessionsAsync */
-export function listAllPiSessions(): SessionInfo[] {
-    const root = path.join(getPiAgentDir(), 'sessions');
-    if (!fs.existsSync(root)) {
-        return [];
-    }
-
-    const sessions: SessionInfo[] = [];
-    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-        if (!entry.isDirectory()) {
-            continue;
-        }
-        for (const filePath of listSessionFilesInDir(path.join(root, entry.name))) {
-            const info = buildSessionInfoFromFile(filePath);
-            if (info) {
-                sessions.push(info);
-            }
-        }
-    }
-    return sortSessionsByModified(sessions);
-}
-
-/** Build parent/child tree from session headers (same algorithm as Pi CLI). */
-export function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
-    const byPath = new Map<string, SessionTreeNode>();
-    for (const session of sessions) {
-        const sessionPath = canonicalizePath(session.path) ?? session.path;
-        byPath.set(sessionPath, { session, children: [] });
-    }
-
-    const roots: SessionTreeNode[] = [];
-    for (const session of sessions) {
-        const sessionPath = canonicalizePath(session.path) ?? session.path;
-        const node = byPath.get(sessionPath);
-        if (!node) {
-            continue;
-        }
-        const parentPath = canonicalizePath(session.parentSessionPath);
-        if (parentPath && byPath.has(parentPath)) {
-            byPath.get(parentPath)!.children.push(node);
-        } else {
-            roots.push(node);
-        }
-    }
-
-    const sortNodes = (nodes: SessionTreeNode[]): void => {
-        nodes.sort((a, b) => (b.session.lastModified ?? 0) - (a.session.lastModified ?? 0));
-        for (const node of nodes) {
-            sortNodes(node.children);
-        }
-    };
-    sortNodes(roots);
-    return roots;
-}
-
-/** Flatten tree for display with depth + connector metadata. */
-export function flattenSessionTree(roots: SessionTreeNode[]): FlatSessionTreeItem[] {
-    const result: FlatSessionTreeItem[] = [];
-
-    const walk = (node: SessionTreeNode, depth: number, ancestorContinues: boolean[], isLast: boolean): void => {
-        result.push({ session: node.session, depth, isLast, ancestorContinues });
-        for (let i = 0; i < node.children.length; i++) {
-            const childIsLast = i === node.children.length - 1;
-            const continues = depth > 0 ? !isLast : false;
-            walk(node.children[i], depth + 1, [...ancestorContinues, continues], childIsLast);
-        }
-    };
-
-    for (let i = 0; i < roots.length; i++) {
-        walk(roots[i], 0, [], i === roots.length - 1);
-    }
-    return result;
-}
-
-export function buildSessionTreePrefix(item: FlatSessionTreeItem): string {
-    if (item.depth === 0) {
-        return '';
-    }
-    const parts = item.ancestorContinues.map((continues) => (continues ? '│  ' : '   '));
-    const branch = item.isLast ? '└─ ' : '├─ ';
-    return parts.join('') + branch;
 }
 
 function matchesQuery(session: SessionInfo, query: string): boolean {
@@ -563,78 +473,70 @@ function matchesQuery(session: SessionInfo, query: string): boolean {
     return haystack.includes(q);
 }
 
-export function buildSessionDisplayList(
-    sessions: SessionInfo[],
-    sortMode: 'threaded' | 'recent',
-    query = '',
-): FlatSessionTreeItem[] {
-    const filtered = sessions.filter((s) => matchesQuery(s, query));
-    if (sortMode === 'recent') {
-        return filtered
-            .slice()
-            .sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0))
-            .map((session) => ({
-                session,
-                depth: 0,
-                isLast: true,
-                ancestorContinues: [],
-            }));
-    }
-    return flattenSessionTree(buildSessionTree(filtered));
+function hasMeaningfulContent(session: SessionInfo): boolean {
+    const hasName = !!session.name && session.name !== session.id;
+    if (hasName) return true;
+    return (session.messageCount ?? 0) > 0;
+}
+
+/** Sessions shown in the resume list, newest activity first. */
+export function buildSessionDisplayList(sessions: SessionInfo[], query = ''): SessionInfo[] {
+    return sessions
+        .filter((s) => hasMeaningfulContent(s) && matchesQuery(s, query))
+        .sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0));
 }
 
 export interface SessionListRow {
     sessionPath: string;
     label: string;
     meta: string;
-    prefix: string;
     isCurrent: boolean;
 }
 
-function sessionTitle(session: SessionInfo): string {
+/** Resolve the same title shown by the resume-session list. */
+export function getSessionDisplayTitle(session: SessionInfo): string {
     const hasName = !!session.name && session.name !== session.id;
     const title = (hasName ? session.name : session.firstMessage || session.id) ?? session.id;
     return title.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
 }
 
-/** Rows for resume UI (CLI `/resume` list format). */
+/** Rows for the resume panel: one line each — title, then `turns · size · age`. */
 export function buildSessionListRows(
     sessions: SessionInfo[],
-    sort: SessionListSort,
     query: string,
-    options: { showCwd: boolean; currentSessionPath?: string },
+    currentSessionPath: string | undefined,
 ): SessionListRow[] {
-    const display = buildSessionDisplayList(sessions, sort, query);
-    const currentCanon = options.currentSessionPath
-        ? canonicalizePath(options.currentSessionPath)
-        : undefined;
+    const currentCanon = currentSessionPath ? canonicalizePath(currentSessionPath) : undefined;
 
-    return display.map((item) => {
-        const session = item.session;
-        const prefix = buildSessionTreePrefix(item);
-        const age = formatSessionAge(session.lastModified);
-        const msgCount = String(session.messageCount ?? 0);
-        const meta =
-            options.showCwd && session.cwd
-                ? `${shortenPath(session.cwd)} · ${msgCount} · ${age}`
-                : `${msgCount} · ${age}`;
+    return buildSessionDisplayList(sessions, query).map((session) => {
+        const turns = session.turnCount ?? 0;
+        const meta = [
+            `${turns} ${turns === 1 ? 'turn' : 'turns'}`,
+            formatSessionSize(session.sizeBytes),
+            formatSessionAge(session.lastModified),
+        ]
+            .filter(Boolean)
+            .join(' · ');
         const sessionCanon = canonicalizePath(session.path) ?? session.path;
         return {
             sessionPath: session.path,
-            label: sessionTitle(session),
+            label: getSessionDisplayTitle(session),
             meta,
-            prefix,
             isCurrent: !!currentCanon && currentCanon === sessionCanon,
         };
     });
 }
 
-function shortenPath(filePath: string | undefined): string {
-    if (!filePath) {
+/** Session file size, e.g. `812 B`, `14 KB`, `1.4 MB`. */
+export function formatSessionSize(bytes: number | undefined): string {
+    if (bytes === undefined) {
         return '';
     }
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
-    return home && filePath.startsWith(home) ? `~${filePath.slice(home.length)}` : filePath;
+    if (bytes < 1024) return `${bytes} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+    const mb = kb / 1024;
+    return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
 }
 
 export function formatSessionAge(ms: number | undefined): string {

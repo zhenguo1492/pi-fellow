@@ -1,19 +1,11 @@
 {
-  "name": "vscode-pi-agent",
-  "displayName": "vscode-pi-agent",
-  "description": "Pi coding agent in VS Code — sidebar GUI for `pi --mode rpc` (full CLI parity, no bundled SDK).",
-  "version": "0.2.41",
-  "publisher": "fchatin",
+  "name": "oh-my-pi-chater",
+  "displayName": "Oh My Pi Chater",
+  "description": "Sidebar GUI for the omp (Oh My Pi) and pi coding agents over `--mode rpc` (full CLI parity, no bundled SDK). Derived from vscode-pi-agent (MIT).",
+  "version": "0.1.0",
+  "publisher": "zhenguo",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/FChatin/vs-pi-agent.git"
-  },
-  "homepage": "https://github.com/FChatin/vs-pi-agent",
-  "bugs": {
-    "url": "https://github.com/FChatin/vs-pi-agent/issues"
-  },
-  "icon": "media/pi-icon-full.png",
+  "icon": "media/oh-my-pi-chater-icon.png",
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -27,138 +19,154 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "pi-agent",
-          "title": "vs-pi-agent",
-          "icon": "media/pi-icon.svg"
+          "id": "oh-my-pi-chater",
+          "title": "Oh My Pi Chater",
+          "icon": "media/oh-my-pi-chater.svg"
         }
       ]
     },
     "views": {
-      "pi-agent": [
+      "oh-my-pi-chater": [
         {
           "type": "webview",
-          "id": "pi-agent.chat",
-          "name": "vs-pi-agent"
+          "id": "oh-my-pi-chater.chat",
+          "name": "Oh My Pi Chater"
         }
       ]
     },
     "menus": {
       "explorer/context": [
         {
-          "command": "pi-agent.attachFilesFromExplorer",
+          "command": "oh-my-pi-chater.attachFilesFromExplorer",
           "when": "explorerResourceIsFile",
           "group": "9_cutcopypaste@5"
         }
       ],
       "editor/title/context": [
         {
-          "command": "pi-agent.attachFilesFromExplorer",
+          "command": "oh-my-pi-chater.attachFilesFromExplorer",
           "when": "resourceScheme == file",
           "group": "9_cutcopypaste@5"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "pi-agent.attachFiles",
-          "when": "view == pi-agent.chat",
-          "group": "navigation@1"
         }
       ]
     },
     "commands": [
       {
-        "command": "pi-agent.newChat",
-        "title": "vs-pi-agent: New Chat"
+        "command": "oh-my-pi-chater.newChat",
+        "title": "Oh My Pi Chater: New Chat"
       },
       {
-        "command": "pi-agent.abort",
-        "title": "vs-pi-agent: Stop Generation"
+        "command": "oh-my-pi-chater.abort",
+        "title": "Oh My Pi Chater: Stop Generation"
       },
       {
-        "command": "pi-agent.selectModel",
-        "title": "vs-pi-agent: Select Model"
+        "command": "oh-my-pi-chater.selectModel",
+        "title": "Oh My Pi Chater: Select Model"
       },
       {
-        "command": "pi-agent.toggleThinking",
-        "title": "vs-pi-agent: Toggle Thinking Level"
+        "command": "oh-my-pi-chater.toggleThinking",
+        "title": "Oh My Pi Chater: Toggle Thinking Level"
       },
       {
-        "command": "pi-agent.focusChat",
-        "title": "vs-pi-agent: Focus Chat"
+        "command": "oh-my-pi-chater.openSessionTree",
+        "title": "Oh My Pi Chater: Session Branch Tree (/tree)"
       },
       {
-        "command": "pi-agent.attachFiles",
-        "title": "vs-pi-agent: Attach Files",
-        "icon": "$(cloud-upload)"
+        "command": "oh-my-pi-chater.focusChat",
+        "title": "Oh My Pi Chater: Focus Chat"
       },
       {
-        "command": "pi-agent.attachFilesFromExplorer",
-        "title": "vs-pi-agent: Add to Chat"
+        "command": "oh-my-pi-chater.toggleDictation",
+        "title": "Oh My Pi Chater: Toggle Voice Input"
       },
       {
-        "command": "pi-agent.openSettings",
-        "title": "vs-pi-agent: Open Settings"
+        "command": "oh-my-pi-chater.attachFilesFromExplorer",
+        "title": "Oh My Pi Chater: Add to Chat"
       },
       {
-        "command": "pi-agent.openMcpSettings",
-        "title": "vs-pi-agent: MCP Settings (/mcp)"
+        "command": "oh-my-pi-chater.openSettings",
+        "title": "Oh My Pi Chater: Open Settings"
       },
       {
-        "command": "pi-agent.login",
-        "title": "vs-pi-agent: Login (/login)"
+        "command": "oh-my-pi-chater.openMcpSettings",
+        "title": "Oh My Pi Chater: MCP Settings (/mcp)"
       },
       {
-        "command": "pi-agent.logout",
-        "title": "vs-pi-agent: Logout (/logout)"
+        "command": "oh-my-pi-chater.login",
+        "title": "Oh My Pi Chater: Login (/login)"
       },
       {
-        "command": "pi-agent.reloadSession",
-        "title": "vs-pi-agent: Reload Session (/reload)"
+        "command": "oh-my-pi-chater.logout",
+        "title": "Oh My Pi Chater: Logout (/logout)"
       },
       {
-        "command": "pi-agent.installRecommendedPackages",
-        "title": "vs-pi-agent: Install Recommended Packages"
+        "command": "oh-my-pi-chater.reloadSession",
+        "title": "Oh My Pi Chater: Reload Session (/reload)"
       },
       {
-        "command": "pi-agent.browsePackages",
-        "title": "vs-pi-agent: Browse Package Catalog"
+        "command": "oh-my-pi-chater.installRecommendedPackages",
+        "title": "Oh My Pi Chater: Install Recommended Packages"
       },
       {
-        "command": "pi-agent.rebuildNativeModules",
-        "title": "vs-pi-agent: Rebuild Pi Native Modules"
+        "command": "oh-my-pi-chater.browsePackages",
+        "title": "Oh My Pi Chater: Browse Package Catalog"
+      },
+      {
+        "command": "oh-my-pi-chater.rebuildNativeModules",
+        "title": "Oh My Pi Chater: Rebuild Pi Native Modules"
       }
     ],
     "keybindings": [
       {
-        "command": "pi-agent.focusChat",
+        "command": "oh-my-pi-chater.focusChat",
         "key": "ctrl+shift+l",
         "mac": "cmd+shift+l"
       },
       {
-        "command": "pi-agent.newChat",
+        "command": "oh-my-pi-chater.newChat",
         "key": "ctrl+shift+n",
         "mac": "cmd+shift+n"
       },
       {
-        "command": "pi-agent.abort",
+        "command": "oh-my-pi-chater.toggleDictation",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m"
+      },
+      {
+        "command": "oh-my-pi-chater.abort",
         "key": "escape",
-        "when": "pi-agent.isStreaming"
+        "when": "oh-my-pi-chater.isStreaming && !oh-my-pi-chater.tuiMode"
       }
     ],
     "configuration": {
-      "title": "vs-pi-agent",
+      "title": "Oh My Pi Chater",
       "properties": {
-        "pi-agent.cliPath": {
+        "oh-my-pi-chater.backend": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "omp",
+            "pi"
+          ],
+          "enumDescriptions": [
+            "Use omp (Oh My Pi) when found, otherwise pi",
+            "Oh My Pi: standalone binary, state in ~/.omp/agent",
+            "pi: Node CLI, state in ~/.pi/agent"
+          ],
+          "description": "Agent CLI family to run in RPC mode. Reload the window after changing."
+        },
+        "oh-my-pi-chater.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Path to pi CLI executable (default: auto-detect from PATH). Required: pi must be installed globally."
+          "description": "Path to the omp or pi executable (default: auto-detect from PATH). With backend \"auto\", a file named omp* selects omp."
         },
-        "pi-agent.nodePath": {
+        "oh-my-pi-chater.nodePath": {
           "type": "string",
           "default": "",
-          "description": "Path to Node.js binary used to run pi (default: node next to pi on PATH). Set this if native tools (memory_search) fail with NODE_MODULE_VERSION errors."
+          "description": "pi backend only: Node.js binary used to run pi (default: node next to pi on PATH). Set this if native tools (memory_search) fail with NODE_MODULE_VERSION errors."
         },
-        "pi-agent.thinkingLevel": {
+        "oh-my-pi-chater.thinkingLevel": {
           "type": "string",
           "default": "off",
           "enum": [
@@ -170,27 +178,69 @@
           ],
           "description": "Default thinking level for Pi agent responses"
         },
-        "pi-agent.autoApproveTools": {
+        "oh-my-pi-chater.autoApproveTools": {
           "type": "boolean",
           "default": false,
           "description": "Automatically approve tool executions without confirmation"
         },
-        "pi-agent.contextUsageWarningThreshold": {
+        "oh-my-pi-chater.showAllModels": {
+          "type": "boolean",
+          "default": false,
+          "description": "List every model the agent reports, including providers configured only via env vars or models.json/models.yml. Off: only providers you signed in to with /login (pi auth.json / omp credential store)."
+        },
+        "oh-my-pi-chater.favoriteModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Starred models (`provider/id`) offered by the model chip under the chat input. Star or unstar models with the ☆ button in the full model picker (status bar model button or /model)."
+        },
+        "oh-my-pi-chater.contextUsageWarningThreshold": {
           "type": "number",
           "default": 80,
           "minimum": 0,
           "maximum": 100,
           "description": "Show a warning when context usage exceeds this percentage of the context window"
         },
-        "pi-agent.promptRecommendedPackages": {
+        "oh-my-pi-chater.promptRecommendedPackages": {
           "type": "boolean",
           "default": true,
           "description": "When Pi CLI sync is on, prompt to install recommended Pi packages (~/.pi/agent) if they are missing."
         },
-        "pi-agent.autoInstallRecommendedPackages": {
+        "oh-my-pi-chater.autoInstallRecommendedPackages": {
           "type": "boolean",
           "default": false,
           "description": "Install recommended Pi packages automatically on startup without asking (requires network/npm)."
+        },
+        "oh-my-pi-chater.voice.sttUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Voice input: OpenAI-compatible speech-to-text endpoint, e.g. `http://127.0.0.1:8010/v1` (speaches / faster-whisper-server) or `https://api.openai.com/v1`. A bare host gets `/v1`; `/audio/transcriptions` is appended. Empty disables recording."
+        },
+        "oh-my-pi-chater.voice.sttModel": {
+          "type": "string",
+          "default": "",
+          "description": "Voice input: transcription model id. Empty uses the first model the server lists at /models."
+        },
+        "oh-my-pi-chater.voice.language": {
+          "type": "string",
+          "default": "",
+          "description": "Voice input: ISO-639-1 language hint (zh, en, …). Empty lets the model detect it per utterance."
+        },
+        "oh-my-pi-chater.voice.vadConfidence": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0.1,
+          "maximum": 0.95,
+          "description": "Voice input: Silero VAD speech probability threshold. Lower it (e.g. 0.35) if quiet speech is missed; raise it if background noise gets transcribed."
+        },
+        "oh-my-pi-chater.voice.vadStopSecs": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0.2,
+          "maximum": 3,
+          "description": "Voice input: pause (seconds) that ends an utterance and sends it to speech-to-text."
         }
       }
     }
@@ -199,8 +249,8 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "vscode:prepublish": "npm run compile",
-    "package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links",
-    "package:verify": "unzip -l vs-pi-agent-*.vsix | grep -E 'out/webview/styles|media/icons'",
+    "package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links --allow-missing-repository",
+    "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons'",
     "test": "vitest",
     "test:unit": "vitest run",
     "test:integration": "node out/test/integration/runTest.js",
@@ -215,8 +265,13 @@
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.100.0",
     "@vscode/test-electron": "^2.5.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.25.0",
     "mocha": "^11.0.0",
+    "onnxruntime-web": "^1.30.0",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   }

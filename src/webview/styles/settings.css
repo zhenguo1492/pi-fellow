@@ -33,16 +33,69 @@ body {
     padding: 24px 20px 48px;
 }
 
-.settings-header h1 {
+.settings-header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    gap: 16px;
+}
+
+.settings-title-group h1 {
     font-size: 20px;
     font-weight: 600;
     margin-bottom: 4px;
 }
 
+.backend-toggle-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.backend-toggle-label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.backend-segmented-control {
+    display: inline-flex;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px;
+}
+
+.backend-segment-btn {
+    padding: 3px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    font-weight: 500;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.backend-segment-btn:hover {
+    color: var(--fg);
+}
+
+.backend-segment-btn.active {
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+    font-weight: 600;
+}
+
 .settings-version {
     font-size: 11px;
     color: var(--muted);
-    margin-bottom: 12px;
+    margin-bottom: 4px;
 }
 
 /* Tab navigation */
@@ -207,6 +260,61 @@ body {
 }
 .setting-input:focus {
     border-color: var(--focus-border);
+}
+.setting-input--number {
+    width: 120px;
+}
+
+.setting-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+.setting-input-wrapper .setting-input {
+    flex: 1;
+}
+
+.stt-url-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.stt-url-icon[hidden],
+.stt-status-badge[hidden] {
+    display: none;
+}
+
+.stt-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 12px;
+    user-select: none;
+}
+
+.stt-status-badge--valid {
+    color: var(--success-fg, #73c991);
+    background: color-mix(in srgb, var(--success-fg, #73c991) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success-fg, #73c991) 32%, transparent);
+}
+
+.stt-test-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 5px 12px;
+    height: 30px;
+}
+
+.stt-guide-note {
+    margin-bottom: 16px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 .setting-select {

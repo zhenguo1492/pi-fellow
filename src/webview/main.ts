@@ -1,5 +1,6 @@
 import { marked } from 'marked';
 import type {
+    AgentBackend,
     ClientMessage,
     ServerMessage,
     SerializedAgentState,
@@ -14,11 +15,17 @@ import type {
     SessionTokenStats,
     PendingAttachmentPreview,
     ConnectionStatus,
+    TuiAuthCommand,
 } from '../shared/protocol';
 import { dismissExtensionUi, initExtensionUiHost, showExtensionUiRequest } from './extensionUi';
 import { isImageFilePath, parseUserMessageForDisplay } from '../shared/attachmentMessageDisplay';
 import { shouldHideMessageInChat, stripPlanContentForChatDisplay } from '../shared/planMessageFilter';
-import { renderComposerAttachmentChip, renderMessageAttachmentChip } from './attachmentChipHtml';
+import {
+    renderComposerAttachmentChip,
+    renderEditorContextChip,
+    renderMessageAttachmentChip,
+} from './attachmentChipHtml';
+import type { EditorContextInfo } from '../shared/editorContext';
 import { bindChatFileDrop } from './chatFileDrop';
 import {
     bindFileMentionMenu,
@@ -28,6 +35,17 @@ import {
     updateAtMenu,
 } from './fileMentionMenu';
 import { readImageFileAsItem } from './fileDropReaders';
+import { createToolView, installToolViewInteractions, toToolResult, updateToolView } from './toolView';
+import { bindModelPicker, setPickerCurrentModel, setPickerModels } from './modelPicker';
+import {
+    applyDictationLevel,
+    applyDictationStatus,
+    bindMicButton,
+    dictationStatusHtml,
+    insertDictatedText,
+    micButtonHtml,
+    setSttValid as setDictationSttValid,
+} from './dictation';
 
 import { vscode } from './vscodeApi';
 const iconsBaseUri = document.getElementById('app')?.dataset.iconsUri ?? '';
@@ -64,6 +82,10 @@ const state: {
     planMode: PlanModeInfo;
     piExtensionChrome?: PiExtensionChromeSnapshot;
     connectionStatus: ConnectionStatus;
+    activeBackend: AgentBackend;
+    availableBackends: AgentBackend[];
+    tuiMode: boolean;
+    tuiAuthPrompt?: TuiAuthCommand;
 } = {
     messages: [],
     isStreaming: false,
@@ -87,6 +109,17 @@ const state: {
     pendingAttachments: [],
     planMode: emptyPlanMode(),
     connectionStatus: { phase: 'idle' },
+    activeBackend: 'pi',
+    availableBackends: [],
+    tuiMode: false,
+};
+/** A queued steer keeps the prompt it arrived under, even when later turns start. */
+const steeringQueuesByTab = new Map<string, Array<{ text: string; turn: number }>>();
+
+/** Active editor file/selection pushed by the extension; shown as a toggle chip in the composer. */
+let editorContext: { context: EditorContextInfo | null; enabled: boolean } = {
+    context: null,
+    enabled: true,
 };
 
 function emptyPlanMode(): PlanModeInfo {
@@ -153,12 +186,16 @@ function renderMarkdown(text: string): string {
 }
 
 import { applySessionList, onAppShellRebuilt, requestSessionPanelToggle, setSessionPanelOpen } from './sessionPanel';
+import { applyTreePayload, setTreePanelOpen } from './treePanel';
+import { getTuiHost, markTuiExited, restoreTuiSnapshot, syncTuiView, writeTuiData } from './tuiView';
 
 // ── Message handling ──
 
 window.addEventListener('message', (event) => {
     handleMessage(event.data as ServerMessage);
 });
+
+installToolViewInteractions((filePath) => vscode.postMessage({ type: 'openFile', filePath }));
 
 function handleMessage(msg: ServerMessage): void {
     switch (msg.type) {
@@ -171,6 +208,10 @@ function handleMessage(msg: ServerMessage): void {
         case 'stateSync':
             applyStateSync(msg.state);
             break;
+        case 'editorContext':
+            editorContext = { context: msg.context, enabled: msg.enabled };
+            updateEditorContextBar();
+            break;
         case 'agentEvent':
             handleAgentEvent(msg.event);
             break;
@@ -181,6 +222,9 @@ function handleMessage(msg: ServerMessage): void {
                 addToRecentModels(msg.current.provider, msg.current.id, msg.current.name);
             }
             if (msg.thinkingLevel) state.thinkingLevel = msg.thinkingLevel;
+            setPickerModels(state.availableModels, msg.favorites);
+            if (msg.current) setPickerCurrentModel(state.model);
+            refreshWelcome();
             break;
         case 'fileChange':
             state.fileChanges.push(msg.change);
@@ -225,14 +269,41 @@ function handleMessage(msg: ServerMessage): void {
             }
             break;
         }
+        case 'dictationStatus':
+            applyDictationStatus(msg.status);
+            break;
+        case 'dictationText':
+            insertDictatedText(msg.text);
+            break;
+        case 'dictationLevel':
+            applyDictationLevel(msg.level);
+            break;
         case 'toast':
             showToast(msg.message, msg.variant === 'error' ? 'error' : 'info');
             break;
         case 'sessionPanel':
             setSessionPanelOpen(msg.open);
             break;
+        case 'sessionTree':
+            setTreePanelOpen(msg.open);
+            if (msg.data) {
+                applyTreePayload(msg.data);
+            }
+            break;
+        case 'imageFileData':
+            handleImageFileData(msg.requestId, msg.filePath, msg.dataUrl, msg.error);
+            break;
         case 'sessionList':
             applySessionList(msg.data);
+            break;
+        case 'tuiData':
+            writeTuiData(msg.tabId, msg.data);
+            break;
+        case 'tuiSnapshot':
+            restoreTuiSnapshot(msg.tabId, msg.data);
+            break;
+        case 'tuiExit':
+            markTuiExited(msg.tabId, msg.exitCode);
             break;
     }
 }
@@ -297,6 +368,17 @@ function applyStateSync(s: SerializedAgentState): void {
         (b as HTMLButtonElement).disabled = false;
     });
     state.connectionStatus = s.connectionStatus ?? { phase: 'idle' };
+    if (s.activeBackend) {
+        state.activeBackend = s.activeBackend;
+    }
+    if (s.availableBackends) {
+        state.availableBackends = s.availableBackends;
+    }
+    state.tuiMode = s.tuiMode ?? false;
+    state.tuiAuthPrompt = s.tuiAuthPrompt;
+    if (s.sttValid !== undefined) {
+        setDictationSttValid(Boolean(s.sttValid));
+    }
     const tabSwitched = prevTab !== state.activeTabId;
 
     if (tabSwitched || !skeletonBuilt) {
@@ -329,6 +411,63 @@ function applyStateSync(s: SerializedAgentState): void {
         }
         updateScrollButton();
     }
+    updateTuiAuthBanner();
+    setPickerCurrentModel(state.model);
+    updateBackendDropdown();
+    updateTuiToggle();
+    syncTuiView(state.tuiMode, state.tabs.map((t) => t.id), state.activeTabId);
+}
+
+/** Header toggle shows where a click goes: terminal icon in chat mode, chat icon in TUI mode. */
+function updateTuiToggle(): void {
+    const btn = document.getElementById('btn-tui');
+    const icon = btn?.querySelector('img');
+    if (!btn || !icon) return;
+    const label = state.tuiMode ? 'Switch to chat view' : 'Switch to terminal (TUI) view';
+    btn.title = label;
+    icon.alt = label;
+    icon.src = `${iconsBaseUri}/${state.tuiMode ? 'chat' : 'terminal'}.svg`;
+}
+
+let backendDropdownDismissBound = false;
+
+function setBackendDropdownOpen(open: boolean): void {
+    const menu = document.getElementById('backend-dropdown-menu');
+    const button = document.getElementById('btn-backend');
+    if (!menu || !button) return;
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    button.classList.toggle('active', open);
+}
+
+function updateBackendDropdown(): void {
+    const root = document.getElementById('backend-dropdown');
+    const btnText = document.getElementById('backend-btn-text');
+    const menu = document.getElementById('backend-dropdown-menu');
+    // A picker only makes sense when both CLIs are installed.
+    const backends = state.availableBackends;
+    if (root) {
+        root.style.display = backends.length > 1 ? '' : 'none';
+    }
+    if (backends.length <= 1) {
+        setBackendDropdownOpen(false);
+    }
+    if (btnText) {
+        btnText.textContent = state.activeBackend || 'omp';
+    }
+    if (menu) {
+        menu.innerHTML = backends
+            .map((b) => {
+                const isActive = b === state.activeBackend;
+                return `
+                    <button type="button" class="backend-dropdown-item${isActive ? ' active' : ''}" data-backend="${b}" role="menuitem">
+                        <span class="backend-item-label">${b}</span>
+                        <span class="backend-item-check">${isActive ? '✓' : ''}</span>
+                    </button>
+                `;
+            })
+            .join('');
+    }
 }
 
 function handleAgentEvent(event: any): void {
@@ -337,6 +476,10 @@ function handleAgentEvent(event: any): void {
             const msg = event.message;
             if (msg?.role === 'user') {
                 appendUserMessageImmediate(msg);
+            } else if (msg?.role === 'assistant') {
+                // Each assistant message is one step: its own thinking/text, placed after the
+                // previous step's tool cards.
+                resetStreamingMessage();
             }
             break;
         }
@@ -360,12 +503,7 @@ function handleAgentEvent(event: any): void {
             break;
         case 'message_end':
             if (event.message?.role === 'assistant') {
-                syncThinkingFromAssistantMessage(event.message);
-                if (event.message.stopReason === 'toolUse') {
-                    state.streamingThinking = '';
-                    state.isThinking = false;
-                }
-                scheduleStreamingRender();
+                commitStreamedAssistantMessage(event.message);
             }
             break;
         case 'context_usage':
@@ -380,10 +518,7 @@ function handleAgentEvent(event: any): void {
         case 'agent_start':
             state.connectionStatus = { phase: 'idle' };
             state.isStreaming = true;
-            state.streamingText = '';
-            state.streamingThinking = '';
-            state.isThinking = false;
-            streamingThinkingUserOpen = false;
+            resetStreamingMessage();
             clearStreamingToolArtifacts();
             setStreamPhase('waiting');
             userHasScrolled = false;
@@ -409,9 +544,7 @@ function handleAgentEvent(event: any): void {
                 );
                 state.connectionStatus = failed ?? { phase: 'idle' };
                 state.isStreaming = false;
-                state.streamingText = '';
-                state.streamingThinking = '';
-                state.isThinking = false;
+                resetStreamingMessage();
                 setStreamPhase('idle');
                 if (failed?.message) {
                     showError(failed.message);
@@ -464,10 +597,12 @@ function handleAgentEvent(event: any): void {
                 updateConnectionBanner();
             }
             break;
-        case 'tool_execution_start':
-            setStreamPhase('tool', event.toolName ?? 'tool');
+        case 'tool_execution_start': {
+            const label = getToolLabel(event.toolName ?? 'tool', event.args);
+            setStreamPhase('tool', label);
             renderToolStart(event);
             break;
+        }
         case 'tool_execution_update':
             renderToolUpdate(event);
             break;
@@ -493,10 +628,12 @@ function handleStreamingDelta(ae: any): void {
             }
             state.thinkingStartTime = Date.now();
             state.streamingThinkingDuration = 0;
+            streamingThinkingUserCollapsed = false;
             setStreamPhase('thinking');
             break;
         case 'thinking_delta':
             state.streamingThinking += ae.delta ?? '';
+            state.isThinking = true;
             setStreamPhase('thinking');
             break;
         case 'thinking_end':
@@ -520,8 +657,8 @@ function handleStreamingDelta(ae: any): void {
 }
 
 let streamRenderPending = false;
-/** User expanded streaming thinking — preserve across delta re-renders. */
-let streamingThinkingUserOpen = false;
+/** User collapsed the live thinking box — kept across delta re-renders and into history. */
+let streamingThinkingUserCollapsed = false;
 
 type StreamPhase = 'idle' | 'thinking' | 'tool' | 'writing' | 'waiting';
 let streamPhase: StreamPhase = 'idle';
@@ -548,13 +685,42 @@ function streamActivityLabel(): string {
     }
 }
 
-function streamingThinkingBlockVisible(): boolean {
-    const streamingThinkingText = state.streamingThinking.trim();
-    return (
-        state.isStreaming &&
-        (state.isThinking || Boolean(streamingThinkingText)) &&
-        !assistantMessageAlreadyShowsThinking(streamingThinkingText)
-    );
+/** Drop the in-progress assistant message (live thinking/text); tool cards are untouched. */
+function resetStreamingMessage(): void {
+    state.streamingText = '';
+    state.streamingThinking = '';
+    state.isThinking = false;
+    state.thinkingStartTime = 0;
+    state.streamingThinkingDuration = 0;
+    streamingThinkingUserCollapsed = false;
+    document.querySelector('#streaming-message > .message.message-assistant')?.remove();
+}
+
+/**
+ * A finished assistant message leaves the live area and joins the history at its chronological
+ * position, so the next step's tool cards and thinking render below it. The following stateSync
+ * replaces it with the authoritative copy.
+ */
+function commitStreamedAssistantMessage(msg: Record<string, unknown>): void {
+    if (state.thinkingStartTime > 0 && !state.streamingThinkingDuration) {
+        state.streamingThinkingDuration = Math.round((Date.now() - state.thinkingStartTime) / 1000);
+    }
+    const last = state.messages[state.messages.length - 1];
+    let index = state.messages.length - 1;
+    if (!(last?.role === 'assistant' && messageFingerprint(last) === messageFingerprint(msg))) {
+        const committed = { ...msg };
+        if (state.streamingThinkingDuration > 0) {
+            committed._thinkingDurationSec = state.streamingThinkingDuration;
+        }
+        state.messages.push(committed);
+        index = state.messages.length - 1;
+    }
+    if (streamingThinkingUserCollapsed) {
+        thinkingOpenByKey.set(`${index}:0`, false);
+    }
+    resetStreamingMessage();
+    updateMessages();
+    setStreamPhase('waiting');
 }
 
 function updateStreamActivityBar(): void {
@@ -567,7 +733,9 @@ function updateStreamActivityBar(): void {
     const active = state.isStreaming;
     // Live reasoning uses the expandable thinking block; hide the duplicate status pill.
     const hideForThinkingBlock =
-        streamingThinkingBlockVisible() && streamPhase === 'thinking';
+        state.isStreaming &&
+        (state.isThinking || Boolean(state.streamingThinking.trim())) &&
+        streamPhase === 'thinking';
     container.classList.toggle('streaming-active', active);
     bar.classList.toggle('stream-activity--idle', !active || hideForThinkingBlock);
     bar.classList.toggle('stream-activity--thinking', streamPhase === 'thinking');
@@ -629,7 +797,7 @@ function appendUserMessageImmediate(msg: any): void {
     if (last && messageFingerprint(last) === fp) {
         return;
     }
-    if (last?._optimistic && last.role === 'user' && extractText(last) === extractText(msg)) {
+    if (last?._optimistic && last.role === 'user' && msg?.steering !== true && extractText(last) === extractText(msg)) {
         state.messages[state.messages.length - 1] = msg;
         updateMessages();
         return;
@@ -659,14 +827,23 @@ function appendChatMessageDom(msg: any, index: number): void {
     welcome?.remove();
     let userMsgCount = 0;
     for (let i = 0; i <= index && i < state.messages.length; i++) {
-        if (state.messages[i]?.role === 'user') {
+        if (isTurnPrompt(state.messages[i])) {
             userMsgCount++;
         }
     }
-    const turnNumber = msg.role === 'user' ? userMsgCount : undefined;
+    const turnNumber = isTurnPrompt(msg) ? userMsgCount : undefined;
     const msgEl = renderMessage(msg, index, turnNumber);
 
-    if (msg.role === 'user') {
+    if (msg.role === 'user' && msg.steering === true) {
+        const turns = container.querySelectorAll('.chat-turn');
+        const lastTurn = turns[turns.length - 1] as HTMLElement | undefined;
+        const prompt = lastTurn?.querySelector('.message-group-user');
+        if (prompt) {
+            prompt.appendChild(msgEl);
+        } else {
+            container.insertBefore(msgEl, streamingEl);
+        }
+    } else if (msg.role === 'user') {
         const turn = el('div', 'chat-turn');
         const turnBody = el('div', 'chat-turn-body');
         turn.appendChild(msgEl);
@@ -684,12 +861,14 @@ function appendChatMessageDom(msg: any, index: number): void {
     }
 
     markLatestUserMessageGroup();
+    if (isTurnPrompt(msg)) {
+        updatePendingMessagesInChat();
+    }
     bindUserPromptStickyCollapse();
     bindCopyButtons();
     bindCheckpointButtons();
     bindRedoButtons();
     bindDiffButtons();
-    bindToolClickable();
     bindAttachmentOpenClicks();
     bindMessageActionButtons();
 }
@@ -697,6 +876,11 @@ function appendChatMessageDom(msg: any, index: number): void {
 // ── Rendering ──
 
 let skeletonBuilt = false;
+const TAB_MIN_VISIBLE_WIDTH = 112;
+let visibleTabCapacity = Number.POSITIVE_INFINITY;
+let tabLayoutObserver: ResizeObserver | undefined;
+let tabLayoutFrame = 0;
+let tabOverflowDismissBound = false;
 
 function render(): void {
     const app = document.getElementById('app')!;
@@ -707,6 +891,19 @@ function render(): void {
     const header = el('div', 'header');
     const tabStrip = el('div', 'tab-strip');
     header.appendChild(tabStrip);
+
+    const tabOverflow = el('div', 'tab-overflow');
+    tabOverflow.id = 'tab-overflow';
+    tabOverflow.hidden = true;
+    tabOverflow.innerHTML = `
+        <button type="button" class="tab-overflow-btn" id="btn-tab-overflow" title="All conversations" aria-label="Choose conversation" aria-haspopup="menu" aria-expanded="false">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 5.5l5 5 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="tab-overflow-count" aria-hidden="true"></span>
+        </button>
+        <div class="tab-overflow-menu" id="tab-overflow-menu" role="menu" hidden></div>
+    `;
+    header.appendChild(tabOverflow);
+
     const modeSwitch = el('div', 'mode-switch');
     modeSwitch.id = 'mode-switch';
     header.appendChild(modeSwitch);
@@ -714,11 +911,21 @@ function render(): void {
     const headerActions = el('div', 'header-right');
     headerActions.innerHTML = `
         <button class="icon-btn" id="btn-new-tab" title="New Agent"><img class="header-icon-img" src="${iconsBaseUri}/new.svg" alt="new"></button>
-        <button class="icon-btn" id="btn-sessions" title="Resume session"><img class="header-icon-img" src="${iconsBaseUri}/list.svg" alt="resume session"></button>
+        <div class="backend-dropdown" id="backend-dropdown">
+            <button type="button" class="backend-dropdown-btn" id="btn-backend" title="Agent Backend (omp / pi)" aria-haspopup="menu" aria-expanded="false">
+                <span class="backend-btn-text" id="backend-btn-text">${state.activeBackend || 'omp'}</span>
+                <svg class="dropdown-chevron" width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 5.5l5 5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="backend-dropdown-menu" id="backend-dropdown-menu" role="menu" hidden></div>
+        </div>
+        <button class="icon-btn" id="btn-tui"><img class="header-icon-img" alt=""></button>
+        <button class="icon-btn" id="btn-sessions" title="Resume session"><img class="header-icon-img" src="${iconsBaseUri}/history.svg" alt="resume session"></button>
         <button class="icon-btn" id="btn-settings" title="Settings"><img class="header-icon-img" src="${iconsBaseUri}/settings.svg" alt="settings"></button>
     `;
     header.appendChild(headerActions);
+    updateBackendDropdown();
     app.appendChild(header);
+    app.appendChild(getTuiHost());
 
     // Messages container (persistent, children managed by updateMessages)
     const messagesContainer = el('div', 'messages');
@@ -776,6 +983,12 @@ function render(): void {
     atMenu.id = 'at-menu';
     atMenu.style.display = 'none';
     inputContainer.appendChild(atMenu);
+    const modelPicker = el('div', 'model-picker');
+    modelPicker.id = 'model-picker';
+    modelPicker.hidden = true;
+    modelPicker.innerHTML =
+        '<div id="model-list" class="model-list" role="listbox" aria-label="Favorite models" tabindex="-1"></div>';
+    inputContainer.appendChild(modelPicker);
     const attachmentsStrip = el('div', 'attachments-strip');
     attachmentsStrip.id = 'attachments-strip';
     attachmentsStrip.style.display = 'none';
@@ -788,6 +1001,18 @@ function render(): void {
     composerEditBanner.id = 'composer-edit-banner';
     composerEditBanner.style.display = 'none';
     inputContainer.appendChild(composerEditBanner);
+    const editorContextBar = el('div', 'editor-context-bar');
+    editorContextBar.id = 'editor-context-bar';
+    editorContextBar.style.display = 'none';
+    editorContextBar.addEventListener('click', (e) => {
+        if (!(e.target as HTMLElement).closest('.editor-context-chip')) {
+            return;
+        }
+        editorContext = { ...editorContext, enabled: !editorContext.enabled };
+        updateEditorContextBar();
+        vscode.postMessage({ type: 'setEditorContextEnabled', enabled: editorContext.enabled });
+    });
+    inputContainer.appendChild(editorContextBar);
     const area = el('div', 'input-area');
     area.innerHTML = `
         <div class="composer-toolbar">
@@ -797,7 +1022,7 @@ function render(): void {
                 </button>
             </div>
             <textarea id="input" placeholder="Ask Pi anything..." rows="1"></textarea>
-            <div class="composer-toolbar-right">
+            <div class="composer-toolbar-right">${micButtonHtml}
                 <button id="btn-steer" class="composer-action-btn composer-action-btn--ghost" type="button" title="Steer (Ctrl+Enter)" hidden>
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </button>
@@ -806,12 +1031,19 @@ function render(): void {
                     <span class="composer-btn-icon composer-btn-icon--stop" aria-hidden="true" hidden><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg></span>
                 </button>
             </div>
+        </div>
+        <div class="composer-footer">
+            <button id="btn-model" class="composer-model-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
+                <span class="composer-model-label" id="model-chip-label"></span>
+                <svg class="dropdown-chevron" width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 10.5l5-5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>${dictationStatusHtml}
         </div>`;
     inputContainer.appendChild(area);
     app.appendChild(inputContainer);
 
     // Bind stable event listeners (these elements persist for the lifetime of the skeleton)
     bindStableEvents();
+    initTabLayoutObserver();
     initExtensionUiHost();
     bindScrollListener();
     scrollBtn.addEventListener('click', () => {
@@ -830,14 +1062,24 @@ function render(): void {
     updatePlanPanel();
     updateMessages();
     updateInputArea();
+    updateEditorContextBar();
         updateConnectionBanner();
         updateChangedFiles();
         scrollToBottom();
+        updateTuiToggle();
 }
 
 function updateModeSwitch(): void {
     const root = document.getElementById('mode-switch');
     if (!root) return;
+
+    // Plan mode is the pi-plan-mode extension; omp's RPC mode has no plan-mode control.
+    if (state.activeBackend !== 'pi') {
+        root.style.display = 'none';
+        root.innerHTML = '';
+        return;
+    }
+    root.style.display = '';
 
     const pm = state.planMode ?? emptyPlanMode();
     const active = pm.enabled ? 'plan' : 'agent';
@@ -893,8 +1135,9 @@ function updatePlanPanel(): void {
     const widgetLines = planWidget?.lines?.filter((l) => l.trim()) ?? [];
     const planStatus = chrome?.statuses.find((s) => s.key === 'plan-mode')?.text?.trim();
 
-    const showHint = pm.enabled && !pm.hasPlan && !state.isStreaming;
-    const showWidget = pm.enabled && widgetLines.length > 0;
+    const planSupported = state.activeBackend === 'pi';
+    const showHint = planSupported && pm.enabled && !pm.hasPlan && !state.isStreaming;
+    const showWidget = planSupported && pm.enabled && widgetLines.length > 0;
 
     if (!showHint && !showWidget) {
         panel.style.display = 'none';
@@ -1085,24 +1328,31 @@ function updateMessages(): void {
     const container = document.getElementById('messages');
     if (!container) return;
 
-    captureThinkingOpenState();
+    // The rebuild below tears down and recreates every history node; a layout
+    // mid-rebuild clamps scrollTop to the half-built height. Pin the viewport.
+    const followBottom = !userHasScrolled && isNearBottom();
+    const prevScrollTop = container.scrollTop;
+
+    const thinkingScroll = captureThinkingViewState();
     captureToolsOpenState();
 
     const streamingEl = document.getElementById('streaming-message');
     const spacerEl = container.querySelector('.messages-spacer');
 
-    // Remove message nodes only (keep pending steering/follow-up strip).
+    // Remove history nodes only (keep the follow-up strip at the transcript end).
     for (const child of [...container.childNodes]) {
         if (child === streamingEl || child === spacerEl) {
             break;
         }
-        if ((child as HTMLElement).id === 'pending-messages') {
+        const childId = (child as HTMLElement).id;
+        if (childId === 'pending-messages' || childId === 'tui-auth-banner') {
             continue;
         }
         container.removeChild(child);
     }
 
     codeBlockId = 0;
+    let liveThinkKey: string | null = null;
 
     if (state.messages.length === 0 && !state.isStreaming) {
         container.insertBefore(buildWelcome(), streamingEl);
@@ -1111,49 +1361,32 @@ function updateMessages(): void {
         const rollbackUserIdx = state.rollbackPoint;
         let dimming = false;
         let redoPlaced = false;
-        let currentTurn: HTMLElement | null = null;
+        let turnPrompt: HTMLElement | null = null;
         let turnBody: HTMLElement | null = null;
-        let turnThinkingParts: string[] = [];
-        let turnThinkingDurationSec = 0;
-        let turnUserMsgCount = 0;
-        let turnToolItems: Array<{ msg: any; index: number }> = [];
+        let lastAssistantIndex = -1;
+        // Tool results between two assistant messages: the tools one reasoning step called.
+        let stepTools: ToolStepItem[] = [];
 
-        const flushTurnTools = (completedTurn = false): void => {
-            if (!turnBody || turnToolItems.length === 0) {
-                if (completedTurn) {
-                    turnToolItems = [];
-                }
-                return;
+        const appendToChat = (node: HTMLElement): void => {
+            if (dimming) {
+                node.classList.add('dimmed');
             }
-            if (completedTurn || !state.isStreaming) {
-                turnBody
-                    .querySelector(`details.tools-block[data-tools-key="turn:${turnUserMsgCount}"]`)
-                    ?.remove();
-                turnBody.appendChild(
-                    buildMergedToolsBlock(turnToolItems, state.messages, turnUserMsgCount),
-                );
-                turnToolItems = [];
+            if (turnBody) {
+                turnBody.appendChild(node);
+            } else {
+                container.insertBefore(node, streamingEl);
             }
         };
 
-        const flushTurnThinking = (completedTurn = false): void => {
-            if (!turnBody || turnThinkingParts.length === 0) {
-                if (completedTurn) {
-                    turnThinkingParts = [];
-                    turnThinkingDurationSec = 0;
-                }
+        const flushStepTools = (live: boolean): void => {
+            if (stepTools.length === 0) {
                 return;
             }
-            if (completedTurn || !state.isStreaming) {
-                prependMergedTurnThinking(
-                    turnBody,
-                    turnThinkingParts,
-                    turnThinkingDurationSec,
-                    `turn:${turnUserMsgCount}`,
-                );
-                turnThinkingParts = [];
-                turnThinkingDurationSec = 0;
+            appendToChat(buildStepToolsBlock(stepTools, state.messages, live));
+            for (const item of stepTools) {
+                removeLiveToolArtifacts(item.msg.toolCallId ?? item.msg.tool_call_id ?? '');
             }
+            stepTools = [];
         };
 
         for (let i = 0; i < state.messages.length; i++) {
@@ -1163,19 +1396,33 @@ function updateMessages(): void {
             }
             const role = msg.role ?? 'unknown';
 
+            if (role === 'toolResult' || role === 'tool') {
+                stepTools.push({ msg, index: i });
+                continue;
+            }
+            if (role === 'user' && msg.steering === true) {
+                flushStepTools(false);
+                const steeringEl = renderMessage(msg, i);
+                if (turnPrompt) {
+                    turnPrompt.appendChild(steeringEl);
+                } else {
+                    appendToChat(steeringEl);
+                }
+                continue;
+            }
             if (role === 'user') {
-                flushTurnTools(true);
-                flushTurnThinking(true);
+                flushStepTools(false);
+
                 userMsgCount++;
-                turnUserMsgCount = userMsgCount;
                 if (rollbackUserIdx !== null && userMsgCount > rollbackUserIdx) {
                     dimming = true;
                 }
 
-                currentTurn = el('div', 'chat-turn');
+                const currentTurn = el('div', 'chat-turn');
                 turnBody = el('div', 'chat-turn-body');
 
                 const msgEl = renderMessage(msg, i, userMsgCount);
+                turnPrompt = msgEl;
                 if (dimming) {
                     msgEl.classList.add('dimmed');
                 }
@@ -1195,57 +1442,21 @@ function updateMessages(): void {
                 continue;
             }
 
-            if (role === 'toolResult' || role === 'tool') {
-                const toolName = msg.toolName ?? '';
-                if (toolName === 'edit' || toolName === 'write') {
-                    const matchingChange = findFileChangeForToolResult(msg);
-                    if (matchingChange) {
-                        if (!state.isStreaming) {
-                            const diffEl = buildDiffCard(matchingChange, msg);
-                            if (dimming) {
-                                diffEl.classList.add('dimmed');
-                            }
-                            if (turnBody) {
-                                turnBody.appendChild(diffEl);
-                            } else {
-                                container.insertBefore(diffEl, streamingEl);
-                            }
-                        }
-                        continue;
-                    }
-                }
-                turnToolItems.push({ msg, index: i });
+            if (role === 'assistant') {
+                lastAssistantIndex = i;
+            }
+            const msgEl = renderMessage(msg, i);
+            // A step with no thinking/text (tool calls only) must not split the tool list.
+            if (msgEl.hidden) {
                 continue;
             }
-
-            if (turnBody && role === 'assistant') {
-                const think = extractThinking(msg).trim();
-                if (think) {
-                    turnThinkingParts.push(think);
-                }
-                if (msg._thinkingDurationSec) {
-                    turnThinkingDurationSec += msg._thinkingDurationSec;
-                }
-            }
-
-            const msgEl = renderMessage(
-                msg,
-                i,
-                undefined,
-                turnBody ? { suppressThinking: true } : undefined,
-            );
-            if (dimming) {
-                msgEl.classList.add('dimmed');
-            }
-
-            if (turnBody) {
-                turnBody.appendChild(msgEl);
-            } else {
-                container.insertBefore(msgEl, streamingEl);
-            }
+            flushStepTools(false);
+            appendToChat(msgEl);
         }
-        flushTurnTools(!state.isStreaming);
-        flushTurnThinking(!state.isStreaming);
+        flushStepTools(state.isStreaming);
+        if (state.isStreaming && lastAssistantIndex >= 0) {
+            liveThinkKey = `${lastAssistantIndex}:0`;
+        }
     }
 
     if (!state.isStreaming) {
@@ -1259,15 +1470,108 @@ function updateMessages(): void {
     bindCheckpointButtons();
     bindRedoButtons();
     bindDiffButtons();
-    bindToolClickable();
     bindAttachmentOpenClicks();
     bindMessageActionButtons();
-
     const pendingEl = document.getElementById('pending-messages');
     if (pendingEl && streamingEl && pendingEl.nextSibling !== streamingEl) {
         container.insertBefore(pendingEl, streamingEl);
     }
     updatePendingMessagesInChat();
+    restoreThinkingScroll(thinkingScroll, liveThinkKey);
+    jumpMessagesScroll(container, followBottom ? container.scrollHeight : prevScrollTop);
+    updateTuiAuthBanner();
+}
+
+function tabsForVisibleCapacity(): TabInfo[] {
+    if (state.tabs.length <= visibleTabCapacity) {
+        return state.tabs;
+    }
+
+    const capacity = Math.max(1, Math.floor(visibleTabCapacity));
+    const activeIndex = Math.max(0, state.tabs.findIndex((tab) => tab.id === state.activeTabId));
+    const beforeActive = Math.floor((capacity - 1) / 2);
+    const start = Math.max(0, Math.min(activeIndex - beforeActive, state.tabs.length - capacity));
+    return state.tabs.slice(start, start + capacity);
+}
+
+function setTabOverflowOpen(open: boolean): void {
+    const menu = document.getElementById('tab-overflow-menu');
+    const button = document.getElementById('btn-tab-overflow');
+    if (!menu || !button) return;
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    button.classList.toggle('active', open);
+}
+
+function updateTabOverflowMenu(hasOverflow: boolean): void {
+    const root = document.getElementById('tab-overflow');
+    const menu = document.getElementById('tab-overflow-menu');
+    const count = root?.querySelector('.tab-overflow-count');
+    if (!root || !menu || !count) return;
+
+    root.hidden = !hasOverflow;
+    count.textContent = String(state.tabs.length);
+    if (!hasOverflow) {
+        setTabOverflowOpen(false);
+        menu.innerHTML = '';
+        return;
+    }
+
+    menu.innerHTML = '';
+    for (const tab of state.tabs) {
+        const item = el('button', `tab-overflow-item${tab.isActive ? ' active' : ''}`) as HTMLButtonElement;
+        item.type = 'button';
+        item.dataset.tabId = tab.id;
+        item.setAttribute('role', 'menuitem');
+        item.title = tab.name;
+
+        const status = el('span', 'tab-overflow-item-status');
+        if (tab.isStreaming) {
+            status.innerHTML = '<span class="tab-spinner"></span>';
+        } else if (tab.hasNotification) {
+            status.innerHTML = `<img class="tab-icon-img" src="${iconsBaseUri}/notification.svg" alt="notification">`;
+        } else {
+            status.innerHTML = `<img class="tab-icon-img" src="${iconsBaseUri}/chat.svg" alt="chat">`;
+        }
+        const label = el('span', 'tab-overflow-item-label');
+        label.textContent = tab.name;
+        const marker = el('span', 'tab-overflow-item-marker');
+        marker.textContent = tab.isActive ? '✓' : '';
+        item.append(status, label, marker);
+        menu.appendChild(item);
+    }
+}
+
+function recalculateTabCapacity(): void {
+    const header = document.querySelector('.header') as HTMLElement | null;
+    const modeSwitch = document.getElementById('mode-switch');
+    const headerActions = document.querySelector('.header-right') as HTMLElement | null;
+    if (!header || !modeSwitch || !headerActions) return;
+
+    const fixedWidth = modeSwitch.offsetWidth + headerActions.offsetWidth + 24;
+    const withoutOverflow = Math.max(0, header.clientWidth - fixedWidth);
+    let nextCapacity = Math.max(1, Math.floor(withoutOverflow / TAB_MIN_VISIBLE_WIDTH));
+    if (state.tabs.length > nextCapacity) {
+        nextCapacity = Math.max(1, Math.floor((withoutOverflow - 34) / TAB_MIN_VISIBLE_WIDTH));
+    }
+    if (nextCapacity === visibleTabCapacity) return;
+    visibleTabCapacity = nextCapacity;
+    updateTabs();
+}
+
+function scheduleTabCapacityUpdate(): void {
+    cancelAnimationFrame(tabLayoutFrame);
+    tabLayoutFrame = requestAnimationFrame(recalculateTabCapacity);
+}
+
+function initTabLayoutObserver(): void {
+    tabLayoutObserver?.disconnect();
+    tabLayoutObserver = new ResizeObserver(scheduleTabCapacityUpdate);
+    const header = document.querySelector('.header');
+    const modeSwitch = document.getElementById('mode-switch');
+    if (header) tabLayoutObserver.observe(header);
+    if (modeSwitch) tabLayoutObserver.observe(modeSwitch);
+    scheduleTabCapacityUpdate();
 }
 
 function updateTabs(): void {
@@ -1275,7 +1579,9 @@ function updateTabs(): void {
     if (!tabStrip) return;
     tabStrip.innerHTML = '';
 
-    for (const tab of state.tabs) {
+    const visibleTabs = tabsForVisibleCapacity();
+    const hasOverflow = visibleTabs.length < state.tabs.length;
+    for (const tab of visibleTabs) {
         const tabEl = el('div', `tab${tab.isActive ? ' tab-active' : ''}${tab.isStreaming ? ' tab-streaming' : ''}`);
         tabEl.dataset.tabId = tab.id;
 
@@ -1309,7 +1615,9 @@ function updateTabs(): void {
         tabStrip.appendChild(tabEl);
     }
 
+    updateTabOverflowMenu(hasOverflow);
     bindTabEvents();
+    scheduleTabCapacityUpdate();
 }
 
 function hasSendableInput(text: string): boolean {
@@ -1345,6 +1653,19 @@ function updateAttachmentsStrip(): void {
     });
 
     bindAttachmentOpenClicks();
+}
+
+function updateEditorContextBar(): void {
+    const bar = document.getElementById('editor-context-bar');
+    if (!bar) return;
+    const { context, enabled } = editorContext;
+    if (!context) {
+        bar.style.display = 'none';
+        bar.innerHTML = '';
+        return;
+    }
+    bar.style.display = '';
+    bar.innerHTML = renderEditorContextChip(context, enabled, escHtml, escAttr);
 }
 
 function updateComposerToolbar(): void {
@@ -1681,52 +2002,104 @@ function updatePendingMessagesInChat(): void {
 
     const steering = state.steeringMessages ?? [];
     const followUp = state.followUpMessages ?? [];
-    if (steering.length === 0 && followUp.length === 0) {
-        container.innerHTML = '';
-        container.style.display = 'none';
-        return;
+    const prompts = document.querySelectorAll('.message-group-user');
+    const previous = steeringQueuesByTab.get(state.activeTabId) ?? [];
+    // The RPC queue consumes from the front and appends at the back. Preserve ownership
+    // for the overlapping suffix/prefix; only newly appended entries use the current prompt.
+    let retained = Math.min(previous.length, steering.length);
+    while (retained > 0) {
+        let matches = true;
+        for (let i = 0; i < retained; i++) {
+            if (previous[previous.length - retained + i].text !== steering[i]) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) break;
+        retained--;
+    }
+    previous.splice(0, previous.length - retained);
+    for (let i = retained; i < steering.length; i++) {
+        previous.push({ text: steering[i], turn: prompts.length - 1 });
+    }
+    if (previous.length > 0) {
+        steeringQueuesByTab.set(state.activeTabId, previous);
+    } else {
+        steeringQueuesByTab.delete(state.activeTabId);
     }
 
-    container.style.display = '';
-    const rows: string[] = [];
-    for (const text of steering) {
-        rows.push(
-            `<div class="pending-message pending-message--steer">
-                <span class="pending-message-indicator" aria-hidden="true"></span>
-                <span class="pending-message-label">Steering</span>
-                <span class="pending-message-text">${escHtml(text)}</span>
-            </div>`,
-        );
+    document.querySelectorAll('.pending-messages--queued').forEach((node) => node.remove());
+    container.innerHTML = followUp.map((text) =>
+        `<div class="pending-message pending-message--followup">
+            <span class="pending-message-indicator" aria-hidden="true"></span>
+            <span class="pending-message-label">Follow-up</span>
+            <span class="pending-message-text">${escHtml(parseUserMessageForDisplay(text).displayText || text)}</span>
+        </div>`,
+    ).join('');
+
+    const byTurn = new Map<number, string[]>();
+    for (const { text, turn } of previous) {
+        const rows = byTurn.get(turn) ?? [];
+        rows.push(`<div class="pending-message pending-message--steer">
+            <span class="pending-message-indicator" aria-hidden="true"></span>
+            <span class="pending-message-label">Steering</span>
+            <span class="pending-message-text">${escHtml(parseUserMessageForDisplay(text).displayText || text)}</span>
+        </div>`);
+        byTurn.set(turn, rows);
     }
-    for (const text of followUp) {
-        rows.push(
-            `<div class="pending-message pending-message--followup">
-                <span class="pending-message-indicator" aria-hidden="true"></span>
-                <span class="pending-message-label">Follow-up</span>
-                <span class="pending-message-text">${escHtml(text)}</span>
-            </div>`,
-        );
+    let hasUnanchoredSteering = false;
+    for (const [turn, rows] of byTurn) {
+        const steeringEl = el('div', 'pending-messages pending-messages--steering pending-messages--queued');
+        steeringEl.innerHTML = rows.join('');
+        if (prompts[turn]) {
+            prompts[turn].appendChild(steeringEl);
+        } else {
+            hasUnanchoredSteering = true;
+            container.prepend(steeringEl);
+        }
     }
-    container.innerHTML = rows.join('');
-    if (!userHasScrolled) {
+
+    container.style.display = followUp.length > 0 || hasUnanchoredSteering ? '' : 'none';
+    if (!userHasScrolled && (steering.length > 0 || followUp.length > 0)) {
         scrollToBottom();
     }
 }
 
 function buildWelcome(): HTMLElement {
     const w = el('div', 'welcome');
+    const isOmp = state.activeBackend === 'omp';
+    const backendLabel = isOmp ? 'OMP' : 'Pi';
+    const planHint = isOmp
+        ? '<div class="welcome-hint">Plan mode is TUI-only on OMP: run <kbd>omp</kbd> in a terminal, then <kbd>Alt+Shift+P</kbd></div>'
+        : '';
+    const model = state.model;
+    const modelName = model ? escHtml(model.name || model.id) : '<span class="welcome-meta-empty">Not set</span>';
+    const modelTitle = model ? ` title="${escAttr(model.id)}"` : '';
+    const provider = model?.provider ? escHtml(model.provider) : '<span class="welcome-meta-empty">—</span>';
     w.innerHTML = `
         <div class="welcome-icon">&pi;</div>
-        <div class="welcome-title">vs-pi-agent</div>
-        <div class="welcome-subtitle">Ask anything. Pi can read, write, and execute code for you.</div>
+        <div class="welcome-title">Oh My Pi Chater</div>
+        <div class="welcome-subtitle">Ask anything. ${backendLabel} can read, write, and execute code for you.</div>
+        <dl class="welcome-meta">
+            <dt>Agent</dt><dd><span class="welcome-backend-badge welcome-backend-badge--${state.activeBackend}">${backendLabel}</span></dd>
+            <dt>Model</dt><dd${modelTitle}>${modelName}</dd>
+            <dt>Provider</dt><dd>${provider}</dd>
+        </dl>
         <div class="welcome-hints">
             <div class="welcome-hint">Type a message to start</div>
             <div class="welcome-hint"><kbd>Ctrl+Shift+L</kbd> Focus chat</div>
             <div class="welcome-hint"><kbd>Ctrl+Shift+N</kbd> New session</div>
             <div class="welcome-hint"><kbd>Enter</kbd> Send · while running, <kbd>Enter</kbd> queue · ↑ interrupt</div>
+            ${planHint}
         </div>
     `;
     return w;
+}
+
+/** Model info arrives outside stateSync; swap the welcome in place so it never shows a stale model. */
+function refreshWelcome(): void {
+    const current = document.querySelector('#messages > .welcome');
+    current?.replaceWith(buildWelcome());
 }
 
 // ── Changed Files section ──
@@ -1769,6 +2142,7 @@ function buildChangedFilesSection(): HTMLElement {
         <span class="changed-files-spacer"></span>
         ${undoRedoBtn}
         <button class="changed-files-review-btn" id="btn-review-all" title="Review all changes">Review</button>
+        <button class="changed-files-dismiss" id="btn-dismiss-changes" title="Dismiss (keep changes)" aria-label="Dismiss">&#10005;</button>
     `;
     details.appendChild(summary);
 
@@ -1826,7 +2200,7 @@ function updateChangedFiles(): void {
         e.preventDefault();
         let lastUserTurn = 0;
         for (const msg of state.messages) {
-            if ((msg.role ?? 'unknown') === 'user') lastUserTurn++;
+            if (isTurnPrompt(msg)) lastUserTurn++;
         }
         if (lastUserTurn < 1) return;
         vscode.postMessage({
@@ -1859,6 +2233,12 @@ function updateChangedFiles(): void {
                 vscode.postMessage({ type: 'openDiff', filePath: change.filePath, toolCallId: change.toolCallId });
             }
         }
+    });
+
+    document.getElementById('btn-dismiss-changes')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        vscode.postMessage({ type: 'acceptFileChanges' });
     });
 }
 
@@ -1966,46 +2346,182 @@ function renderDiffLines(diff: string): string {
     return htmlLines.join('');
 }
 
+// ── Image Preview Handling ──
+
+const imageCache = new Map<string, string>();
+const pendingImageRequests = new Map<string, (dataUrl?: string, error?: string) => void>();
+
+function handleImageFileData(
+    requestId: string,
+    filePath: string,
+    dataUrl?: string,
+    error?: string,
+): void {
+    if (dataUrl) {
+        imageCache.set(filePath, dataUrl);
+    }
+    const resolver = pendingImageRequests.get(requestId);
+    if (resolver) {
+        pendingImageRequests.delete(requestId);
+        resolver(dataUrl, error);
+    }
+}
+
+function requestImagePreview(filePath: string): Promise<string> {
+    const cached = imageCache.get(filePath);
+    if (cached) {
+        return Promise.resolve(cached);
+    }
+    return new Promise((resolve, reject) => {
+        const requestId = 'img-' + Math.random().toString(36).slice(2, 10);
+        pendingImageRequests.set(requestId, (dataUrl, error) => {
+            if (dataUrl) {
+                resolve(dataUrl);
+            } else {
+                reject(new Error(error || 'Failed to load image'));
+            }
+        });
+        vscode.postMessage({ type: 'readImageFile', filePath, requestId });
+    });
+}
+
 // ── Message rendering ──
 
 function buildMessageAttachmentChips(
-    files: { displayName: string; path: string }[],
+    files: Array<{ displayName: string; path: string; dataUrl?: string; startLine?: number; endLine?: number }>,
 ): HTMLElement {
     const row = el('div', 'message-attachments');
     for (const f of files) {
+        const isImg = isImageFilePath(f.path) || Boolean(f.dataUrl);
+        const itemWrap = el('div', 'message-attachment-item');
+        if (isImg) {
+            itemWrap.classList.add('message-attachment-item--image');
+        }
+
         const wrap = document.createElement('div');
         wrap.innerHTML = renderMessageAttachmentChip(
             f.displayName,
             f.path,
-            isImageFilePath(f.path),
+            isImg,
             escHtml,
             escAttr,
+            f.startLine && f.endLine ? { startLine: f.startLine, endLine: f.endLine } : undefined,
         );
         const chip = wrap.firstElementChild as HTMLElement;
         if (chip) {
-            row.appendChild(chip);
+            itemWrap.appendChild(chip);
         }
+
+        if (isImg) {
+            const preview = el('div', 'message-image-preview-container');
+            preview.style.display = 'none';
+            preview.dataset.filepath = f.path;
+            if (f.dataUrl) {
+                preview.dataset.dataUrl = f.dataUrl;
+            }
+            preview.innerHTML = `
+                <div class="message-image-loading">正在读取图片…</div>
+                <img class="message-image-preview" alt="${escAttr(f.displayName)}" title="点击收起图片" />
+            `;
+            itemWrap.appendChild(preview);
+        }
+
+        row.appendChild(itemWrap);
     }
     return row;
 }
 
 function bindAttachmentOpenClicks(): void {
-    const postOpen = (filePath?: string) => {
+    const postOpen = (filePath?: string, chip?: HTMLElement) => {
         if (filePath?.trim()) {
-            vscode.postMessage({ type: 'openFile', filePath: filePath.trim() });
+            const startLine = Number(chip?.dataset.startLine) || undefined;
+            const endLine = Number(chip?.dataset.endLine) || undefined;
+            vscode.postMessage({ type: 'openFile', filePath: filePath.trim(), startLine, endLine });
         }
     };
 
     document
         .querySelectorAll('.message-attachment-chip[data-filepath]:not([data-open-bound])')
         .forEach((node) => {
-            const el = node as HTMLElement;
-            el.setAttribute('data-open-bound', '1');
-            el.addEventListener('click', () => postOpen(el.dataset.filepath));
-            el.addEventListener('keydown', (e) => {
+            const chip = node as HTMLElement;
+            chip.setAttribute('data-open-bound', '1');
+            const filePath = chip.dataset.filepath;
+            const isImage = chip.dataset.isImage === 'true';
+
+            chip.querySelector('.attachment-open-external')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                postOpen(filePath);
+            });
+
+            const togglePreview = async () => {
+                if (!isImage || !filePath) {
+                    postOpen(filePath, chip);
+                    return;
+                }
+                const itemWrap = chip.closest('.message-attachment-item');
+                const preview = itemWrap?.querySelector(
+                    '.message-image-preview-container',
+                ) as HTMLElement | null;
+                if (!preview) {
+                    postOpen(filePath);
+                    return;
+                }
+                const isOpening = preview.style.display === 'none';
+                preview.style.display = isOpening ? 'flex' : 'none';
+                chip.classList.toggle('expanded', isOpening);
+
+                if (isOpening) {
+                    const img = preview.querySelector(
+                        '.message-image-preview',
+                    ) as HTMLImageElement | null;
+                    const loading = preview.querySelector(
+                        '.message-image-loading',
+                    ) as HTMLElement | null;
+                    if (img && !img.src) {
+                        try {
+                            const dataUrl =
+                                preview.dataset.dataUrl || (await requestImagePreview(filePath));
+                            img.src = dataUrl;
+                            if (loading) loading.style.display = 'none';
+                            scrollIfFollowing();
+                        } catch (err: any) {
+                            if (loading) {
+                                loading.textContent = `无法加载图片: ${err?.message || '未知错误'}`;
+                            }
+                        }
+                    }
+                }
+            };
+
+            chip.addEventListener('click', (e) => {
+                if ((e.target as HTMLElement).closest('.attachment-open-external')) {
+                    return;
+                }
+                void togglePreview();
+            });
+
+            chip.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    postOpen(el.dataset.filepath);
+                    void togglePreview();
+                }
+            });
+        });
+
+    document
+        .querySelectorAll('.message-image-preview:not([data-click-bound])')
+        .forEach((node) => {
+            const img = node as HTMLImageElement;
+            img.setAttribute('data-click-bound', '1');
+            img.addEventListener('click', () => {
+                const itemWrap = img.closest('.message-attachment-item');
+                const chip = itemWrap?.querySelector('.message-attachment-chip');
+                const preview = itemWrap?.querySelector(
+                    '.message-image-preview-container',
+                ) as HTMLElement | null;
+                if (preview) {
+                    preview.style.display = 'none';
+                    chip?.classList.remove('expanded');
                 }
             });
         });
@@ -2092,9 +2608,14 @@ function getAssistantPlainForCopy(msg: any): string {
     return text;
 }
 
+/** Steering messages have user role in RPC history but do not start a new chat turn. */
+function isTurnPrompt(msg: unknown): boolean {
+    return typeof msg === 'object' && msg !== null && 'role' in msg && msg.role === 'user'
+        && (!('steering' in msg) || msg.steering !== true);
+}
 function findLastUserMessageIndex(): number {
     for (let i = state.messages.length - 1; i >= 0; i--) {
-        if ((state.messages[i]?.role ?? '') === 'user') {
+        if (isTurnPrompt(state.messages[i])) {
             return i;
         }
     }
@@ -2103,7 +2624,7 @@ function findLastUserMessageIndex(): number {
 
 function findPrecedingUserIndex(assistantIndex: number): number {
     for (let i = Math.min(assistantIndex, state.messages.length - 1); i >= 0; i--) {
-        if ((state.messages[i]?.role ?? '') === 'user') {
+        if (isTurnPrompt(state.messages[i])) {
             return i;
         }
     }
@@ -2328,16 +2849,10 @@ function bindMessageActionButtons(): void {
     });
 }
 
-type RenderMessageOptions = {
-    /** Hide per-message Thought rows (turn-level merge handles thinking). */
-    suppressThinking?: boolean;
-};
-
 function renderMessage(
     msg: any,
     index: number,
     turnNumber?: number,
-    options?: RenderMessageOptions,
 ): HTMLElement {
     const role = msg.role ?? 'unknown';
 
@@ -2352,6 +2867,16 @@ function renderMessage(
         return buildToolResultCard(msg, state.messages, index);
     }
 
+    if (role === 'user' && msg.steering === true) {
+        const steeringEl = el('div', 'pending-messages pending-messages--steering committed-steering');
+        const { displayText } = parseUserMessageForDisplay(extractText(msg));
+        steeringEl.innerHTML = `<div class="pending-message pending-message--steer">
+            <span class="pending-message-indicator" aria-hidden="true"></span>
+            <span class="pending-message-label">Steering</span>
+            <span class="pending-message-text">${escHtml(displayText || extractText(msg) || '(attachments)')}</span>
+        </div>`;
+        return steeringEl;
+    }
     if (role === 'user') {
         const group = el('div', 'message-group-user');
         const card = el('div', 'user-prompt-card');
@@ -2373,22 +2898,50 @@ function renderMessage(
             wrapper.appendChild(content);
         }
         const fileAttachments = [...parsedFiles];
-        const imagePathsByBase = new Map<string, string>();
-        for (const f of fileAttachments) {
-            if (isImageFilePath(f.path)) {
+        const imageFiles = fileAttachments.filter((f) => isImageFilePath(f.path));
+        const extractedImgs = extractImages(msg);
+
+        // 如果 content 中含有提取出的图片数据：
+        // 优先将 base64 数据附加给已有的对应图片附件（避免同一张图片重复渲染为两个 chip）
+        const unassignedExtracted: typeof extractedImgs = [];
+        if (imageFiles.length === extractedImgs.length) {
+            for (let i = 0; i < imageFiles.length; i++) {
+                const img = extractedImgs[i];
+                const dataUrl = `data:${img.mimeType};base64,${img.data}`;
+                (imageFiles[i] as any).dataUrl = dataUrl;
+                imageCache.set(imageFiles[i].path, dataUrl);
+            }
+        } else {
+            const imagePathsByBase = new Map<string, string>();
+            for (const f of imageFiles) {
                 imagePathsByBase.set(f.displayName.toLowerCase(), f.path);
+            }
+
+            for (const img of extractedImgs) {
+                const openPath = resolveImageOpenPath(img, imagePathsByBase);
+                const matchedFile = openPath
+                    ? imageFiles.find((f) => f.path.toLowerCase() === openPath.toLowerCase())
+                    : undefined;
+
+                const dataUrl = `data:${img.mimeType};base64,${img.data}`;
+                if (matchedFile) {
+                    (matchedFile as any).dataUrl = dataUrl;
+                    imageCache.set(matchedFile.path, dataUrl);
+                } else if (imageFiles.length === 1 && extractedImgs.length === 1) {
+                    (imageFiles[0] as any).dataUrl = dataUrl;
+                    imageCache.set(imageFiles[0].path, dataUrl);
+                } else {
+                    unassignedExtracted.push(img);
+                }
             }
         }
 
-        for (const img of extractImages(msg)) {
-            const openPath = resolveImageOpenPath(img, imagePathsByBase);
-            if (!openPath) {
-                continue;
-            }
-            const displayName = openPath.split(/[/\\]/).pop() || 'image';
-            if (!fileAttachments.some((f) => f.path.toLowerCase() === openPath.toLowerCase())) {
-                fileAttachments.push({ displayName, path: openPath });
-            }
+        // 仅在没有对应本地文件附件时，才作为独立内联图片追加
+        for (const img of unassignedExtracted) {
+            const dataUrl = `data:${img.mimeType};base64,${img.data}`;
+            const pathKey = `inline-image-${Math.random().toString(36).slice(2, 8)}.png`;
+            const displayName = img.name || 'image.png';
+            fileAttachments.push({ displayName, path: pathKey, dataUrl } as any);
         }
 
         if (fileAttachments.length > 0) {
@@ -2408,15 +2961,16 @@ function renderMessage(
     // Assistant messages: wrap in a styled container
     const group = el('div', 'message-group-assistant');
     const wrapper = el('div', `message message-${role}`);
-    let hasVisibleAssistantContent = false;
+    let hasThinking = false;
+    let hasText = false;
 
     if (Array.isArray(msg.content)) {
         const thinkingMerged = extractThinking(msg).trim();
-        if (!options?.suppressThinking && thinkingMerged) {
+        if (thinkingMerged) {
             wrapper.appendChild(
                 buildThinkingBlock(thinkingMerged, false, msg._thinkingDurationSec, `${index}:0`),
             );
-            hasVisibleAssistantContent = true;
+            hasThinking = true;
         }
         for (let i = 0; i < msg.content.length; i++) {
             const block = msg.content[i];
@@ -2428,7 +2982,7 @@ function renderMessage(
                     const content = el('div', 'message-content');
                     content.innerHTML = renderMarkdown(blockText);
                     wrapper.appendChild(content);
-                    hasVisibleAssistantContent = true;
+                    hasText = true;
                 }
             }
         }
@@ -2438,17 +2992,17 @@ function renderMessage(
         if (text) {
             text = stripPlanContentForChatDisplay(text);
         }
-        if (!options?.suppressThinking && thinking.trim()) {
+        if (thinking.trim()) {
             wrapper.appendChild(
                 buildThinkingBlock(thinking, false, msg._thinkingDurationSec, `${index}:0`),
             );
-            hasVisibleAssistantContent = true;
+            hasThinking = true;
         }
         if (text) {
             const content = el('div', 'message-content');
             content.innerHTML = renderMarkdown(text);
             wrapper.appendChild(content);
-            hasVisibleAssistantContent = true;
+            hasText = true;
         }
     }
 
@@ -2460,9 +3014,9 @@ function renderMessage(
             ? msg.errorMessage.trim()
             : '';
 
-    if (!hasVisibleAssistantContent && !errorText) {
+    if (!hasThinking && !hasText && !errorText) {
         const empty = el('div');
-        empty.style.display = 'none';
+        empty.hidden = true;
         return empty;
     }
 
@@ -2473,6 +3027,11 @@ function renderMessage(
     }
 
     group.appendChild(wrapper);
+    // An intermediate step that only reasons before its tool calls has no reply to copy,
+    // regenerate, or measure; footer chrome there would split the thought from its tools.
+    if (!hasText && !errorText) {
+        return group;
+    }
     group.appendChild(buildMessageActions('assistant', index, msg));
 
     const footer = buildMessageFooter(msg, index);
@@ -2518,23 +3077,22 @@ function ensureStreamingMessageShell(container: HTMLElement): void {
         </details>
         <div class="message-content" id="streaming-text"></div>
     `;
-    const firstTool = container.querySelector(
-        '.tool-card, .tool-card-wrapper, .diff-card, .tool-approval-card',
-    );
-    if (firstTool) {
-        container.insertBefore(msg, firstTool);
-    } else {
-        const activity = document.getElementById('stream-activity');
-        if (activity) {
-            activity.insertAdjacentElement('afterend', msg);
-        } else {
-            container.prepend(msg);
-        }
-    }
+    // Chronological: a new step's reasoning goes below the previous step's still-live tool cards.
+    container.appendChild(msg);
     const created = document.getElementById('streaming-thinking') as HTMLDetailsElement | null;
     created?.addEventListener('toggle', () => {
-        streamingThinkingUserOpen = created.open;
+        streamingThinkingUserCollapsed = !created.open;
     });
+}
+
+function renderStreamingMarkdown(text: string): string {
+    if (!text) return '';
+    const fenceMatches = text.match(/(?:^|\n)```/g);
+    let patchedText = text;
+    if (fenceMatches && fenceMatches.length % 2 !== 0) {
+        patchedText = text + '\n```';
+    }
+    return renderMarkdown(patchedText);
 }
 
 function renderStreamingContent(): void {
@@ -2542,7 +3100,7 @@ function renderStreamingContent(): void {
     if (!container) return;
 
     const streamingThinkingText = state.streamingThinking.trim();
-    const showThinkingBlock = streamingThinkingBlockVisible();
+    const showThinkingBlock = state.isStreaming && (state.isThinking || Boolean(streamingThinkingText));
     const showText = Boolean(state.streamingText);
 
     if (!showThinkingBlock && !showText) {
@@ -2555,10 +3113,12 @@ function renderStreamingContent(): void {
     if (thinkingEl) {
         thinkingEl.style.display = showThinkingBlock ? '' : 'none';
         if (showThinkingBlock) {
-            const contentEl = thinkingEl.querySelector('.thinking-content');
+            const contentEl = thinkingEl.querySelector('.thinking-content') as HTMLElement | null;
+            // Follow the newest reasoning unless the user scrolled up inside the box.
+            const followTail = contentEl ? isScrolledToEnd(contentEl) : false;
             if (contentEl) {
                 if (streamingThinkingText) {
-                    contentEl.innerHTML = renderMarkdown(streamingThinkingText);
+                    contentEl.innerHTML = renderStreamingMarkdown(streamingThinkingText);
                 } else {
                     contentEl.innerHTML =
                         '<p class="thinking-placeholder">Reasoning in progress…</p>';
@@ -2578,8 +3138,11 @@ function renderStreamingContent(): void {
                             : 'Thought';
                 }
             }
-            if (streamingThinkingUserOpen) {
+            if (!streamingThinkingUserCollapsed) {
                 thinkingEl.open = true;
+            }
+            if (contentEl && followTail) {
+                contentEl.scrollTop = contentEl.scrollHeight;
             }
         }
     }
@@ -2588,11 +3151,7 @@ function renderStreamingContent(): void {
     if (textEl) {
         textEl.style.display = showText ? '' : 'none';
         if (showText) {
-            if (state.isStreaming) {
-                textEl.textContent = state.streamingText;
-            } else {
-                textEl.innerHTML = renderMarkdown(state.streamingText);
-            }
+            textEl.innerHTML = renderStreamingMarkdown(state.streamingText);
         }
     }
 
@@ -2631,8 +3190,15 @@ function getToolLabel(name: string, args: any): string {
             return args?.pattern ? `Glob ${truncate(args.pattern, 50)}` : 'Find files';
         case 'grep':
             return args?.pattern ? `Grep ${truncate(args.pattern, 50)}` : 'Search files';
-        default:
+        default: {
+            if (args && typeof args === 'object') {
+                const hint = args.query ?? args.path ?? args.file ?? args.action ?? args.url ?? args.name ?? args.command;
+                if (typeof hint === 'string' && hint.trim()) {
+                    return `${name}: ${truncate(hint, 50)}`;
+                }
+            }
             return name;
+        }
     }
 }
 
@@ -2669,37 +3235,20 @@ function formatToolArgs(args: any): string {
     }).join('\n');
 }
 
-function buildStatusHtml(status: string): string {
-    if (status === 'done') return '';
-    const label = status.charAt(0).toUpperCase() + status.slice(1);
-    return `<span class="tool-status ${status}">${label}</span>`;
+/** Parsed tool-call arguments from the assistant message that issued `toolCallId`. */
+function findToolCallArgs(messages: any[], beforeIndex: number, toolCallId: string): unknown {
+    const call = findToolCallInMessages(messages, beforeIndex, toolCallId);
+    const args = call?.arguments ?? call?.args ?? call?.input ?? {};
+    return typeof args === 'string' ? tryParseJSON(args) : args;
 }
 
-function buildToolCard(tc: any): HTMLElement {
-    const card = el('div', 'tool-card');
-    const name = tc.name ?? tc.toolName ?? tc.function?.name ?? 'unknown';
-    const args = tc.args ?? tc.arguments ?? tc.input ?? tc.function?.arguments;
-    const parsedArgs = typeof args === 'string' ? tryParseJSON(args) : args;
-    const statusClass = tc._status ?? 'pending';
-
-    card.innerHTML = `
-        <div class="tool-header">
-            <span class="tool-icon">${getToolIcon(name)}</span>
-            <span class="tool-name">${escHtml(getToolLabel(name, parsedArgs))}</span>
-            ${buildStatusHtml(statusClass)}
-        </div>
-    `;
-
-    if (tc._result !== undefined) {
-        const text = extractToolResultText(tc._result);
-        if (text) {
-            const result = el('pre', 'tool-result');
-            result.textContent = text;
-            card.appendChild(result);
-        }
-    }
-
-    return card;
+function buildHistoryToolView(msg: any, msgIndex: number, allMessages: any[]): HTMLElement {
+    const toolCallId = msg.toolCallId ?? msg.tool_call_id ?? '';
+    return createToolView(toolCallId, {
+        name: msg.toolName || 'tool',
+        args: findToolCallArgs(allMessages, msgIndex, toolCallId),
+        result: toToolResult(msg, msg.isError === true),
+    });
 }
 
 function buildToolFooter(msg: any, allMessages: any[], msgIndex: number): HTMLElement | null {
@@ -2729,66 +3278,9 @@ function findPrecedingAssistant(messages: any[], beforeIndex: number): any | nul
 }
 
 function buildToolResultCard(msg: any, allMessages: any[], msgIndex: number): HTMLElement {
-    const isError = msg.isError ?? false;
-    const toolName = msg.toolName ?? '';
-    const toolCallId = msg.toolCallId ?? '';
-    const nameLower = toolName.toLowerCase();
-
-    const matchingCall = findToolCallInMessages(allMessages, msgIndex, toolCallId);
-    const args = matchingCall?.arguments ?? matchingCall?.args ?? matchingCall?.input ?? {};
-    const parsedArgs = typeof args === 'string' ? tryParseJSON(args) : args;
-    const label = toolName ? getToolLabel(toolName, parsedArgs) : 'Tool Result';
-    const icon = getToolIcon(toolName ?? '');
-    const isBash = nameLower === 'bash';
-    const isRead = nameLower === 'read';
-    const filePath = parsedArgs?.path ?? parsedArgs?.file_path ?? '';
-
-    const resultContent = extractText(msg);
-    const hasBody = !!(resultContent || isBash) && !isRead;
-
-    const footer = buildToolFooter(msg, allMessages, msgIndex);
-
-    if (hasBody) {
-        const wrapper = el('div', 'tool-card-wrapper');
-
-        const details = document.createElement('details');
-        details.className = 'tool-card tool-expandable';
-
-        details.innerHTML = `
-            <summary class="tool-header">
-                <span class="tool-icon">${icon}</span>
-                <span class="tool-name">${escHtml(label)}</span>
-                ${buildStatusHtml(isError ? 'error' : 'done')}
-                <span class="tool-expand-arrow">&#9656;</span>
-            </summary>
-        `;
-
-        const body = el('div', 'tool-body');
-        const result = el('pre', 'tool-result');
-        result.textContent = resultContent || '(no output)';
-        if (!resultContent) result.classList.add('empty');
-        body.appendChild(result);
-        details.appendChild(body);
-        wrapper.appendChild(details);
-
-        if (footer) wrapper.appendChild(footer);
-        return wrapper;
-    }
-
     const wrapper = el('div', 'tool-card-wrapper');
-
-    const card = el('div', `tool-card${isRead ? ' tool-clickable' : ''}`);
-    if (isRead && filePath) card.dataset.filepath = filePath;
-
-    card.innerHTML = `
-        <div class="tool-header">
-            <span class="tool-icon">${icon}</span>
-            <span class="tool-name">${escHtml(label)}</span>
-            ${buildStatusHtml(isError ? 'error' : 'done')}
-        </div>
-    `;
-
-    wrapper.appendChild(card);
+    wrapper.appendChild(buildHistoryToolView(msg, msgIndex, allMessages));
+    const footer = buildToolFooter(msg, allMessages, msgIndex);
     if (footer) wrapper.appendChild(footer);
     return wrapper;
 }
@@ -2825,92 +3317,58 @@ function clearStreamingToolArtifacts(): void {
     }
     container
         .querySelectorAll(
-            '.tool-card, .tool-card-wrapper, .tool-expandable, .diff-card, .tool-approval-card',
+            'omp-tool-view, .tool-card-wrapper, .diff-card, .tool-approval-card',
         )
         .forEach((node) => node.remove());
 }
 
-function buildMergedToolRow(msg: any, msgIndex: number, allMessages: any[]): HTMLElement {
-    const isError = msg.isError ?? false;
-    const toolName = msg.toolName ?? '';
-    const toolCallId = msg.toolCallId ?? '';
-    const nameLower = toolName.toLowerCase();
+type ToolStepItem = { msg: (typeof state.messages)[number]; index: number };
 
-    const matchingCall = findToolCallInMessages(allMessages, msgIndex, toolCallId);
-    const args = matchingCall?.arguments ?? matchingCall?.args ?? matchingCall?.input ?? {};
-    const parsedArgs = typeof args === 'string' ? tryParseJSON(args) : args;
-    const label = toolName ? getToolLabel(toolName, parsedArgs) : 'Tool Result';
-    const icon = getToolIcon(toolName ?? '');
-    const isBash = nameLower === 'bash';
-    const isRead = nameLower === 'read';
-    const filePath = parsedArgs?.path ?? parsedArgs?.file_path ?? '';
-
-    const resultContent = extractText(msg);
-    const hasBody = !!(resultContent || isBash) && !isRead;
-
-    if (hasBody) {
-        const details = document.createElement('details');
-        details.className = 'tools-item tools-item-expandable';
-
-        details.innerHTML = `
-            <summary class="tool-header">
-                <span class="tool-icon">${icon}</span>
-                <span class="tool-name">${escHtml(label)}</span>
-                ${buildStatusHtml(isError ? 'error' : 'done')}
-                <span class="tool-expand-arrow">&#9656;</span>
-            </summary>
-        `;
-
-        const body = el('div', 'tool-body');
-        const result = el('pre', 'tool-result');
-        result.textContent = resultContent || '(no output)';
-        if (!resultContent) {
-            result.classList.add('empty');
-        }
-        body.appendChild(result);
-        details.appendChild(body);
-        return details;
+/** Once a tool result is in the history, its live card in the streaming area is a duplicate. */
+function removeLiveToolArtifacts(toolCallId: string): void {
+    const live = document.getElementById('streaming-message');
+    if (!live || !toolCallId) {
+        return;
     }
-
-    const row = el('div', `tools-item tool-card${isRead ? ' tool-clickable' : ''}`);
-    if (isRead && filePath) {
-        row.dataset.filepath = filePath;
-    }
-    row.innerHTML = `
-        <div class="tool-header">
-            <span class="tool-icon">${icon}</span>
-            <span class="tool-name">${escHtml(label)}</span>
-            ${buildStatusHtml(isError ? 'error' : 'done')}
-        </div>
-    `;
-    return row;
+    live.querySelector(`#${CSS.escape(`tool-${toolCallId}`)}`)?.remove();
+    const diff = live.querySelector(`#${CSS.escape(`diff-${toolCallId}`)}`);
+    (diff?.closest('.tool-card-wrapper') ?? diff)?.remove();
 }
 
-function buildMergedToolsBlock(
-    items: Array<{ msg: any; index: number }>,
-    allMessages: any[],
-    turnUserMsgCount: number,
+/** Tools called by one reasoning step, placed right after that step's thinking/text. */
+function buildStepToolsBlock(
+    items: ToolStepItem[],
+    allMessages: typeof state.messages,
+    live: boolean,
 ): HTMLElement {
     const details = document.createElement('details');
     details.className = 'tools-block';
-    const toolsKey = `turn:${turnUserMsgCount}`;
+    const toolsKey = `tools:${items[0].index}`;
     details.dataset.toolsKey = toolsKey;
-    if (toolsOpenByKey.has(toolsKey)) {
-        details.open = toolsOpenByKey.get(toolsKey)!;
-    }
+    details.open = toolsOpenByKey.get(toolsKey) ?? true;
 
     const count = items.length;
+    const toolNames = [...new Set(items.map((it) => (it.msg.toolName ?? 'tool').toLowerCase()))];
     const summary = document.createElement('summary');
     summary.className = 'tools-summary';
     summary.innerHTML = `
         <span class="tools-indicator"></span>
-        <span class="tools-label">Used ${count} tool${count !== 1 ? 's' : ''}</span>
+        <span class="tools-label">${live ? 'Using' : 'Used'} ${count} tool${count !== 1 ? 's' : ''} (${escHtml(toolNames.join(', '))})</span>
         <span class="tools-chevron">&#9656;</span>
     `;
 
     const list = el('div', 'tools-list');
     for (const item of items) {
-        list.appendChild(buildMergedToolRow(item.msg, item.index, allMessages));
+        const toolName = item.msg.toolName ?? '';
+        const change =
+            toolName === 'edit' || toolName === 'write'
+                ? findFileChangeForToolResult(item.msg)
+                : undefined;
+        list.appendChild(
+            change
+                ? buildDiffCard(change, item.msg)
+                : buildHistoryToolView(item.msg, item.index, allMessages),
+        );
     }
 
     details.appendChild(summary);
@@ -2929,13 +3387,9 @@ function renderToolStart(event: any): void {
         return;
     }
 
-    // Simple tools: status bar only — avoid stacking dozens of rows during streaming.
     const nameLower = (event.toolName ?? '').toLowerCase();
-    if (nameLower !== 'edit' && nameLower !== 'write') {
-        return;
-    }
 
-    if ((event.toolName === 'edit' || event.toolName === 'write') && event.args?.path) {
+    if ((nameLower === 'edit' || nameLower === 'write') && event.args?.path) {
         const card = el('div', 'diff-card loading');
         card.id = `tool-${event.toolCallId}`;
         const fileName = (event.args.path as string).split('/').pop() ?? event.args.path;
@@ -2948,21 +3402,25 @@ function renderToolStart(event: any): void {
         `;
         container.appendChild(card);
         scrollIfFollowing();
+        return;
     }
+
+    const card = createToolView(event.toolCallId ?? '', {
+        name: event.toolName || 'tool',
+        args: event.args,
+        running: true,
+    });
+    card.id = `tool-${event.toolCallId}`;
+    container.appendChild(card);
+    scrollIfFollowing();
 }
 
 function renderToolUpdate(event: any): void {
     const card = document.getElementById(`tool-${event.toolCallId}`);
-    if (!card) return;
-    if (card.classList.contains('diff-card')) return;
+    if (!card || card.classList.contains('diff-card')) return;
     const text = extractToolResultText(event.partialResult);
     if (!text) return;
-    let resultEl = card.querySelector('.tool-result') as HTMLElement | null;
-    if (!resultEl) {
-        resultEl = el('pre', 'tool-result');
-        card.appendChild(resultEl);
-    }
-    resultEl.textContent = text;
+    updateToolView(card, { partial: text });
     scrollIfFollowing();
 }
 
@@ -2979,57 +3437,11 @@ function renderToolEnd(event: any): void {
         return;
     }
 
-    const toolName = (card as HTMLElement).dataset.toolName ?? '';
-    const text = extractToolResultText(event.result);
-    const isBash = toolName.toLowerCase() === 'bash';
-    const hasBody = !!(text || isBash);
-
-    if (hasBody) {
-        const details = document.createElement('details');
-        details.className = card.className.replace('tool-card', 'tool-card tool-expandable');
-        details.id = card.id;
-        details.dataset.toolName = toolName;
-        if (card.dataset.filepath) details.dataset.filepath = card.dataset.filepath;
-
-        const headerEl = card.querySelector('.tool-header');
-        const nameHtml = headerEl?.innerHTML ?? '';
-
-        details.innerHTML = `<summary class="tool-header">${nameHtml}</summary>`;
-
-        const statusEl = details.querySelector('.tool-status');
-        if (statusEl) {
-            if (event.isError) {
-                statusEl.textContent = 'error';
-                statusEl.className = 'tool-status error';
-            } else {
-                statusEl.remove();
-            }
-        }
-
-        const arrow = el('span', 'tool-expand-arrow');
-        arrow.innerHTML = '&#9656;';
-        details.querySelector('summary')?.appendChild(arrow);
-
-        const body = el('div', 'tool-body');
-        const resultEl = el('pre', 'tool-result');
-        resultEl.textContent = text || '(no output)';
-        if (!text) resultEl.classList.add('empty');
-        body.appendChild(resultEl);
-        details.appendChild(body);
-
-        card.replaceWith(details);
-        bindToolClickable();
-    } else {
-        const statusEl = card.querySelector('.tool-status');
-        if (statusEl) {
-            if (event.isError) {
-                statusEl.textContent = 'error';
-                statusEl.className = 'tool-status error';
-            } else {
-                statusEl.remove();
-            }
-        }
-    }
+    updateToolView(card, {
+        running: false,
+        partial: undefined,
+        result: toToolResult(event.result ?? { content: [] }, event.isError === true),
+    });
 }
 
 // ── Tool approval cards ──
@@ -3090,12 +3502,48 @@ function bindApprovalButtons(): void {
 
 const thinkingOpenByKey = new Map<string, boolean>();
 
-function captureThinkingOpenState(): void {
+/** Within a few px of the end (or not overflowing): new text should keep the box at its tail. */
+function isScrolledToEnd(box: HTMLElement): boolean {
+    return box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+}
+
+type ThinkingScroll = { top: number; pinned: boolean };
+
+/** Records open state; returns scroll state of open thinking boxes for `restoreThinkingScroll`. */
+function captureThinkingViewState(): Map<string, ThinkingScroll> {
+    const scroll = new Map<string, ThinkingScroll>();
     document.querySelectorAll('details.thinking-block[data-think-key]').forEach((node) => {
         const el = node as HTMLDetailsElement;
         const key = el.dataset.thinkKey;
-        if (key) {
-            thinkingOpenByKey.set(key, el.open);
+        if (!key) {
+            return;
+        }
+        thinkingOpenByKey.set(key, el.open);
+        const box = el.querySelector('.thinking-content') as HTMLElement | null;
+        if (el.open && box) {
+            scroll.set(key, { top: box.scrollTop, pinned: isScrolledToEnd(box) });
+        }
+    });
+    return scroll;
+}
+
+/**
+ * Rebuilt thinking boxes start at scrollTop 0. Put each back where it was; a box that was
+ * following its tail — or the live turn's box appearing for the first time — shows the newest text.
+ */
+function restoreThinkingScroll(saved: Map<string, ThinkingScroll>, liveThinkKey: string | null): void {
+    document.querySelectorAll('details.thinking-block[data-think-key][open]').forEach((node) => {
+        const el = node as HTMLDetailsElement;
+        const key = el.dataset.thinkKey!;
+        const box = el.querySelector('.thinking-content') as HTMLElement | null;
+        if (!box) {
+            return;
+        }
+        const prev = saved.get(key);
+        if (prev ? prev.pinned : key === liveThinkKey) {
+            box.scrollTop = box.scrollHeight;
+        } else if (prev) {
+            box.scrollTop = prev.top;
         }
     });
 }
@@ -3125,46 +3573,6 @@ function syncThinkingFromAssistantMessage(msg: any): void {
     }
 }
 
-function assistantMessageAlreadyShowsThinking(streamingText: string): boolean {
-    if (!streamingText || state.isStreaming) {
-        return false;
-    }
-    for (let i = state.messages.length - 1; i >= 0; i--) {
-        const msg = state.messages[i];
-        if (msg?.role !== 'assistant') {
-            continue;
-        }
-        const existing = extractThinking(msg).trim();
-        if (!existing) {
-            continue;
-        }
-        if (existing === streamingText || existing.includes(streamingText)) {
-            return true;
-        }
-        return false;
-    }
-    return false;
-}
-
-function prependMergedTurnThinking(
-    turnBody: HTMLElement,
-    parts: string[],
-    durationSec: number,
-    thinkKey: string,
-): void {
-    const merged = parts.map((p) => p.trim()).filter(Boolean).join('\n\n');
-    if (!merged) {
-        return;
-    }
-    turnBody
-        .querySelector(`details.thinking-block[data-think-key="${thinkKey}"]`)
-        ?.remove();
-    turnBody.insertBefore(
-        buildThinkingBlock(merged, false, durationSec > 0 ? durationSec : undefined, thinkKey),
-        turnBody.firstChild,
-    );
-}
-
 function buildThinkingBlock(
     text: string,
     active: boolean,
@@ -3177,6 +3585,8 @@ function buildThinkingBlock(
         details.dataset.thinkKey = thinkKey;
         if (thinkingOpenByKey.has(thinkKey)) {
             details.open = thinkingOpenByKey.get(thinkKey)!;
+        } else {
+            details.open = true;
         }
     }
 
@@ -3215,9 +3625,6 @@ function buildThinkingBlock(
         if (thinkKey) {
             thinkingOpenByKey.set(thinkKey, details.open);
         }
-        if (details.id === 'streaming-thinking') {
-            streamingThinkingUserOpen = details.open;
-        }
     });
     return details;
 }
@@ -3248,6 +3655,47 @@ function appendDismissButton(
     });
     container.appendChild(closeBtn);
     return closeBtn;
+}
+
+/**
+ * omp /login|/logout banner at the transcript end: omp only signs in from its own TUI picker, so
+ * the button switches to TUI mode and the extension types the command there.
+ */
+function updateTuiAuthBanner(): void {
+    const container = document.getElementById('messages');
+    const streamingEl = document.getElementById('streaming-message');
+    const existing = document.getElementById('tui-auth-banner');
+    const command = state.tuiAuthPrompt;
+    if (!container || !streamingEl || !command) {
+        existing?.remove();
+        return;
+    }
+    // Directly above the pending steering strip, which updateMessages keeps right above streaming.
+    const anchor = document.getElementById('pending-messages') ?? streamingEl;
+    if (existing?.dataset.command === command) {
+        if (existing.nextSibling !== anchor) {
+            container.insertBefore(existing, anchor);
+        }
+        return;
+    }
+    existing?.remove();
+
+    const banner = el('div', 'tui-auth-banner');
+    banner.id = 'tui-auth-banner';
+    banner.dataset.command = command;
+    const text = el('span', 'tui-auth-banner-text');
+    text.textContent =
+        command === 'login'
+            ? 'omp signs in from its terminal UI: pick a subscription or API-key provider there (logged-in ones are marked).'
+            : 'omp removes stored credentials from its terminal UI.';
+    const button = el('button', 'tui-auth-banner-btn') as HTMLButtonElement;
+    button.type = 'button';
+    button.textContent = command === 'login' ? 'Log in via terminal' : 'Log out via terminal';
+    button.addEventListener('click', () => vscode.postMessage({ type: 'runTuiAuth' }));
+    banner.append(text, button);
+    appendDismissButton(banner, 'error-message-dismiss', () => vscode.postMessage({ type: 'dismissTuiAuth' }));
+    container.insertBefore(banner, anchor);
+    scrollToBottom(true);
 }
 
 function showError(message: string): void {
@@ -3303,6 +3751,9 @@ function updateStreamingUI(): void {
 function bindStableEvents(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const newTabBtn = document.getElementById('btn-new-tab');
+    const tabOverflowBtn = document.getElementById('btn-tab-overflow');
+    const tabOverflowMenu = document.getElementById('tab-overflow-menu');
+    const tuiBtn = document.getElementById('btn-tui');
     const sessionsBtn = document.getElementById('btn-sessions');
     const settingsBtn = document.getElementById('btn-settings');
 
@@ -3447,8 +3898,79 @@ function bindStableEvents(): void {
 
     bindChatFileDrop();
     bindFileMentionMenu();
+    bindModelPicker();
+    bindMicButton();
 
-    newTabBtn?.addEventListener('click', () => vscode.postMessage({ type: 'createTab' }));
+    const backendBtn = document.getElementById('btn-backend');
+    const backendMenu = document.getElementById('backend-dropdown-menu');
+
+    newTabBtn?.addEventListener('click', () =>
+        vscode.postMessage({ type: 'createTab', backend: state.activeBackend }),
+    );
+
+    backendBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isOpen = backendBtn.getAttribute('aria-expanded') === 'true';
+        setBackendDropdownOpen(!isOpen);
+    });
+
+    backendMenu?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const item = (e.target as HTMLElement).closest('.backend-dropdown-item') as HTMLElement | null;
+        const backend = item?.dataset.backend as AgentBackend | undefined;
+        if (!backend) return;
+        setBackendDropdownOpen(false);
+        if (backend !== state.activeBackend) {
+            state.activeBackend = backend;
+            updateBackendDropdown();
+            updateModeSwitch();
+            updatePlanPanel();
+            refreshWelcome();
+            vscode.postMessage({ type: 'setBackend', backend });
+        }
+    });
+
+    if (!backendDropdownDismissBound) {
+        backendDropdownDismissBound = true;
+        document.addEventListener('click', (e) => {
+            if (!(e.target as HTMLElement).closest('#backend-dropdown')) {
+                setBackendDropdownOpen(false);
+            }
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') setBackendDropdownOpen(false);
+        });
+    }
+
+    tabOverflowBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isOpen = tabOverflowBtn.getAttribute('aria-expanded') === 'true';
+        setTabOverflowOpen(!isOpen);
+    });
+    tabOverflowMenu?.addEventListener('click', (e) => {
+        const item = (e.target as HTMLElement).closest('.tab-overflow-item') as HTMLElement | null;
+        const tabId = item?.dataset.tabId;
+        if (!tabId) return;
+        setTabOverflowOpen(false);
+        if (tabId !== state.activeTabId) {
+            vscode.postMessage({ type: 'switchTab', tabId });
+        }
+    });
+    if (!tabOverflowDismissBound) {
+        tabOverflowDismissBound = true;
+        document.addEventListener('click', (e) => {
+            if (!(e.target as HTMLElement).closest('#tab-overflow')) {
+                setTabOverflowOpen(false);
+            }
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') setTabOverflowOpen(false);
+        });
+    }
+    tuiBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'toggleTuiMode' });
+    });
     sessionsBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
         requestSessionPanelToggle();
@@ -3518,25 +4040,6 @@ function bindDiffButtons(): void {
             const toolCallId = (header as HTMLElement).dataset.toolcallid;
             if (filePath && toolCallId) {
                 vscode.postMessage({ type: 'openDiff', filePath, toolCallId });
-            }
-        });
-    });
-}
-
-function bindToolClickable(): void {
-    document.querySelectorAll('.tool-clickable:not([data-click-bound])').forEach((card) => {
-        card.setAttribute('data-click-bound', '1');
-        const headerEl = card.querySelector('.tool-header') as HTMLElement | null;
-        if (!headerEl) return;
-        const nameEl = headerEl.querySelector('.tool-name') as HTMLElement | null;
-        if (!nameEl) return;
-        nameEl.style.cursor = 'pointer';
-        nameEl.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const filePath = (card as HTMLElement).dataset.filepath;
-            if (filePath) {
-                vscode.postMessage({ type: 'openFile', filePath });
             }
         });
     });
@@ -3873,6 +4376,16 @@ function scrollToBottom(force = false): void {
         isProgrammaticScroll = true;
         messages.scrollTop = messages.scrollHeight;
     }
+}
+
+/** Instant scroll (bypasses `.messages { scroll-behavior: smooth }`) for restoring after DOM rebuilds. */
+function jumpMessagesScroll(messages: HTMLElement, top: number): void {
+    const target = Math.max(0, Math.min(top, messages.scrollHeight - messages.clientHeight));
+    if (Math.abs(messages.scrollTop - target) < 1) {
+        return;
+    }
+    isProgrammaticScroll = true;
+    messages.scrollTo({ top: target, behavior: 'instant' });
 }
 
 function isNearBottom(): boolean {

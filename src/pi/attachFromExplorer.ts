@@ -7,11 +7,11 @@ export function registerAttachFromExplorer(
 ): void {
     context.subscriptions.push(
         vscode.commands.registerCommand(
-            'pi-agent.attachFilesFromExplorer',
+            'oh-my-pi-chater.attachFilesFromExplorer',
             async (uri: vscode.Uri, uris?: vscode.Uri[]) => {
                 const sidebar = getSidebar();
                 if (!sidebar) {
-                    vscode.window.showWarningMessage('vs-pi-agent: chat is not ready yet.');
+                    vscode.window.showWarningMessage('Oh My Pi Chater: chat is not ready yet.');
                     return;
                 }
 
@@ -26,7 +26,7 @@ export function registerAttachFromExplorer(
                 }
 
                 await sidebar.attachPaths(paths);
-                void vscode.commands.executeCommand('pi-agent.chat.focus');
+                void vscode.commands.executeCommand('oh-my-pi-chater.chat.focus');
             },
         ),
     );

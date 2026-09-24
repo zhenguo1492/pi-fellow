@@ -144,31 +144,70 @@ export class DiffManager implements vscode.Disposable {
         this._emitFileChange(change);
     }
 
-    async openDiff(filePath: string, toolCallId: string): Promise<void> {
+    /** Opens the change for review. Returns true when the tracked change list was modified. */
+    async openDiff(filePath: string, toolCallId: string): Promise<boolean> {
         const absPath = this._resolveFilePath(filePath);
         const uri = vscode.Uri.file(absPath);
-        const original = this._originalContents.get(absPath);
+        const original = this._originalContents.get(absPath) ?? null;
+        const exists = fs.existsSync(absPath);
+        const title = `${path.basename(absPath)} (Pi edit)`;
 
-        if (original !== undefined && original !== null) {
-            const diffProvider = this._getDiffContentProvider();
-            const beforeUri = vscode.Uri.parse(
-                `pi-diff:${filePath}?before=${encodeURIComponent(toolCallId)}`
-            );
-            diffProvider?.setContent(beforeUri, original);
-
-            await vscode.commands.executeCommand(
-                'vscode.diff',
-                beforeUri,
-                uri,
-                `${path.basename(filePath)} (Pi edit)`,
-                { preview: true },
-            );
-        } else {
-            try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                await vscode.window.showTextDocument(doc, { preview: true });
-            } catch { /* file may have been deleted */ }
+        if (!exists && original === null) {
+            // Created then removed (e.g. a throwaway script): nothing left to review.
+            this._dropPath(absPath);
+            void vscode.window.showInformationMessage(`${path.basename(absPath)} no longer exists; removed from changed files.`);
+            return true;
         }
+
+        if (original === null) {
+            await vscode.window.showTextDocument(uri, { preview: true });
+            return false;
+        }
+
+        const diffProvider = this._getDiffContentProvider();
+        const beforeUri = vscode.Uri.from({ scheme: 'pi-diff', path: absPath, query: `before=${toolCallId}` });
+        diffProvider?.setContent(beforeUri, original);
+        let afterUri = uri;
+        if (!exists) {
+            afterUri = vscode.Uri.from({ scheme: 'pi-diff', path: absPath, query: `deleted=${toolCallId}` });
+            diffProvider?.setContent(afterUri, '');
+        }
+        await vscode.commands.executeCommand('vscode.diff', beforeUri, afterUri, exists ? title : `${title} (deleted)`, {
+            preview: true,
+        });
+        return false;
+    }
+
+    /**
+     * Drops files whose on-disk state matches their original again (created-then-deleted
+     * throwaways, reverted edits). Returns true when anything was removed.
+     */
+    pruneSettledChanges(): boolean {
+        let pruned = false;
+        for (const absPath of new Set(this._fileChanges.map((c) => this._resolveFilePath(c.filePath)))) {
+            let current: string | null = null;
+            try {
+                current = fs.readFileSync(absPath, 'utf-8');
+            } catch {
+                // missing
+            }
+            if (current === (this._originalContents.get(absPath) ?? null)) {
+                this._dropPath(absPath);
+                pruned = true;
+            }
+        }
+        return pruned;
+    }
+
+    /** Keeps every change on disk and stops tracking it, which clears the changed-files bar. */
+    acceptAll(): void {
+        this._fileChanges = [];
+        this._originalContents.clear();
+    }
+
+    private _dropPath(absPath: string): void {
+        this._fileChanges = this._fileChanges.filter((c) => this._resolveFilePath(c.filePath) !== absPath);
+        this._originalContents.delete(absPath);
     }
 
     async undoFileChange(filePath: string, _toolCallId: string): Promise<void> {
@@ -184,10 +223,7 @@ export class DiffManager implements vscode.Disposable {
             }
         } catch { /* best effort */ }
 
-        this._fileChanges = this._fileChanges.filter(c =>
-            this._resolveFilePath(c.filePath) !== absPath
-        );
-        this._originalContents.delete(absPath);
+        this._dropPath(absPath);
     }
 
     private _suspendedChanges: FileChangeInfo[] = [];

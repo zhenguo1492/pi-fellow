@@ -15,6 +15,7 @@ export const PI_BUILTIN_SLASH_COMMANDS: ReadonlyArray<{ name: string; descriptio
     { name: 'compact', description: 'Compact session context' },
     { name: 'resume', description: 'Resume another session' },
     { name: 'session', description: 'Show session info' },
+    { name: 'tree', description: 'Explore and navigate session branch tree' },
 ];
 
 export async function listSlashCommandsForUi(
@@ -67,7 +68,7 @@ export async function tryHandleBuiltinSlashCommand(
             vscode.window.showInformationMessage('Pi session reloaded.');
             return true;
         case 'settings':
-            await vscode.commands.executeCommand('pi-agent.openSettings');
+            await vscode.commands.executeCommand('oh-my-pi-chater.openSettings');
             return true;
         case 'compact':
             await manager.compact(args || undefined);
@@ -85,6 +86,9 @@ export async function tryHandleBuiltinSlashCommand(
             vscode.window.showInformationMessage(msg, { modal: true });
             return true;
         }
+        case 'tree':
+            await manager.showSessionTree();
+            return true;
         default:
             return false;
     }
@@ -102,8 +106,8 @@ export async function runPiLogoutFlow(manager?: PiChatSession): Promise<void> {
 }
 
 async function runResumeFlow(_manager: PiChatSession): Promise<void> {
-    await vscode.commands.executeCommand('pi-agent.focusChat');
-    await vscode.commands.executeCommand('pi-agent.openSessionPanel');
+    await vscode.commands.executeCommand('oh-my-pi-chater.focusChat');
+    await vscode.commands.executeCommand('oh-my-pi-chater.openSessionPanel');
 }
 
 export async function tryHandleBashPrefix(manager: PiChatSession, text: string): Promise<boolean> {

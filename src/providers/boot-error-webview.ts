@@ -27,9 +27,9 @@ export function createBootErrorWebviewProvider(message: string): vscode.WebviewV
 </style>
 </head>
 <body>
-  <h2>vs-pi-agent could not start</h2>
+  <h2>Oh My Pi Chater could not start</h2>
   <p>${esc}</p>
-  <p>Open <strong>Output → vs-pi-agent</strong> for details, then reinstall the VSIX or run <code>npm install</code> in the extension folder.</p>
+  <p>Open <strong>Output → Oh My Pi Chater</strong> for details, then reinstall the VSIX or run <code>npm install</code> in the extension folder.</p>
 </body>
 </html>`;
         },

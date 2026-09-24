@@ -12,11 +12,14 @@ describe('Protocol types', () => {
             { type: 'getModels' },
             { type: 'openResumePicker' },
             { type: 'toggleSessionPanel' },
-            { type: 'loadSessionList', scope: 'current', sort: 'threaded', query: '' },
+            { type: 'loadSessionList', query: '' },
             { type: 'resumeSession', sessionPath: '/tmp/s.jsonl' },
             { type: 'deleteSession', sessionPath: '/tmp/s.jsonl' },
             { type: 'renameSession', sessionPath: '/tmp/s.jsonl', name: 'My session' },
             { type: 'closeSessionPanel' },
+            { type: 'setBackend', backend: 'omp' },
+            { type: 'setBackend', backend: 'pi' },
+            { type: 'createTab', backend: 'pi' },
             { type: 'getState' },
         ];
 
@@ -35,13 +38,19 @@ describe('Protocol types', () => {
             sessionId: 'test-id',
             model: { provider: 'ollama', id: 'test/model', name: 'Test Model' },
             thinkingLevel: 'off',
+            activeBackend: 'omp',
+            availableBackends: ['omp', 'pi'],
         };
 
         const messages: ServerMessage[] = [
             { type: 'ready' },
             { type: 'stateSync', state },
             { type: 'error', message: 'something went wrong' },
-            { type: 'models', models: [{ provider: 'ollama', id: 'test', name: 'Test' }] },
+            {
+                type: 'models',
+                models: [{ provider: 'ollama', id: 'test', name: 'Test' }],
+                favorites: ['ollama/test'],
+            },
         ];
 
         for (const msg of messages) {

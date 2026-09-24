@@ -1,3 +1,5 @@
+import type { AgentBackend } from './agentBackend';
+
 export interface RecommendedPiPackage {
     id: string;
     source: string;
@@ -35,12 +37,18 @@ export function isPackageSourceConfigured(packages: string[], match: string): bo
 }
 
 /**
- * Missing = not listed in ~/.pi/agent settings packages.
+ * Missing = not listed in the agent settings packages.
+ * omp: always none. These are pi extensions — omp's legacy pi shim cannot load them
+ * (pi-plan-mode needs `withFileMutationQueue`), and omp ships MCP natively (`/mcp`).
  */
 export function getMissingRecommendedPackages(
     configuredPackages: string[],
-    slashCommands: string[] = [],
+    slashCommands: string[],
+    backend: AgentBackend,
 ): RecommendedPiPackage[] {
+    if (backend === 'omp') {
+        return [];
+    }
     return RECOMMENDED_PI_PACKAGES.filter((pkg) => {
         if (isPackageSourceConfigured(configuredPackages, pkg.packageMatch)) {
             return false;

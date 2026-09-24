@@ -61,10 +61,12 @@ export function readPlanModeInfoFromContext(ctx: PlanModeContext): PlanModeInfo 
 
     let raw: RawPlanModeState = persisted ?? { enabled: false, awaitingAction: false };
 
-    const fromMessages = extractPlanFromMessages(messages);
-    const fromBranch = extractPlanFromBranch(jsonlEntries);
-    const planMarkdown = (raw.latestPlan?.trim() || fromBranch || fromMessages || '').trim();
     const enabled = raw.enabled === true;
+    // Assistant text is only a plan while plan mode is on: any message that merely mentions
+    // the tag (docs, code review, this very parser) would otherwise read as a proposed plan.
+    const fromMessages = enabled ? extractPlanFromMessages(messages) : '';
+    const fromBranch = extractPlanFromBranch(jsonlEntries);
+    const planMarkdown = (raw.latestPlan?.trim() || fromBranch || fromMessages).trim();
     const awaitingAction = raw.awaitingAction === true;
     const hasPlan = planMarkdown.length > 0;
 

@@ -9,7 +9,7 @@ export function getKemdiMcpHints(server: McpServerSummary): string[] {
     const preview = server.commandPreview ?? '';
     if (/--model\b|-m\b/.test(preview)) {
         hints.push(
-            'Remove --model from mcp.json args — it overrides Pi and runs a separate LLM. vs-pi-agent can sync model into workspace .kemdicode-mcp.json (gitignored).',
+            'Remove --model from mcp.json args — it overrides Pi and runs a separate LLM. Oh My Pi Chater can sync model into workspace .kemdicode-mcp.json (gitignored).',
         );
     }
     if (server.directTools !== true) {

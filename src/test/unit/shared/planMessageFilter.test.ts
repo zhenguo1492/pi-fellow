@@ -39,6 +39,18 @@ describe('planMessageFilter', () => {
         expect(stripPlanContentForChatDisplay(msg.content as string)).toContain('Any questions?');
     });
 
+    it('keeps an assistant step that only thinks and calls tools', () => {
+        expect(
+            shouldHideMessageInChat({
+                role: 'assistant',
+                content: [
+                    { type: 'thinking', thinking: 'read the file first' },
+                    { type: 'toolCall', id: 'c1', name: 'read', arguments: { path: 'a.ts' } },
+                ],
+            }),
+        ).toBe(false);
+    });
+
     it('hides implement-plan user kickoff', () => {
         expect(
             shouldHideMessageInChat({

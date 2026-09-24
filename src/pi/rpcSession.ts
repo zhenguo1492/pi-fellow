@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import type { ImageContent } from '../shared/piTypes';
 import type {
@@ -5,14 +6,14 @@ import type {
     ModelInfo,
     PlanModeInfo,
     SerializedAgentState,
-    SessionInfo,
     SessionTokenStats,
     SkillInfo,
     SlashCommandListItem,
 } from '../shared/protocol';
 import { EventRouter } from './events';
-import { listAllPiSessionsAsync, listPiSessionsForCwdAsync } from './sessionCatalog';
-import { resolvePiCliInvocation } from './piCliPaths';
+import type { AgentBackend } from './agentBackend';
+import { getAgentLayout, describeCliInvocation, resolvePiCliInvocation } from './piCliPaths';
+import { readLoggedInProviders } from './loggedInProviders';
 import { applyPiCliDefaultModel } from './piCliSync';
 import { PiRpcBridge } from './piRpcBridge';
 import { PiExtensionChrome } from './piExtensionChrome';
@@ -31,6 +32,10 @@ import {
 } from './messageForkIds';
 import { readSessionDisplayName, readSessionJsonlEntries } from './sessionJsonl';
 import { readPiSettingsJson } from './piSettingsJson';
+import { readFavoriteModels, toggleFavoriteModel } from './favoriteModels';
+
+/** Plan mode drives the pi-plan-mode extension; omp's RPC mode exposes no plan-mode control. */
+const PLAN_MODE_PI_ONLY = 'Plan mode is only available with the pi backend.';
 
 const RPC_BUILTIN_SLASH: ReadonlyArray<{ name: string; description: string }> = [
     { name: 'login', description: 'Configure provider authentication' },
@@ -86,6 +91,7 @@ export class PiRpcSessionManager {
     private _sessionStats: SessionTokenStats | undefined;
     private _extensionUiBridge: ExtensionUiBridge | undefined;
     private _postChatError: ((message: string) => void) | undefined;
+    private _onOpenSessionTree: (() => Promise<void> | void) | undefined;
 
     constructor(outputChannel: vscode.OutputChannel) {
         this._outputChannel = outputChannel;
@@ -95,12 +101,21 @@ export class PiRpcSessionManager {
         return this._shim;
     }
 
+    private _readyPromise: Promise<void> | null = null;
+    private _isInitialized = false;
+
     getSessionTokenStats(): SessionTokenStats | undefined {
         return this._sessionStats;
     }
 
     get isReady(): boolean {
-        return this._bridge.isStarted;
+        return this._isInitialized && this._bridge.isStarted;
+    }
+
+    async waitUntilReady(): Promise<void> {
+        if (this._readyPromise) {
+            await this._readyPromise;
+        }
     }
 
     get rpcExtensionUi(): RpcExtensionUiHandler {
@@ -115,13 +130,29 @@ export class PiRpcSessionManager {
         this._postChatError = fn;
     }
 
+    setOnOpenSessionTree(fn: (() => Promise<void> | void) | undefined): void {
+        this._onOpenSessionTree = fn;
+    }
+
+    async getSessionTree(): Promise<{ tree: any[]; leafId: string | null }> {
+        return this._bridge.getTree();
+    }
+
+    async showSessionTree(): Promise<void> {
+        if (this._onOpenSessionTree) {
+            await this._onOpenSessionTree();
+        } else {
+            await this.showForkPicker();
+        }
+    }
+
     postChatError(message: string): void {
         this._postChatError?.(message);
     }
 
     setToolApprovalHandler(_handler: ToolApprovalHandler | undefined): void {
         this._outputChannel.appendLine(
-            'Tool approval is handled inside the Pi CLI process (pi-agent.autoApproveTools / Pi settings).',
+            'Tool approval is handled inside the Pi CLI process (oh-my-pi-chater.autoApproveTools / Pi settings).',
         );
     }
 
@@ -133,36 +164,53 @@ export class PiRpcSessionManager {
         return 0;
     }
 
-    async initialize(): Promise<void> {
-        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    get backend(): AgentBackend {
+        return this._bridge.backend;
+    }
+
+    async initialize(preferredBackend?: AgentBackend, targetCwd?: string): Promise<void> {
+        this._isInitialized = false;
+        const promise = this._doInitialize(preferredBackend, targetCwd);
+        this._readyPromise = promise;
+        await promise;
+    }
+
+    private async _doInitialize(preferredBackend?: AgentBackend, targetCwd?: string): Promise<void> {
+        const cwd = targetCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
         this._shim = new RpcSessionShim(cwd);
 
-        const config = vscode.workspace.getConfiguration('pi-agent');
+        const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
         const args: string[] = [];
         const thinking = config.get<string>('thinkingLevel', 'off');
         if (thinking && thinking !== 'off') {
             args.push('--thinking', thinking);
         }
 
-        this._outputChannel.appendLine('Starting Pi CLI in RPC mode (pi --mode rpc)…');
-        const invocation = await resolvePiCliInvocation();
+        const invocation = await resolvePiCliInvocation(preferredBackend);
         this._outputChannel.appendLine(
-            `  Node: ${invocation.nodePath} | CLI: ${invocation.cliJsPath}`,
+            `Starting ${invocation.backend} in RPC mode (--mode rpc) — ${describeCliInvocation(invocation)}`,
         );
-        await this._bridge.start(cwd, args);
+        await this._bridge.start(cwd, args, preferredBackend);
         this._rpcUi.setChrome(this.extensionChrome);
 
         this._unsubscribe = this._bridge.on((event) => {
             this._onBridgeEvent(event);
         });
 
-        await this._applyRpcModesFromSettings();
-        await this._refreshState();
-        await this._refreshMessages();
-        await this._refreshModelsAndSkills();
-        await this._refreshSessionStats();
-        await applyPiCliDefaultModel(this);
+        await Promise.all([
+            this._applyRpcModesFromSettings(),
+            this._refreshState(),
+            this._refreshMessages(),
+            this._refreshModelsAndSkills(),
+            this._refreshSessionStats(),
+        ]);
+        try {
+            await applyPiCliDefaultModel(this);
+        } catch {
+            /* model not available in current backend */
+        }
 
+        this._isInitialized = true;
         const state = this._shim;
         this._outputChannel.appendLine(
             `Pi RPC ready. Model: ${state?.model ? `${state.model.provider}/${state.model.id}` : 'none'}`,
@@ -174,8 +222,10 @@ export class PiRpcSessionManager {
         try {
             const steering = settings.steeringMode === 'all' ? 'all' : 'one-at-a-time';
             const followUp = settings.followUpMode === 'all' ? 'all' : 'one-at-a-time';
-            await this._bridge.setSteeringMode(steering);
-            await this._bridge.setFollowUpMode(followUp);
+            await Promise.all([
+                this._bridge.setSteeringMode(steering),
+                this._bridge.setFollowUpMode(followUp),
+            ]);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             this._outputChannel.appendLine(`RPC steering/follow-up mode: ${msg}`);
@@ -232,9 +282,12 @@ export class PiRpcSessionManager {
 
     /** Refresh messages + session state from Pi RPC (await before UI stateSync). */
     async syncFromRpc(): Promise<void> {
-        await this._refreshMessages();
-        await Promise.all([this._refreshState(), this._refreshSessionStats()]);
-        await this._refreshModelsAndSkills();
+        await Promise.all([
+            this._refreshMessages(),
+            this._refreshState(),
+            this._refreshSessionStats(),
+            this._refreshModelsAndSkills(),
+        ]);
     }
 
     private async _refreshState(): Promise<void> {
@@ -291,8 +344,9 @@ export class PiRpcSessionManager {
         try {
             this._messages = (await this._bridge.getMessages()) as any[];
             await this._attachForkEntryIds();
-        } catch {
-            /* ignore */
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            this._outputChannel.appendLine(`Loading session messages failed: ${message}`);
         }
     }
 
@@ -489,24 +543,41 @@ export class PiRpcSessionManager {
     async newSession(): Promise<void> {
         await this._bridge.newSession();
         await this.syncFromRpc();
-        await applyPiCliDefaultModel(this);
+        try {
+            await applyPiCliDefaultModel(this);
+        } catch {
+            /* model not available in current backend */
+        }
+    }
+
+    /**
+     * Re-read the session file after another process (the TUI) appended to it. A same-path
+     * `switch_session` does not reliably reload, so bounce through a fresh (unpersisted) session.
+     */
+    async reloadSessionFromDisk(): Promise<void> {
+        const file = this._shim?.sessionFile;
+        if (file && fs.existsSync(file)) {
+            await this._bridge.newSession();
+            await this._bridge.switchSession(file);
+        }
         await this.syncFromRpc();
     }
 
-    async getSessions(scope: 'current' | 'all' = 'current'): Promise<SessionInfo[]> {
-        const { resolvePiWorkspaceCwd } = await import('./piCliPaths');
-        const cwd = resolvePiWorkspaceCwd(this._shim?.cwd);
-        return scope === 'all' ? listAllPiSessionsAsync() : listPiSessionsForCwdAsync(cwd);
-    }
-
     async loadSession(sessionPath: string): Promise<boolean> {
+        // A freshly created tab's RPC process may still be starting; switching before
+        // `initialize` settles fails ("bridge not started") or races its state refresh.
+        await this.waitUntilReady();
         try {
             const result = await this._bridge.switchSession(sessionPath);
             if (result.cancelled) {
                 return false;
             }
             await this.syncFromRpc();
-            await applyPiCliDefaultModel(this);
+            try {
+                await applyPiCliDefaultModel(this);
+            } catch {
+                /* model not available in current backend */
+            }
             return true;
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
@@ -631,7 +702,12 @@ export class PiRpcSessionManager {
     private async _refreshModelsAndSkills(): Promise<void> {
         try {
             const models = await this._bridge.getAvailableModels();
-            this._cachedModels = models.map((m) => ({
+            const loggedIn = vscode.workspace.getConfiguration('oh-my-pi-chater').get<boolean>('showAllModels', false)
+                ? undefined
+                : await this._loggedInProviders();
+            const visible = loggedIn ? models.filter((m) => loggedIn.has(m.provider)) : models;
+            // No stored login at all (env-var / models.json keys only): don't leave the picker empty.
+            this._cachedModels = (visible.length > 0 ? visible : models).map((m) => ({
                 provider: m.provider,
                 id: m.id,
                 name: m.id,
@@ -639,11 +715,29 @@ export class PiRpcSessionManager {
         } catch {
             this._cachedModels = [];
         }
-        this._cachedSkills = await this.getSkillsAsync();
+        try {
+            this._cachedSkills = await this.getSkillsAsync();
+        } catch {
+            this._cachedSkills = [];
+        }
         try {
             this._cachedCommands = await this.listSlashCommands();
         } catch {
             this._cachedCommands = [];
+        }
+    }
+
+    /** Stored `/login` credentials; omp on runtimes without `node:sqlite` falls back to RPC auth status. */
+    private async _loggedInProviders(): Promise<Set<string> | undefined> {
+        const stored = await readLoggedInProviders(getAgentLayout(this.backend));
+        if (stored || this.backend !== 'omp') {
+            return stored;
+        }
+        try {
+            const providers = await this._bridge.getLoginProviders();
+            return new Set(providers.filter((p) => p.authenticated).map((p) => p.id));
+        } catch {
+            return undefined;
         }
     }
 
@@ -654,8 +748,13 @@ export class PiRpcSessionManager {
             description: c.description,
             source: 'builtin' as const,
         }));
+        const builtinNames = new Set(RPC_BUILTIN_SLASH.map((c) => c.name));
         const commands = await this._bridge.getCommands();
         for (const cmd of commands) {
+            // VS Code handles its own builtins (model picker, settings…); omp also lists them.
+            if (builtinNames.has(cmd.name)) {
+                continue;
+            }
             items.push({
                 invocation: `/${cmd.name}`,
                 name: cmd.name,
@@ -679,7 +778,7 @@ export class PiRpcSessionManager {
     }
 
     getAutoApproveTools(): boolean {
-        return vscode.workspace.getConfiguration('pi-agent').get<boolean>('autoApproveTools', false);
+        return vscode.workspace.getConfiguration('oh-my-pi-chater').get<boolean>('autoApproveTools', false);
     }
 
     getSkills(): SkillInfo[] {
@@ -703,6 +802,10 @@ export class PiRpcSessionManager {
         return this._shim?.activeToolNames ?? [];
     }
 
+    get messages(): any[] {
+        return this._messages;
+    }
+
     getMessages(): any[] {
         return this._messages;
     }
@@ -717,6 +820,9 @@ export class PiRpcSessionManager {
     }
 
     async setAgentMode(mode: 'agent' | 'plan'): Promise<void> {
+        if (this.backend !== 'pi') {
+            throw new Error(PLAN_MODE_PI_ONLY);
+        }
         const cmd = mode === 'plan' ? '/plan' : '/plan exit';
         await this._bridge.prompt(cmd);
         // Plan extension updates jsonl + chrome shortly after slash handling.
@@ -725,6 +831,9 @@ export class PiRpcSessionManager {
     }
 
     async implementPlan(): Promise<void> {
+        if (this.backend !== 'pi') {
+            throw new Error(PLAN_MODE_PI_ONLY);
+        }
         const plan = this.getPlanModeInfo().planMarkdown.trim();
         if (!plan) {
             throw new Error('No proposed plan to implement');
@@ -771,12 +880,75 @@ export class PiRpcSessionManager {
             vscode.window.showWarningMessage('No models from Pi RPC. Check ~/.pi/agent auth.');
             return;
         }
-        const pick = await vscode.window.showQuickPick(
-            models.map((m) => ({ label: m.name ?? m.id, description: m.provider, model: m })),
-            { placeHolder: 'Select model' },
-        );
+        type ModelPick = vscode.QuickPickItem & { model?: ModelInfo };
+        const current = this.getCurrentModel();
+        const keyOf = (m: ModelInfo): string => `${m.provider}/${m.id}`;
+        // Item buttons only render on the hovered/active row, so the leading icon carries the
+        // always-visible starred state; the trailing button is the toggle.
+        const toItem = (m: ModelInfo, starred: boolean): ModelPick => ({
+            label: m.name ?? m.id,
+            iconPath: starred
+                ? new vscode.ThemeIcon('star-full', new vscode.ThemeColor('charts.yellow'))
+                : new vscode.ThemeIcon('star-empty'),
+            description:
+                current?.provider === m.provider && current.id === m.id ? `${m.provider} · current` : m.provider,
+            model: m,
+            buttons: [
+                {
+                    iconPath: new vscode.ThemeIcon(starred ? 'close' : 'star-add'),
+                    tooltip: starred ? 'Remove from favorites' : 'Add to favorites (shown in the chat input)',
+                },
+            ],
+        });
+        // Favorites first (starring order); the rest keep RPC order.
+        const buildItems = (): ModelPick[] => {
+            const favorites = readFavoriteModels();
+            const byKey = new Map(models.map((m) => [keyOf(m), m]));
+            const starred = favorites.map((k) => byKey.get(k)).filter((m): m is ModelInfo => !!m);
+            const rest = models.filter((m) => !favorites.includes(keyOf(m)));
+            const items: ModelPick[] = [];
+            if (starred.length > 0) {
+                items.push({ label: 'Favorites', kind: vscode.QuickPickItemKind.Separator });
+                items.push(...starred.map((m) => toItem(m, true)));
+                items.push({ label: 'All models', kind: vscode.QuickPickItemKind.Separator });
+            }
+            items.push(...rest.map((m) => toItem(m, false)));
+            return items;
+        };
+
+        const quickPick = vscode.window.createQuickPick<ModelPick>();
+        quickPick.placeholder = 'Select model · ★ = in chat input favorites · hover a row to star/unstar';
+        quickPick.matchOnDescription = true;
+        quickPick.items = buildItems();
+        const currentItem = current && quickPick.items.find((i) => i.model && keyOf(i.model) === keyOf(current));
+        if (currentItem) {
+            quickPick.activeItems = [currentItem];
+        }
+        quickPick.onDidTriggerItemButton(async ({ item }) => {
+            if (!item.model) {
+                return;
+            }
+            const key = keyOf(item.model);
+            await toggleFavoriteModel(key);
+            quickPick.items = buildItems();
+            const same = quickPick.items.find((i) => i.model && keyOf(i.model) === key);
+            if (same) {
+                quickPick.activeItems = [same];
+            }
+        });
+        const pick = await new Promise<ModelInfo | undefined>((resolve) => {
+            quickPick.onDidAccept(() => {
+                resolve(quickPick.selectedItems[0]?.model);
+                quickPick.hide();
+            });
+            quickPick.onDidHide(() => {
+                resolve(undefined);
+                quickPick.dispose();
+            });
+            quickPick.show();
+        });
         if (pick) {
-            await this.setModel(pick.model.provider, pick.model.id);
+            await this.setModel(pick.provider, pick.id);
         }
     }
 
@@ -826,8 +998,12 @@ function safeSerialize(obj: unknown): unknown {
     }
 }
 
-export async function createPiChatSession(outputChannel: vscode.OutputChannel): Promise<PiRpcSessionManager> {
+export async function createPiChatSession(
+    outputChannel: vscode.OutputChannel,
+    preferredBackend?: AgentBackend,
+    targetCwd?: string,
+): Promise<PiRpcSessionManager> {
     const rpc = new PiRpcSessionManager(outputChannel);
-    await rpc.initialize();
+    await rpc.initialize(preferredBackend, targetCwd);
     return rpc;
 }

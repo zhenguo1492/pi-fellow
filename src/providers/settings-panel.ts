@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { SettingsClientMessage, SettingsServerMessage, SettingsData, SkillInfo } from '../shared/protocol';
+import type { SettingsClientMessage, SettingsServerMessage, SettingsData, SkillInfo, AgentBackend } from '../shared/protocol';
 import type { PiChatSession } from '../pi/slashCommands';
 import {
     addPiExtensionPath,
@@ -19,15 +19,18 @@ import {
 import {
     getPiAgentDir,
     isSyncWithPiCli,
-    readPiCliSettingsSummary,
+    readAgentSettingsSummary,
 } from '../pi/piCliSync';
 import { showPiPackageCatalogPicker } from '../pi/piPackageCatalogPicker';
 import { loadMcpSettingsSnapshot, probeMcpServer, setMcpServerEnabled } from '../pi/mcpConfig';
 import { getMissingRecommendedPackages } from '../pi/recommendedPackages';
+import { getAgentLayout, getAvailableBackends, clearCliTargetCache } from '../pi/piCliPaths';
 import { rebuildAgentNativeModules } from '../pi/piExtensionCompat';
 import { runPiLoginFlow, runPiLogoutFlow } from '../pi/slashCommands';
+import { testSttConnectivity } from '../voice/stt';
+import { readVoiceSettings, setSttValid } from '../voice/voiceSettings';
 
-const API_KEY_PREFIX = 'pi-agent.apiKey.';
+const API_KEY_PREFIX = 'oh-my-pi-chater.apiKey.';
 
 export class SettingsPanel {
     private static _instance: SettingsPanel | undefined;
@@ -35,6 +38,7 @@ export class SettingsPanel {
     private _extensionUri: vscode.Uri;
     private _secrets: vscode.SecretStorage;
     private _piSession: PiChatSession | undefined;
+    private _currentBackend: AgentBackend;
     private _extensionVersion: string;
     private _outputChannel: vscode.OutputChannel | undefined;
     private _disposables: vscode.Disposable[] = [];
@@ -53,6 +57,7 @@ export class SettingsPanel {
         this._secrets = secrets;
         this._extensionVersion = extensionVersion;
         this._piSession = piSession;
+        this._currentBackend = getAgentLayout().backend;
         this._outputChannel = outputChannel;
 
         this._panel.webview.html = this._getHtml();
@@ -66,7 +71,10 @@ export class SettingsPanel {
         this._panel.onDidDispose(() => this._dispose(), undefined, this._disposables);
 
         const configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('pi-agent')) {
+            if (e.affectsConfiguration('oh-my-pi-chater.backend') || e.affectsConfiguration('oh-my-pi-chater.cliPath')) {
+                this._currentBackend = getAgentLayout().backend;
+            }
+            if (e.affectsConfiguration('oh-my-pi-chater')) {
                 void this._sendSettings();
             }
         });
@@ -95,7 +103,7 @@ export class SettingsPanel {
             inst._post({ type: 'scrollToSection', section });
             return;
         }
-        vscode.commands.executeCommand('pi-agent.openSettings').then(() => {
+        vscode.commands.executeCommand('oh-my-pi-chater.openSettings').then(() => {
             const opened = SettingsPanel._instance;
             if (opened) {
                 opened._post({ type: 'scrollToSection', section });
@@ -112,6 +120,7 @@ export class SettingsPanel {
     ): void {
         if (SettingsPanel._instance) {
             SettingsPanel._instance._piSession = piSession;
+            SettingsPanel._instance._currentBackend = getAgentLayout().backend;
             if (outputChannel) {
                 SettingsPanel._instance._outputChannel = outputChannel;
             }
@@ -124,8 +133,8 @@ export class SettingsPanel {
         }
 
         const panel = vscode.window.createWebviewPanel(
-            'pi-agent.settings',
-            'vs-pi-agent Settings',
+            'oh-my-pi-chater.settings',
+            'Oh My Pi Chater Settings',
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
@@ -174,6 +183,15 @@ export class SettingsPanel {
                 case 'getSkills':
                     await this._sendSkills();
                     break;
+                case 'setBackend':
+                    if (msg.backend === 'omp' || msg.backend === 'pi') {
+                        this._currentBackend = msg.backend;
+                        const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
+                        await config.update('backend', msg.backend, vscode.ConfigurationTarget.Global);
+                        clearCliTargetCache();
+                        await this._afterPiConfigChange(`Switched to ${msg.backend} backend`);
+                    }
+                    break;
                 case 'updatePiDefaults':
                     await updatePiDefaults(
                         {
@@ -182,8 +200,13 @@ export class SettingsPanel {
                             thinkingLevel: msg.thinkingLevel,
                         },
                         this._piSession,
+                        this._currentBackend,
                     );
-                    await this._afterPiConfigChange('Defaults saved to ~/.pi/agent/settings.json');
+                    await this._afterPiConfigChange(
+                        this._currentBackend === 'omp'
+                            ? 'Defaults saved to ~/.omp/agent/config.yml'
+                            : 'Defaults saved to ~/.pi/agent/settings.json',
+                    );
                     break;
                 case 'addPiPackage':
                     await vscode.window.withProgress(
@@ -219,28 +242,28 @@ export class SettingsPanel {
                     await this._afterPiConfigChange('Extension path removed');
                     break;
                 case 'addPiSkillPath':
-                    await addPiSkillPath(msg.path, this._piSession);
+                    await addPiSkillPath(msg.path, this._piSession, this._currentBackend);
                     await this._afterPiConfigChange('Skill path added');
                     break;
                 case 'removePiSkillPath':
-                    await removePiSkillPathAt(msg.index, this._piSession);
+                    await removePiSkillPathAt(msg.index, this._piSession, this._currentBackend);
                     schedulePiSessionReload(this._piSession, this._outputChannel);
                     await this._afterPiConfigChange('Skill path removed');
                     break;
                 case 'setPiEnableSkillCommands':
-                    await setPiEnableSkillCommands(msg.enabled, this._piSession);
+                    await setPiEnableSkillCommands(msg.enabled, this._piSession, this._currentBackend);
                     await this._afterPiConfigChange('Skill commands setting updated');
                     break;
                 case 'setPiSteeringMode':
-                    await setPiSteeringMode(msg.mode, this._piSession);
+                    await setPiSteeringMode(msg.mode, this._piSession, this._currentBackend);
                     await this._afterPiConfigChange('Steering mode updated');
                     break;
                 case 'setPiFollowUpMode':
-                    await setPiFollowUpMode(msg.mode, this._piSession);
+                    await setPiFollowUpMode(msg.mode, this._piSession, this._currentBackend);
                     await this._afterPiConfigChange('Follow-up mode updated');
                     break;
                 case 'openPiAgentFile':
-                    await openPiAgentFile(msg.file);
+                    await openPiAgentFile(msg.file, this._currentBackend);
                     break;
                 case 'reloadPiSession':
                     if (this._piSession) {
@@ -255,7 +278,7 @@ export class SettingsPanel {
                     await this._sendMcpSnapshot();
                     break;
                 case 'setMcpServerEnabled':
-                    await setMcpServerEnabled(msg.scope, msg.serverName, msg.enabled);
+                    await setMcpServerEnabled(msg.scope, msg.serverName, msg.enabled, this._currentBackend);
                     this._mcpProbeResults.delete(msg.serverName);
                     await this._afterPiConfigChange(
                         msg.enabled ? `MCP server "${msg.serverName}" enabled` : `MCP server "${msg.serverName}" disabled`,
@@ -274,11 +297,14 @@ export class SettingsPanel {
                     await this._runPiLogout();
                     break;
                 case 'rebuildNativeModules':
-                    await rebuildAgentNativeModules(this._outputChannel ?? vscode.window.createOutputChannel('vs-pi-agent'));
+                    await rebuildAgentNativeModules(this._outputChannel ?? vscode.window.createOutputChannel('Oh My Pi Chater'));
                     if (this._piSession) {
                         await this._piSession.reloadPiAgentResources();
                     }
                     await this._sendSettings();
+                    break;
+                case 'testStt':
+                    await this._testStt(msg.url);
                     break;
             }
         } catch (err: any) {
@@ -308,36 +334,34 @@ export class SettingsPanel {
         if (!isSyncWithPiCli()) {
             return;
         }
-        const loaded = await loadPiAgentConfigForSettings(this._piSession);
+        const loaded = await loadPiAgentConfigForSettings(this._piSession, this._currentBackend);
         const packages = loaded.config?.packages ?? [];
-        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults);
+        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults, this._currentBackend);
         this._post({ type: 'mcpSnapshot', snapshot });
     }
 
     private async _testMcpServer(serverName: string): Promise<void> {
-        const loaded = await loadPiAgentConfigForSettings(this._piSession);
+        const loaded = await loadPiAgentConfigForSettings(this._piSession, this._currentBackend);
         const packages = loaded.config?.packages ?? [];
-        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults);
+        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults, this._currentBackend);
         const server = snapshot.servers.find((s) => s.name === serverName);
         if (!server) {
             this._post({ type: 'error', message: `Unknown MCP server: ${serverName}` });
             return;
         }
-        const result = await probeMcpServer(server);
+        const result = await probeMcpServer(server, this._currentBackend);
         this._mcpProbeResults.set(serverName, result);
         await this._sendMcpSnapshot();
         this._post({
             type: result.ok ? 'success' : 'error',
-            message: result.ok
-                ? `${serverName}: ${result.message}`
-                : `${serverName}: ${result.message}`,
+            message: `${serverName}: ${result.message}`,
         });
     }
 
     private async _testAllMcpServers(): Promise<void> {
-        const loaded = await loadPiAgentConfigForSettings(this._piSession);
+        const loaded = await loadPiAgentConfigForSettings(this._piSession, this._currentBackend);
         const packages = loaded.config?.packages ?? [];
-        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults);
+        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults, this._currentBackend);
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -349,7 +373,7 @@ export class SettingsPanel {
                     if (!server.enabled) {
                         continue;
                     }
-                    const result = await probeMcpServer(server);
+                    const result = await probeMcpServer(server, this._currentBackend);
                     this._mcpProbeResults.set(server.name, result);
                 }
             },
@@ -358,22 +382,62 @@ export class SettingsPanel {
         this._post({ type: 'success', message: 'MCP connection tests finished' });
     }
 
-    private async _updateSetting(key: string, value: any): Promise<void> {
-        const config = vscode.workspace.getConfiguration('pi-agent');
+    private async _updateSetting(key: string, value: unknown): Promise<void> {
+        const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
+        if (key === 'voice.sttUrl') {
+            setSttValid(false);
+        }
         await config.update(key, value, vscode.ConfigurationTarget.Global);
-        await this._sendSettings();
+    }
+
+    private async _testStt(urlOverride?: string): Promise<void> {
+        const { sttUrl, sttModel } = readVoiceSettings();
+        const effectiveUrl = (urlOverride !== undefined ? urlOverride.trim() : sttUrl);
+        if (!effectiveUrl) {
+            setSttValid(false);
+            this._post({
+                type: 'sttTestResult',
+                ok: false,
+                message: 'Enter a Speech-to-text URL first.',
+            });
+            return;
+        }
+        try {
+            const res = await testSttConnectivity(effectiveUrl, sttModel);
+            if (res.ok && urlOverride !== undefined) {
+                const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
+                await config.update('voice.sttUrl', effectiveUrl, vscode.ConfigurationTarget.Global);
+            }
+            setSttValid(res.ok);
+            this._post({
+                type: 'sttTestResult',
+                ok: res.ok,
+                message: res.ok
+                    ? `STT connected (HTTP 200) — ${sttModel || res.models[0] || 'ready'}`
+                    : `Connection failed: ${res.message}`,
+            });
+        } catch (err: unknown) {
+            setSttValid(false);
+            const message = err instanceof Error ? err.message : String(err);
+            this._post({
+                type: 'sttTestResult',
+                ok: false,
+                message: `Connection failed: ${message}`,
+            });
+        }
     }
 
     private async _sendSettings(): Promise<void> {
-        const config = vscode.workspace.getConfiguration('pi-agent');
+        const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
+        const backend = this._currentBackend;
         const sync = isSyncWithPiCli();
         const provider = config.get<string>('apiProvider', '');
-        const agentDir = getPiAgentDir();
-        const piSummary = sync ? readPiCliSettingsSummary() : undefined;
+        const agentDir = getPiAgentDir(backend);
+        const piSummary = sync ? readAgentSettingsSummary(backend) : undefined;
         let piConfig: SettingsData['piConfig'];
         let piConfigLoadError: string | undefined;
         if (sync) {
-            const loaded = await loadPiAgentConfigForSettings(this._piSession);
+            const loaded = await loadPiAgentConfigForSettings(this._piSession, backend);
             piConfig = loaded.config;
             piConfigLoadError = loaded.error;
         }
@@ -384,9 +448,11 @@ export class SettingsPanel {
             apiKeySet = !!stored;
         }
 
-        const authMethod = this._detectAuthMethod(provider, apiKeySet, sync, piConfig?.authProviders);
+        const authMethod = this._detectAuthMethod(provider, apiKeySet, sync, piConfig?.authProviders, backend);
 
         const data: SettingsData = {
+            backend,
+            availableBackends: getAvailableBackends(),
             extensionVersion: this._extensionVersion,
             syncWithPiCli: sync,
             piAgentDir: agentDir,
@@ -409,25 +475,28 @@ export class SettingsPanel {
             autoSaveSessions: config.get<boolean>('autoSaveSessions', true),
             sessionStoragePath: config.get<string>('sessionStoragePath', ''),
             contextUsageWarningThreshold: config.get<number>('contextUsageWarningThreshold', 80),
+            voice: readVoiceSettings(),
         };
 
-        if (this._piSession) {
+        if (this._piSession && this._piSession.backend === backend) {
             data.extensionLoadIssues = this._piSession.getExtensionLoadIssues();
             data.loadedExtensionCount = this._piSession.getLoadedExtensionCount();
         }
 
         if (sync && piConfig) {
-            data.mcpSnapshot = await loadMcpSettingsSnapshot(piConfig.packages, this._mcpProbeResults);
-            const slash = this._piSession
+            data.mcpSnapshot = await loadMcpSettingsSnapshot(piConfig.packages, this._mcpProbeResults, backend);
+            const slash = (this._piSession && this._piSession.backend === backend)
                 ? (await this._piSession.listSlashCommands()).map((c) => c.name.replace(/^skill:/, ''))
                 : [];
-            const missing = getMissingRecommendedPackages(piConfig.packages, slash);
+            const missing = getMissingRecommendedPackages(piConfig.packages, slash, backend);
             if (missing.length > 0) {
                 data.recommendedPackagesMissing = missing.map((p) => p.source);
             }
         }
 
-        this._post({ type: 'settings', data });
+        if (this._currentBackend === backend) {
+            this._post({ type: 'settings', data });
+        }
     }
 
     private async _sendSkills(): Promise<void> {
@@ -444,6 +513,7 @@ export class SettingsPanel {
         hasManualKey: boolean,
         sync: boolean,
         authProviders?: { id: string; configured: boolean }[],
+        backend: AgentBackend = 'pi',
     ): SettingsData['authMethod'] {
         if (!sync && hasManualKey) {
             return 'manual';
@@ -467,7 +537,12 @@ export class SettingsPanel {
 
         const fs = require('fs');
         const path = require('path');
-        const authPath = path.join(require('os').homedir(), '.pi', 'agent', 'auth.json');
+        const authPath = path.join(
+            require('os').homedir(),
+            backend === 'omp' ? '.omp' : '.pi',
+            'agent',
+            backend === 'omp' ? 'agent.db' : 'auth.json',
+        );
         if (fs.existsSync(authPath)) {
             return 'pi-login';
         }
@@ -504,7 +579,7 @@ export class SettingsPanel {
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <link rel="stylesheet" href="${styleUri}">
-    <title>vs-pi-agent Settings</title>
+    <title>Oh My Pi Chater Settings</title>
 </head>
 <body>
     <div id="settings-app"></div>

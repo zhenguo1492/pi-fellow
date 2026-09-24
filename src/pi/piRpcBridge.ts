@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { AgentBackend } from './agentBackend';
 import { attachJsonlLineReader, serializeJsonLine } from './jsonl';
-import { piCliChildEnv, resolvePiCliInvocation } from './piCliPaths';
+import { cliCommand, piCliChildEnv, resolvePiCliInvocation } from './piCliPaths';
 import { isVscodeOnlySlash } from './slashCommandRouter';
 import type {
     PiAgentEvent,
@@ -20,6 +21,32 @@ interface PendingRequest {
     reject: (error: Error) => void;
 }
 
+/** omp RPC v2: frames over 1 MiB arrive as ordered base64 `rpc_chunk` lines (reassembled ≤ 64 MiB). */
+interface RpcChunk {
+    type: 'rpc_chunk';
+    chunkId: string;
+    index: number;
+    count: number;
+    byteLength: number;
+    data: string;
+}
+
+interface ChunkAssembly {
+    chunkId: string;
+    count: number;
+    byteLength: number;
+    parts: Buffer[];
+}
+
+/** omp `get_available_commands` source → the pi command sources the UI understands. */
+const OMP_COMMAND_SOURCE: Record<string, RpcSlashCommand['source']> = {
+    builtin: 'builtin',
+    skill: 'skill',
+    extension: 'extension',
+    custom: 'prompt',
+    file: 'prompt',
+};
+
 export class PiRpcBridge {
     private _process: ChildProcessWithoutNullStreams | null = null;
     private _stopReading: (() => void) | null = null;
@@ -28,6 +55,13 @@ export class PiRpcBridge {
     private _requestId = 0;
     private _stderr = '';
     private _exitError: Error | null = null;
+    /** omp renamed some RPC commands (commands list, fork → branch). */
+    private _backend: AgentBackend = 'pi';
+    private _chunkAssembly: ChunkAssembly | undefined;
+
+    get backend(): AgentBackend {
+        return this._backend;
+    }
 
     on(listener: PiRpcBridgeListener): () => void {
         this._listeners.add(listener);
@@ -44,12 +78,13 @@ export class PiRpcBridge {
         }
     }
 
-    async start(cwd: string, extraArgs: string[] = []): Promise<void> {
+    async start(cwd: string, extraArgs: string[] = [], preferredBackend?: AgentBackend): Promise<void> {
         if (this._process) {
             return;
         }
 
-        const invocation = await resolvePiCliInvocation();
+        const invocation = await resolvePiCliInvocation(preferredBackend);
+        this._backend = invocation.backend;
         const args = ['--mode', 'rpc', ...extraArgs];
 
         this._exitError = null;
@@ -61,7 +96,8 @@ export class PiRpcBridge {
         };
 
 
-        const child = spawn(invocation.nodePath, [invocation.cliJsPath, ...args], {
+        const [command, argv] = cliCommand(invocation, args);
+        const child = spawn(command, argv, {
             cwd,
             stdio: ['pipe', 'pipe', 'pipe'],
             env: childEnv,
@@ -95,10 +131,49 @@ export class PiRpcBridge {
             this._handleLine(line);
         });
 
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise<void>((resolve, reject) => {
+            if (child.exitCode !== null) {
+                reject(this._exitError ?? new Error(`Pi RPC exited immediately (code=${child.exitCode})`));
+                return;
+            }
+            let settled = false;
+            const cleanup = () => {
+                child.removeListener('error', onError);
+                child.removeListener('exit', onExit);
+                child.removeListener('spawn', onSpawn);
+            };
+            const onError = (err: Error) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(err);
+            };
+            const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(this._exitError ?? new Error(`Pi RPC exited immediately (code=${code}, signal=${signal})`));
+            };
+            const onSpawn = () => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve();
+            };
+            child.once('error', onError);
+            child.once('exit', onExit);
+            if (child.pid) {
+                onSpawn();
+            } else {
+                child.once('spawn', onSpawn);
+            }
+        });
 
-        if (child.exitCode !== null) {
-            throw this._exitError ?? new Error(`Pi RPC exited immediately (code=${child.exitCode})`);
+        if (this._backend === 'omp') {
+            // v1 caps every frame at 1 MiB: large sessions fail `get_messages` / `get_tree` outright and
+            // oversized stream events get elided. v2 splits big frames into `rpc_chunk`s instead.
+            // Older omp without v2 answers with an error and stays on v1.
+            await this._send({ type: 'negotiate_protocol', protocolVersion: 2 }).catch(() => undefined);
         }
     }
 
@@ -151,19 +226,49 @@ export class PiRpcBridge {
     }
 
     private _handleLine(line: string): void {
+        let data: RpcResponse | PiAgentEvent | PiRpcOutbound | RpcChunk;
         try {
-            const data = JSON.parse(line) as RpcResponse | PiAgentEvent | PiRpcOutbound;
-
-            if (data.type === 'response' && data.id && this._pending.has(data.id)) {
-                const pending = this._pending.get(data.id)!;
-                this._pending.delete(data.id);
-                pending.resolve(data as RpcResponse);
-                return;
-            }
-
-            this._emit(data as PiRpcOutbound);
+            data = JSON.parse(line);
         } catch {
-            /* ignore non-JSON */
+            return; /* ignore non-JSON */
+        }
+        if (data.type === 'rpc_chunk') {
+            const frame = this._pushChunk(data as RpcChunk);
+            if (!frame) return;
+            data = frame;
+        }
+
+        if (data.type === 'response' && data.id && this._pending.has(data.id)) {
+            const pending = this._pending.get(data.id)!;
+            this._pending.delete(data.id);
+            pending.resolve(data as RpcResponse);
+            return;
+        }
+
+        this._emit(data as PiRpcOutbound);
+    }
+
+    /** Collect one chunk; returns the decoded frame once its last chunk arrived. */
+    private _pushChunk(chunk: RpcChunk): RpcResponse | PiRpcOutbound | undefined {
+        let asm = this._chunkAssembly;
+        if (chunk.index === 0) {
+            asm = { chunkId: chunk.chunkId, count: chunk.count, byteLength: chunk.byteLength, parts: [] };
+            this._chunkAssembly = asm;
+        }
+        if (!asm || asm.chunkId !== chunk.chunkId || asm.parts.length !== chunk.index) {
+            // Out-of-sequence chunk: the frame is lost; drop it rather than decode garbage.
+            this._chunkAssembly = undefined;
+            return undefined;
+        }
+        asm.parts.push(Buffer.from(chunk.data, 'base64'));
+        if (asm.parts.length < asm.count) return undefined;
+        this._chunkAssembly = undefined;
+        const bytes = Buffer.concat(asm.parts);
+        if (bytes.byteLength !== asm.byteLength) return undefined;
+        try {
+            return JSON.parse(bytes.toString('utf8'));
+        } catch {
+            return undefined;
         }
     }
 
@@ -276,6 +381,14 @@ export class PiRpcBridge {
         return data.models;
     }
 
+    /** omp only: login-capable providers and whether each has usable credentials. */
+    async getLoginProviders(): Promise<Array<{ id: string; authenticated: boolean }>> {
+        const data = this._data<{ providers: Array<{ id: string; authenticated: boolean }> }>(
+            await this._send({ type: 'get_login_providers' }),
+        );
+        return data.providers;
+    }
+
     async setThinkingLevel(level: string): Promise<void> {
         await this._send({ type: 'set_thinking_level', level });
     }
@@ -310,6 +423,16 @@ export class PiRpcBridge {
     }
 
     async getCommands(): Promise<RpcSlashCommand[]> {
+        if (this._backend === 'omp') {
+            const data = this._data<{ commands: Array<{ name: string; description?: string; source?: string }> }>(
+                await this._send({ type: 'get_available_commands' }),
+            );
+            return data.commands.map((c) => ({
+                name: c.name,
+                description: c.description,
+                source: OMP_COMMAND_SOURCE[c.source ?? ''] ?? 'extension',
+            }));
+        }
         const data = this._data<{ commands: RpcSlashCommand[] }>(await this._send({ type: 'get_commands' }));
         return data.commands;
     }
@@ -343,16 +466,20 @@ export class PiRpcBridge {
     }
 
     async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
-        return this._data(await this._send({ type: 'fork', entryId }));
+        const type = this._backend === 'omp' ? 'branch' : 'fork';
+        return this._data(await this._send({ type, entryId }));
     }
 
     async clone(): Promise<{ cancelled: boolean }> {
+        if (this._backend === 'omp') {
+            throw new Error('Clone session is not available with the omp backend.');
+        }
         return this._data(await this._send({ type: 'clone' }));
     }
 
     async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
         const data = this._data<{ messages: Array<{ entryId: string; text: string }> }>(
-            await this._send({ type: 'get_fork_messages' }),
+            await this._send({ type: this._backend === 'omp' ? 'get_branch_messages' : 'get_fork_messages' }),
         );
         return data.messages;
     }
@@ -362,5 +489,12 @@ export class PiRpcBridge {
             await this._send({ type: 'get_last_assistant_text' }),
         );
         return data.text;
+    }
+
+    async getTree(): Promise<{ tree: any[]; leafId: string | null }> {
+        const data = this._data<{ tree: any[]; leafId: string | null }>(
+            await this._send({ type: 'get_tree' }),
+        );
+        return data;
     }
 }

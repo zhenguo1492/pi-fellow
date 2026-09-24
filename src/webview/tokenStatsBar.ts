@@ -79,39 +79,3 @@ function renderIoSection(st: SessionTokenStats | undefined): string {
         </div>
     `;
 }
-
-/** Compact one-line token summary for the VS Code status bar. */
-export function formatTokenSummaryText(
-    contextUsage: ContextUsageInfo | undefined,
-    sessionTokens: SessionTokenStats | undefined,
-): string {
-    const parts: string[] = [];
-
-    if (contextUsage && contextUsage.contextWindow > 0) {
-        const pct =
-            contextUsage.percent !== null
-                ? `${Math.min(100, Math.max(0, Math.round(contextUsage.percent)))}%`
-                : '—';
-        const used =
-            contextUsage.tokens !== null && contextUsage.tokens >= 0
-                ? formatTokenCount(contextUsage.tokens)
-                : '—';
-        const window = formatTokenCount(contextUsage.contextWindow);
-        parts.push(`Ctx ${used}/${window} (${pct})`);
-    }
-
-    if (sessionTokens) {
-        parts.push(`In ${formatTokenCount(sessionTokens.input)}`);
-        parts.push(`Out ${formatTokenCount(sessionTokens.output)}`);
-        if (sessionTokens.cacheRead > 0 || sessionTokens.cacheWrite > 0) {
-            parts.push(
-                `↻${formatTokenCount(sessionTokens.cacheRead)} ✎${formatTokenCount(sessionTokens.cacheWrite)}`,
-            );
-        }
-        if (sessionTokens.cost > 0) {
-            parts.push(`$${sessionTokens.cost.toFixed(4)}`);
-        }
-    }
-
-    return parts.join(' · ');
-}

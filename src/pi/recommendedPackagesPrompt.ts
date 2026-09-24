@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { PiChatSession } from './slashCommands';
 import { isSyncWithPiCli } from './piCliSync';
+import { getAgentLayout } from './piCliPaths';
 import { installPiPackage } from './piPackageInstall';
 import { getPiPackagesFromSettings } from './piSettingsJson';
 import {
@@ -38,11 +39,18 @@ export async function runRecommendedPackagesSetup(
     outputChannel: vscode.OutputChannel,
     packagesToInstall?: readonly RecommendedPiPackage[],
 ): Promise<void> {
+    const { backend } = getAgentLayout();
+    if (backend === 'omp') {
+        vscode.window.showInformationMessage(
+            'Recommended Pi packages are pi extensions and do not load under omp (omp has MCP built in). Set oh-my-pi-chater.backend to "pi" to use them.',
+        );
+        return;
+    }
     const configured = getPiPackagesFromSettings();
     const slash = await readSlashCommandNames(sessionManager);
     const missing =
         packagesToInstall ??
-        getMissingRecommendedPackages(configured, slash);
+        getMissingRecommendedPackages(configured, slash, backend);
 
     if (missing.length === 0) {
         vscode.window.showInformationMessage('All recommended Pi packages are already configured.');
@@ -83,18 +91,18 @@ export async function maybePromptForRecommendedPackages(
         return;
     }
 
-    const config = vscode.workspace.getConfiguration('pi-agent');
+    const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
     if (!config.get<boolean>('promptRecommendedPackages', true)) {
         return;
     }
 
-    if (context.globalState.get<boolean>('piAgent.recommendedPackagesDismissed', false)) {
+    if (context.globalState.get<boolean>('ohMyPiChater.recommendedPackagesDismissed', false)) {
         return;
     }
 
     const configured = getPiPackagesFromSettings();
     const slash = await readSlashCommandNames(sessionManager);
-    const missing = getMissingRecommendedPackages(configured, slash);
+    const missing = getMissingRecommendedPackages(configured, slash, getAgentLayout().backend);
     if (missing.length === 0) {
         return;
     }
@@ -118,7 +126,7 @@ export async function maybePromptForRecommendedPackages(
     }
 
     const choice = await vscode.window.showWarningMessage(
-        `vs-pi-agent: missing Pi CLI packages — ${list}. ${detail} Install via npm into ~/.pi/agent?`,
+        `Oh My Pi Chater: missing Pi CLI packages — ${list}. ${detail} Install via npm into ~/.pi/agent?`,
         { modal: false },
         'Install all',
         'Open Settings',
@@ -136,10 +144,10 @@ export async function maybePromptForRecommendedPackages(
             }
             break;
         case 'Open Settings':
-            await vscode.commands.executeCommand('pi-agent.openSettings');
+            await vscode.commands.executeCommand('oh-my-pi-chater.openSettings');
             break;
         case "Don't ask again":
-            await context.globalState.update('piAgent.recommendedPackagesDismissed', true);
+            await context.globalState.update('ohMyPiChater.recommendedPackagesDismissed', true);
             break;
         default:
             break;

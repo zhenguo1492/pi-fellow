@@ -1,8 +1,12 @@
+import type { EditorContextInfo } from './editorContext';
+
 export interface ContextUsageInfo {
     tokens: number | null;
     contextWindow: number;
     percent: number | null;
 }
+
+export type AgentBackend = 'pi' | 'omp';
 
 /** Cumulative session tokens from Pi getSessionStats() (all assistant turns). */
 export interface SessionTokenStats {
@@ -99,6 +103,8 @@ export interface PiAgentConfigData {
 }
 
 export interface SettingsData {
+    backend: AgentBackend;
+    availableBackends?: AgentBackend[];
     extensionVersion: string;
     syncWithPiCli: boolean;
     piAgentDir: string;
@@ -125,6 +131,25 @@ export interface SettingsData {
     /** Live session: Pi packages/extensions that failed to load in this editor */
     extensionLoadIssues?: PiExtensionLoadIssue[];
     loadedExtensionCount?: number;
+    voice: VoiceSettings;
+}
+
+export interface VoiceSettings {
+    sttUrl: string;
+    sttModel: string;
+    language: string;
+    vadConfidence: number;
+    vadStopSecs: number;
+    sttValid?: boolean;
+}
+
+/** Voice dictation state shown on the composer's mic button. */
+export interface DictationStatus {
+    recording: boolean;
+    /** VAD currently hears speech. */
+    speaking: boolean;
+    /** Speech segments sent to STT whose text has not arrived yet. */
+    pending: number;
 }
 
 export interface ToolCallPendingInfo {
@@ -211,7 +236,19 @@ export interface SerializedAgentState {
     planMode?: PlanModeInfo;
     piExtensionChrome?: PiExtensionChromeSnapshot;
     connectionStatus?: ConnectionStatus;
+    /** Active backend ('omp' or 'pi') of the current tab or workspace preference. */
+    activeBackend?: AgentBackend;
+    /** Backends detected on this machine. */
+    availableBackends?: AgentBackend[];
+    /** Every tab shows the agent CLI's TUI in an embedded terminal instead of the chat UI. */
+    tuiMode?: boolean;
+    /** omp /login or /logout was requested: chat shows a banner that finishes it in the TUI. */
+    tuiAuthPrompt?: TuiAuthCommand;
+    /** Whether voice input (STT) is configured and valid (HTTP 200). Mic button shows only when true. */
+    sttValid?: boolean;
 }
+
+export type TuiAuthCommand = 'login' | 'logout';
 
 export interface PendingAttachmentPreview {
     id: string;
@@ -249,34 +286,26 @@ export interface SessionInfo {
     lastModified?: number;
     created?: number;
     cwd?: string;
-    parentSessionPath?: string;
+    /** All `message` entries (user, assistant, tool results). */
     messageCount?: number;
+    /** User prompts — one per conversation turn. */
+    turnCount?: number;
+    /** Session file size on disk. */
+    sizeBytes?: number;
     firstMessage?: string;
-}
-
-export type SessionListScope = 'current' | 'all';
-export type SessionListSort = 'threaded' | 'recent';
-
-export interface SessionDisplayItem {
-    session: SessionInfo;
-    depth: number;
-    prefix: string;
-    age: string;
 }
 
 export interface SessionListRowPayload {
     sessionPath: string;
     label: string;
     meta: string;
-    prefix: string;
     isCurrent: boolean;
 }
 
 export interface SessionListPayload {
-    scope: SessionListScope;
-    sort: SessionListSort;
     workspaceCwd: string;
     items: SessionListRowPayload[];
+    backend?: AgentBackend;
     loading?: boolean;
     progress?: { loaded: number; total: number };
     error?: string;
@@ -286,6 +315,32 @@ export interface WorkspaceFileMatch {
     relativePath: string;
     absolutePath: string;
     basename: string;
+}
+
+export interface SessionTreeNodeData {
+    id: string;
+    parentId: string | null;
+    timestamp: number;
+    type: string;
+    role?: string;
+    textPreview?: string;
+    displayText?: string;
+    fullText?: string;
+    label?: string;
+    labelTimestamp?: string;
+    isActivePath?: boolean;
+    isCurrentLeaf?: boolean;
+    childrenCount: number;
+    depth: number;
+    indent?: number;
+    treePrefix?: string;
+    customType?: string;
+}
+
+export interface SessionTreePayload {
+    nodes: SessionTreeNodeData[];
+    leafId: string | null;
+    error?: string;
 }
 
 // Webview -> Extension messages
@@ -309,20 +364,25 @@ export type ClientMessage =
     | { type: 'openResumePicker' }
     | { type: 'toggleSessionPanel' }
     | { type: 'closeSessionPanel' }
-    | { type: 'loadSessionList'; scope: SessionListScope; sort: SessionListSort; query?: string }
+    | { type: 'loadSessionList'; query?: string }
     | { type: 'resumeSession'; sessionPath: string }
     | { type: 'deleteSession'; sessionPath: string }
     | { type: 'renameSession'; sessionPath: string; name: string }
     | { type: 'getState' }
     | { type: 'approveToolCall'; toolCallId: string }
     | { type: 'rejectToolCall'; toolCallId: string }
-    | { type: 'openFile'; filePath: string }
+    | { type: 'openFile'; filePath: string; startLine?: number; endLine?: number }
+    | { type: 'setEditorContextEnabled'; enabled: boolean }
+    | { type: 'toggleDictation' }
+    | { type: 'readImageFile'; filePath: string; requestId: string }
     | { type: 'openDiff'; filePath: string; toolCallId: string }
+    | { type: 'acceptFileChanges' }
     | { type: 'undoFileChange'; filePath: string; toolCallId: string }
     | { type: 'restoreCheckpoint'; messageIndex: number }
     | { type: 'redoCheckpoint' }
     | { type: 'confirmAction'; action: string; message: string; payload?: any }
-    | { type: 'createTab' }
+    | { type: 'createTab'; backend?: AgentBackend }
+    | { type: 'setBackend'; backend: AgentBackend }
     | { type: 'closeTab'; tabId: string }
     | { type: 'switchTab'; tabId: string }
     | { type: 'openSettings' }
@@ -344,6 +404,17 @@ export type ClientMessage =
           entryId?: string;
       }
     | { type: 'regenerateAssistant'; assistantMessageIndex: number; mode: 'new' | 'fork' }
+    | { type: 'openSessionTree' }
+    | { type: 'toggleTuiMode' }
+    /** Banner clicked: switch to the TUI and run the pending /login or /logout there. */
+    | { type: 'runTuiAuth' }
+    | { type: 'dismissTuiAuth' }
+    /** Webview mounted/fit a terminal for the tab (also restarts an exited TUI). */
+    | { type: 'tuiStart'; tabId: string; cols: number; rows: number }
+    | { type: 'tuiInput'; tabId: string; data: string }
+    | { type: 'tuiResize'; tabId: string; cols: number; rows: number }
+    | { type: 'closeSessionTree' }
+    | { type: 'forkSessionTree'; entryId: string; summarize?: boolean; customInstructions?: string }
     | {
           type: 'extensionUiResponse';
           id: string;
@@ -354,6 +425,7 @@ export type ClientMessage =
 
 // Settings webview -> Extension messages
 export type SettingsClientMessage =
+    | { type: 'setBackend'; backend: AgentBackend }
     | { type: 'getSettings' }
     | { type: 'updateSetting'; key: string; value: any }
     | { type: 'setApiKey'; provider: string; key: string }
@@ -379,14 +451,22 @@ export type SettingsClientMessage =
     | { type: 'testAllMcpServers' }
     | { type: 'runPiLogin' }
     | { type: 'runPiLogout' }
-    | { type: 'rebuildNativeModules' };
+    | { type: 'rebuildNativeModules' }
+    | { type: 'testStt'; url?: string };
 
 // Extension -> Webview messages
 export type ServerMessage =
     | { type: 'ready' }
     | { type: 'stateSync'; state: SerializedAgentState }
     | { type: 'agentEvent'; event: any }
-    | { type: 'models'; models: ModelInfo[]; current?: ModelInfo; thinkingLevel?: string }
+    | {
+          type: 'models';
+          models: ModelInfo[];
+          current?: ModelInfo;
+          thinkingLevel?: string;
+          /** Starred `provider/id` keys, in the order they were starred. */
+          favorites: string[];
+      }
     | { type: 'modelChanged'; model: ModelInfo; thinkingLevel?: string }
     | { type: 'sessionChanged'; sessionId: string }
     | { type: 'fileChange'; change: FileChangeInfo }
@@ -400,6 +480,11 @@ export type ServerMessage =
     | { type: 'extensionUiDismiss'; id: string }
     | { type: 'piExtensionChrome'; chrome: PiExtensionChromeSnapshot }
     | { type: 'setComposerText'; text: string }
+    | { type: 'dictationStatus'; status: DictationStatus }
+    /** Transcribed utterance to insert at the composer caret. */
+    | { type: 'dictationText'; text: string }
+    /** Microphone level 0..1 while recording. */
+    | { type: 'dictationLevel'; level: number }
     | { type: 'toast'; message: string; variant?: 'info' | 'error' }
     | {
           type: 'workspaceFiles';
@@ -407,7 +492,21 @@ export type ServerMessage =
           files: WorkspaceFileMatch[];
       }
     | { type: 'sessionPanel'; open: boolean }
-    | { type: 'sessionList'; data: SessionListPayload };
+    | { type: 'sessionTree'; open: boolean; data?: SessionTreePayload }
+    | {
+          type: 'imageFileData';
+          requestId: string;
+          filePath: string;
+          dataUrl?: string;
+          error?: string;
+      }
+    | { type: 'sessionList'; data: SessionListPayload }
+    | { type: 'tuiData'; tabId: string; data: string }
+    /** Full screen + scrollback of a running TUI; replaces whatever the tab's terminal shows. */
+    | { type: 'tuiSnapshot'; tabId: string; data: string }
+    | { type: 'tuiExit'; tabId: string; exitCode: number }
+    /** Active editor file/selection the next prompt carries; `enabled` is the user's include toggle. */
+    | { type: 'editorContext'; context: EditorContextInfo | null; enabled: boolean };
 
 // Extension -> Settings webview messages
 export type SettingsServerMessage =
@@ -418,4 +517,5 @@ export type SettingsServerMessage =
     | { type: 'success'; message: string }
     | { type: 'error'; message: string }
     | { type: 'mcpSnapshot'; snapshot: McpSettingsSnapshot }
-    | { type: 'scrollToSection'; section: string };
+    | { type: 'scrollToSection'; section: string }
+    | { type: 'sttTestResult'; ok: boolean; status?: number; message: string };

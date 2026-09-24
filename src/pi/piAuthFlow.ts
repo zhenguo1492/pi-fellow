@@ -2,9 +2,10 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { OAuthLoginCallbacks } from '@earendil-works/pi-ai';
 import { createVscodeOAuthCallbacks } from './oauthCallbacks';
-import { getPiAgentDir } from './piCliPaths';
+import { getPiAgentDir, resolveCliTarget } from './piCliPaths';
 import { loadPiCodingAgent, loadPiInteractiveHelpers } from './loadPiCodingAgent';
 import type { PiRpcSessionManager } from './rpcSession';
+import type { TuiAuthCommand } from '../shared/protocol';
 import type { PiChatSession } from './slashCommands';
 
 const BEDROCK_PROVIDER_ID = 'amazon-bedrock';
@@ -143,8 +144,25 @@ async function refreshRpcSessionAfterAuth(manager?: PiChatSession): Promise<void
     await rpc.reloadPiAgentResources();
 }
 
+/**
+ * omp exposes neither the pi Node SDK nor /login over RPC; its own TUI picker (subscriptions and
+ * API keys, with logged-in marks) is the only full login UI. Hand off to the chat's TUI mode.
+ * Returns false for pi, which logs in through the VS Code pickers below.
+ */
+async function promptOmpTuiAuth(command: TuiAuthCommand, manager?: PiChatSession): Promise<boolean> {
+    if ((manager?.backend ?? resolveCliTarget().backend) !== 'omp') {
+        return false;
+    }
+    await vscode.commands.executeCommand('oh-my-pi-chater.promptTuiAuth', command);
+    return true;
+}
+
 /** Configure provider auth via VS Code UI (same result as terminal `pi` /login). */
 export async function runPiAuthLogin(manager?: PiChatSession): Promise<void> {
+    if (await promptOmpTuiAuth('login', manager)) {
+        return;
+    }
+
     const authMethod = await vscode.window.showQuickPick(
         [
             { label: 'Use a subscription', authType: 'oauth' as const },
@@ -186,7 +204,7 @@ export async function runPiAuthLogin(manager?: PiChatSession): Promise<void> {
             vscode.window.showInformationMessage(
                 'Amazon Bedrock setup requires extra fields. Open ~/.pi/agent/auth.json or run `pi` in a terminal for the full Bedrock wizard.',
             );
-            await vscode.commands.executeCommand('pi-agent.openSettings');
+            await vscode.commands.executeCommand('oh-my-pi-chater.openSettings');
             return;
         } else {
             await runApiKeyLogin(provider.id, provider.name);
@@ -202,6 +220,10 @@ export async function runPiAuthLogin(manager?: PiChatSession): Promise<void> {
 
 /** Remove stored credentials (same as terminal `pi` /logout). */
 export async function runPiAuthLogout(manager?: PiChatSession): Promise<void> {
+    if (await promptOmpTuiAuth('logout', manager)) {
+        return;
+    }
+
     const providers = await getLogoutProviderOptions();
     if (providers.length === 0) {
         vscode.window.showInformationMessage(

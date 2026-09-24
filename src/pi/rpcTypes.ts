@@ -22,6 +22,7 @@ export type RpcCommand =
     | { id?: string; type: 'set_model'; provider: string; modelId: string }
     | { id?: string; type: 'cycle_model' }
     | { id?: string; type: 'get_available_models' }
+    | { id?: string; type: 'get_login_providers' }
     | { id?: string; type: 'set_thinking_level'; level: string }
     | { id?: string; type: 'cycle_thinking_level' }
     | { id?: string; type: 'set_steering_mode'; mode: 'all' | 'one-at-a-time' }
@@ -35,18 +36,20 @@ export type RpcCommand =
     | { id?: string; type: 'get_session_stats' }
     | { id?: string; type: 'export_html'; outputPath?: string }
     | { id?: string; type: 'switch_session'; sessionPath: string }
-    | { id?: string; type: 'fork'; entryId: string }
+    | { id?: string; type: 'fork' | 'branch'; entryId: string }
     | { id?: string; type: 'clone' }
-    | { id?: string; type: 'get_fork_messages' }
+    | { id?: string; type: 'get_fork_messages' | 'get_branch_messages' }
     | { id?: string; type: 'get_last_assistant_text' }
     | { id?: string; type: 'set_session_name'; name: string }
     | { id?: string; type: 'get_messages' }
-    | { id?: string; type: 'get_commands' };
+    | { id?: string; type: 'get_commands' | 'get_available_commands' }
+    | { id?: string; type: 'get_tree' }
+    | { id?: string; type: 'negotiate_protocol'; protocolVersion: 2 };
 
 export interface RpcSlashCommand {
     name: string;
     description?: string;
-    source: 'extension' | 'prompt' | 'skill';
+    source: 'builtin' | 'extension' | 'prompt' | 'skill';
 }
 
 export interface RpcSessionState {

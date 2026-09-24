@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
-import { getPiAgentDir } from './piCliPaths';
+import { getAgentLayout, getPiAgentDir } from './piCliPaths';
+import type { AgentBackend } from './agentBackend';
 
 const execFileAsync = promisify(execFile);
 
@@ -137,8 +138,8 @@ function normalizeRaw(filePath: string): McpConfigFile {
     return raw;
 }
 
-async function globalConfigPath(): Promise<string> {
-    const agentDir = getPiAgentDir();
+async function globalConfigPath(preferredBackend?: AgentBackend): Promise<string> {
+    const agentDir = getPiAgentDir(preferredBackend);
     return path.join(agentDir, 'mcp.json');
 }
 
@@ -281,12 +282,15 @@ export function hasPiMcpAdapterPackage(packages: string[]): boolean {
 export async function loadMcpSettingsSnapshot(
     packages: string[],
     probeResults?: Map<string, { ok: boolean; message: string }>,
+    preferredBackend?: AgentBackend,
 ): Promise<McpSettingsSnapshot> {
     const cwd = workspaceRoot();
-    const agentDir = getPiAgentDir();
-    const globalPath = await globalConfigPath();
+    const agentDir = getPiAgentDir(preferredBackend);
+    const globalPath = await globalConfigPath(preferredBackend);
+    const backend = getAgentLayout(preferredBackend).backend;
+    const globalLabel = backend === 'omp' ? 'Global (~/.omp/agent/mcp.json)' : 'Global (~/.pi/agent/mcp.json)';
     const paths: McpConfigPathInfo[] = [
-        { id: 'global', label: 'Global (~/.pi/agent/mcp.json)', path: globalPath, exists: fs.existsSync(globalPath) },
+        { id: 'global', label: globalLabel, path: globalPath, exists: fs.existsSync(globalPath) },
         {
             id: 'project',
             label: 'Project (.mcp.json)',
@@ -295,7 +299,7 @@ export async function loadMcpSettingsSnapshot(
         },
         {
             id: 'projectPi',
-            label: 'Project Pi (.pi/mcp.json)',
+            label: backend === 'omp' ? 'Project (.omp/mcp.json)' : 'Project Pi (.pi/mcp.json)',
             path: projectPiConfigPath(cwd),
             exists: fs.existsSync(projectPiConfigPath(cwd)),
         },
@@ -396,7 +400,7 @@ export async function loadMcpSettingsSnapshot(
         });
 
     return {
-        hasMcpAdapter: hasPiMcpAdapterPackage(packages),
+        hasMcpAdapter: backend === 'omp' || hasPiMcpAdapterPackage(packages),
         disableProxyTool: settings?.disableProxyTool === true,
         globalDirectTools: settings?.directTools,
         toolPrefix: settings?.toolPrefix,
@@ -410,9 +414,10 @@ export async function setMcpServerEnabled(
     scope: McpScopeId,
     serverName: string,
     enabled: boolean,
+    preferredBackend?: AgentBackend,
 ): Promise<void> {
     const cwd = workspaceRoot();
-    const globalPath = await globalConfigPath();
+    const globalPath = await globalConfigPath(preferredBackend);
     const filePath = scopePath(scope, cwd, globalPath);
     const raw = normalizeRaw(filePath);
 
@@ -440,13 +445,16 @@ export async function setMcpServerEnabled(
     writeJsonFile(filePath, raw);
 }
 
-export async function probeMcpServer(server: McpServerSummary): Promise<{ ok: boolean; message: string }> {
+export async function probeMcpServer(
+    server: McpServerSummary,
+    preferredBackend?: AgentBackend,
+): Promise<{ ok: boolean; message: string }> {
     if (!server.enabled) {
         return { ok: false, message: 'Server is disabled' };
     }
 
     const cwd = workspaceRoot();
-    const globalPath = await globalConfigPath();
+    const globalPath = await globalConfigPath(preferredBackend);
     const filePath =
         server.scope === 'import'
             ? server.ownerPath

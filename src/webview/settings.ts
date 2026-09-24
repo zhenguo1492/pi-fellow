@@ -7,6 +7,7 @@ import type {
     McpSettingsSnapshot,
     McpServerSummary,
     McpScopeId,
+    AgentBackend,
 } from '../shared/protocol';
 import { getKemdiMcpHints } from '../shared/kemdiMcpHints';
 
@@ -18,11 +19,12 @@ declare function acquireVsCodeApi(): {
 
 const vscode = acquireVsCodeApi();
 
-type SettingsTabId = 'general' | 'auth' | 'packages' | 'skills' | 'mcp' | 'commands';
+type SettingsTabId = 'general' | 'auth' | 'stt' | 'packages' | 'skills' | 'mcp' | 'commands';
 
 const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
     { id: 'general', label: 'General' },
     { id: 'auth', label: 'Auth & models' },
+    { id: 'stt', label: 'STT' },
     { id: 'packages', label: 'Packages' },
     { id: 'skills', label: 'Skills' },
     { id: 'mcp', label: 'MCP' },
@@ -33,6 +35,9 @@ const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
 const SECTION_TO_TAB: Record<string, SettingsTabId> = {
     connection: 'general',
     'chat-ui': 'general',
+    voice: 'stt',
+    stt: 'stt',
+    tts: 'stt',
     auth: 'auth',
     defaults: 'auth',
     packages: 'packages',
@@ -43,9 +48,13 @@ const SECTION_TO_TAB: Record<string, SettingsTabId> = {
 };
 
 let currentSettings: SettingsData | null = null;
+let pendingSttUrl: string | null = null;
 let loadedSkills: SkillInfo[] = [];
 let mcpSnapshot: McpSettingsSnapshot | null = null;
 let activeTab: SettingsTabId = (vscode.getState()?.activeTab as SettingsTabId) ?? 'general';
+if ((activeTab as string) === 'voice' || (activeTab as string) === 'tts') {
+    activeTab = 'stt';
+}
 
 window.addEventListener('message', (event) => {
     const msg = event.data as SettingsServerMessage;
@@ -55,7 +64,13 @@ window.addEventListener('message', (event) => {
             if (msg.data.mcpSnapshot) {
                 mcpSnapshot = msg.data.mcpSnapshot;
             }
-            render(msg.data);
+            // Keep the current draft when settings arrive during editing.
+            if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+                const draft = (document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null)?.value.trim();
+                applySttValidity(Boolean(msg.data.voice?.sttValid) && draft === msg.data.voice?.sttUrl);
+            } else {
+                render(msg.data);
+            }
             break;
         case 'mcpSnapshot':
             mcpSnapshot = msg.snapshot;
@@ -84,8 +99,43 @@ window.addEventListener('message', (event) => {
         case 'scrollToSection':
             scrollToSettingsSection(msg.section);
             break;
+        case 'sttTestResult': {
+            const draft = (document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null)?.value.trim();
+            const testedUrl = pendingSttUrl;
+            const matches = testedUrl !== null && draft === testedUrl;
+            if (currentSettings?.voice) {
+                currentSettings.voice.sttValid = msg.ok && matches;
+                if (msg.ok && matches && testedUrl !== null) currentSettings.voice.sttUrl = testedUrl;
+            }
+            pendingSttUrl = null;
+            restoreTestBtn();
+            applySttValidity(msg.ok && matches);
+            showToast(msg.message, msg.ok ? 'info' : 'error');
+            break;
+        }
     }
 });
+
+function restoreTestBtn(): void {
+    const btn = document.getElementById('btn-test-stt') as HTMLButtonElement | null;
+    if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Test connection';
+    }
+}
+
+function applySttValidity(valid: boolean): void {
+    const check = document.getElementById('stt-url-check');
+    if (check) {
+        check.hidden = !valid;
+        check.classList.toggle('is-valid', valid);
+        check.title = valid ? 'Connected (HTTP 200)' : 'Not connected';
+    }
+    const badge = document.getElementById('stt-status-badge');
+    if (badge) {
+        badge.hidden = !valid;
+    }
+}
 
 function scrollToSettingsSection(section: string): void {
     const tab = SECTION_TO_TAB[section];
@@ -94,7 +144,10 @@ function scrollToSettingsSection(section: string): void {
     }
     requestAnimationFrame(() => {
         const id = `section-${section}`;
-        const el = document.getElementById(id);
+        const el = document.getElementById(id)
+            ?? (section === 'stt' || section === 'voice' || section === 'tts'
+                ? document.getElementById('section-stt') || document.getElementById('section-voice')
+                : null);
         if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'start' });
             el.classList.add('section-highlight');
@@ -119,7 +172,7 @@ function switchSettingsTab(tabId: SettingsTabId, persist = true): void {
     });
 }
 
-function buildTabNav(): HTMLElement {
+function buildTabNav(backend: AgentBackend = 'pi'): HTMLElement {
     const nav = el('nav', 'settings-tabs');
     nav.setAttribute('role', 'tablist');
     nav.setAttribute('aria-label', 'Settings sections');
@@ -129,7 +182,7 @@ function buildTabNav(): HTMLElement {
         btn.dataset.tab = tab.id;
         btn.setAttribute('role', 'tab');
         btn.setAttribute('aria-selected', tab.id === activeTab ? 'true' : 'false');
-        btn.textContent = tab.label;
+        btn.textContent = tab.id === 'packages' && backend === 'omp' ? 'Plugins' : tab.label;
         if (tab.id === activeTab) {
             btn.classList.add('active');
         }
@@ -151,21 +204,60 @@ function buildTabPanel(tabId: SettingsTabId, children: HTMLElement[]): HTMLEleme
     return panel;
 }
 
+function buildHeader(data: SettingsData): HTMLElement {
+    const header = el('div', 'settings-header');
+    const available = data.availableBackends && data.availableBackends.length > 0
+        ? data.availableBackends
+        : ['omp', 'pi'];
+
+    header.innerHTML = `
+        <div class="settings-header-top">
+            <div class="settings-title-group">
+                <h1>Oh My Pi Chater Settings</h1>
+                <p class="settings-version">Extension v${escHtml(data.extensionVersion ?? '?')}</p>
+            </div>
+            <div class="backend-toggle-group">
+                <span class="backend-toggle-label">Backend</span>
+                <div class="backend-segmented-control" role="radiogroup" aria-label="Agent backend selection">
+                    ${available.map((b) => `
+                        <button type="button" class="backend-segment-btn${b === data.backend ? ' active' : ''}" data-backend="${b}" role="radio" aria-checked="${b === data.backend ? 'true' : 'false'}">
+                            ${b}
+                        </button>
+                    `).join('')}
+                </div>
+            </div>
+        </div>
+    `;
+    return header;
+}
+
 function render(data: SettingsData): void {
     const app = document.getElementById('settings-app')!;
+    // Saving a text field echoes the settings back and rebuilds the page; keep
+    // the field being typed in (value, caret, focus) and the scroll position.
+    const focused = document.activeElement instanceof HTMLInputElement && document.activeElement.id
+        ? document.activeElement
+        : null;
+    const typing = focused && {
+        id: focused.id,
+        value: focused.value,
+        selectionStart: focused.selectionStart,
+        selectionEnd: focused.selectionEnd,
+    };
+    const scrollY = window.scrollY;
     app.innerHTML = '';
 
     const container = el('div', 'settings-container');
 
-    const header = el('div', 'settings-header');
-    header.innerHTML = `<h1>vs-pi-agent Settings</h1><p class="settings-version">Extension v${escHtml(data.extensionVersion ?? '?')}</p>`;
+    const header = buildHeader(data);
     container.appendChild(header);
-    container.appendChild(buildTabNav());
+    container.appendChild(buildTabNav(data.backend));
 
     const panels = el('div', 'settings-tab-panels');
     panels.appendChild(buildGeneralTab(data));
     panels.appendChild(buildAuthTab(data));
-    panels.appendChild(buildPackagesTab(data));
+    panels.appendChild(buildSttTab(data));
+    panels.appendChild(data.backend === 'omp' ? buildOmpPluginsTab(data) : buildPackagesTab(data));
     panels.appendChild(buildSkillsTab(data));
     panels.appendChild(buildMcpTab(data));
     panels.appendChild(buildCommandsTab(data));
@@ -175,6 +267,15 @@ function render(data: SettingsData): void {
     switchSettingsTab(activeTab, false);
     bindEvents();
     renderSkillsSection();
+    window.scrollTo(0, scrollY);
+    const refocus = typing && document.getElementById(typing.id);
+    if (typing && refocus instanceof HTMLInputElement) {
+        refocus.value = typing.value;
+        refocus.focus();
+        if (typing.selectionStart !== null && typing.selectionEnd !== null) {
+            refocus.setSelectionRange(typing.selectionStart, typing.selectionEnd);
+        }
+    }
 }
 
 function buildGeneralTab(data: SettingsData): HTMLElement {
@@ -182,20 +283,25 @@ function buildGeneralTab(data: SettingsData): HTMLElement {
     if (data.piConfigLoadError) {
         children.push(buildPiConfigErrorBanner(data.piConfigLoadError));
     }
+    const isOmp = data.backend === 'omp';
+    const sectionTitle = isOmp ? 'Oh My Pi (omp) CLI (RPC backend)' : 'Pi CLI (RPC backend)';
+    const modeDesc = isOmp
+        ? 'Runs `omp --mode rpc` — standalone binary with built-in MCP, LSP, tools, and multi-ecosystem skills.'
+        : 'Runs `pi --mode rpc` — same packages, skills, MCP, and slash commands as the terminal.';
+    const configFile = isOmp ? `${data.piAgentDir}/config.yml` : `${data.piAgentDir}/settings.json`;
+
     children.push(
-        buildSection('Pi CLI (RPC backend)', [
-            buildReadOnlyRow(
-                'Mode',
-                'Runs `pi --mode rpc` — same packages, skills, MCP, and slash commands as the terminal.',
-            ),
+        buildSection(sectionTitle, [
+            buildReadOnlyRow('Mode', modeDesc),
             buildReadOnlyRow('Agent directory', data.piAgentDir),
+            buildReadOnlyRow('Config file', configFile),
             buildReadOnlyRow('Sessions', `${data.piAgentDir}/sessions/`),
             buildPiCliSyncInfo(data),
             buildReloadRow(),
         ], 'connection'),
         buildSection('Chat UI', [
             buildToggle('autoApproveTools', 'Auto-approve tool calls (VS Code)', data.autoApproveTools,
-                'Tool policy is still owned by Pi CLI (~/.pi/agent). This only affects legacy approval UI if enabled.'),
+                'Tool policy is still owned by the agent CLI. This only affects legacy approval UI if enabled.'),
             buildRange('contextUsageWarningThreshold', 'Context usage warning', data.contextUsageWarningThreshold, 0, 100,
                 `Warn in the chat footer above ${data.contextUsageWarningThreshold}% context.`),
         ], 'chat-ui'),
@@ -203,23 +309,116 @@ function buildGeneralTab(data: SettingsData): HTMLElement {
     );
     return buildTabPanel('general', children);
 }
+function buildSttGuideCard(): HTMLElement {
+    const note = el('p', 'stt-guide-note');
+    note.textContent = 'Dictation transcribes microphone audio into the chat input. Set an OpenAI-compatible transcription URL and use Test connection. The mic appears after an HTTP 200 response; Silero VAD splits speech locally.';
+    return note;
+}
+
+function buildSttUrlRow(data: SettingsData): HTMLElement {
+    const row = el('div', 'setting-row');
+    row.id = 'row-voice-sttUrl';
+    const isConnected = Boolean(data.voice.sttValid);
+    row.innerHTML = `
+        <div class="setting-label-row">
+            <label for="setting-voice.sttUrl">Speech-to-text URL</label>
+            <span class="stt-status-badge stt-status-badge--valid" id="stt-status-badge" ${isConnected ? '' : 'hidden'}>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M13.5 4.5l-7 7L3 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span>Connected (HTTP 200)</span>
+            </span>
+        </div>
+        <div class="setting-input-wrapper">
+            <input type="text" id="setting-voice.sttUrl" class="setting-input" data-key="voice.sttUrl" value="${escHtml(data.voice.sttUrl)}" placeholder="http://127.0.0.1:8010/v1">
+            <button id="btn-test-stt" class="setting-btn secondary stt-test-btn" type="button">Test connection</button>
+            <span class="stt-url-icon ${isConnected ? 'is-valid' : ''}" id="stt-url-check" title="${isConnected ? 'Connected (HTTP 200)' : 'Not connected'}" ${isConnected ? '' : 'hidden'}>
+                <svg width="22" height="22" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                    <circle cx="10" cy="10" r="9" fill="#73c991" fill-opacity="0.18" stroke="#73c991" stroke-width="1.5"/>
+                    <path d="M14 7l-5.5 6L6 10" stroke="#73c991" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </span>
+        </div>
+        <p class="setting-description">OpenAI-compatible API base URL, such as <code>http://127.0.0.1:8010/v1</code>. Only a successful manual test saves the URL and shows a green check.</p>
+    `;
+    return row;
+}
+
+function buildSttTab(data: SettingsData): HTMLElement {
+    return buildTabPanel('stt', [
+        buildSttGuideCard(),
+        buildSection('Speech-to-Text (STT)', [
+            buildSttUrlRow(data),
+            buildTextInput('voice.sttModel', 'Model', data.voice.sttModel,
+                'Transcription model id. Empty uses the first model listed at /models.',
+                'first model at /models'),
+            buildTextInput('voice.language', 'Language', data.voice.language,
+                'ISO-639-1 hint such as zh or en. Empty lets the model detect it per utterance.',
+                'auto-detect'),
+            buildNumberInput('voice.vadConfidence', 'VAD threshold', data.voice.vadConfidence, 0.1, 0.95, 0.05,
+                'Silero VAD speech probability (0.1–0.95). Lower it (e.g. 0.35) if quiet speech is missed; raise it if background noise gets transcribed.'),
+            buildNumberInput('voice.vadStopSecs', 'Pause to end an utterance (s)', data.voice.vadStopSecs, 0.2, 3, 0.1,
+                'Each utterance is transcribed as soon as this much silence follows it, so text appears while you keep talking.'),
+        ], 'stt'),
+    ]);
+}
 
 function buildAuthTab(data: SettingsData): HTMLElement {
     const cfg = data.piConfig ?? emptyPiConfig();
+    const isOmp = data.backend === 'omp';
+    const defaultsTitle = isOmp ? `Defaults (${data.piAgentDir}/config.yml)` : 'Defaults (~/.pi/agent/settings.json)';
     return buildTabPanel('auth', [
         buildSection('Authentication', [
             buildReadOnlyRow('Agent directory', data.piAgentDir),
             buildAuthActionsRow(),
-            buildFileButtons(),
+            buildFileButtons(data.backend),
             buildAuthIndicator(data.authMethod),
-            buildAuthProvidersList(cfg),
+            buildAuthProvidersList(cfg, data.backend),
         ], 'auth'),
-        buildSection('Defaults (~/.pi/agent/settings.json)', [
+        buildSection(defaultsTitle, [
             buildPiModelDefaults(data, cfg),
-            buildPiThinkingSelect(data.piDefaultThinkingLevel ?? 'off'),
+            buildPiThinkingSelect(data.piDefaultThinkingLevel ?? (isOmp ? 'high' : 'off')),
             buildPiModeSelect('steering', 'Steering mode', cfg.steeringMode),
             buildPiModeSelect('followup', 'Follow-up mode', cfg.followUpMode),
         ], 'defaults'),
+    ]);
+}
+
+function buildOmpPluginsTab(data: SettingsData): HTMLElement {
+    const cfg = data.piConfig ?? emptyPiConfig();
+    return buildTabPanel('packages', [
+        buildSection('Built-in Capabilities & Tools', [
+            buildReadOnlyRow(
+                'Runtime',
+                'Oh My Pi (omp) is a standalone binary with native built-in capabilities and multi-ecosystem support (no Node native modules to compile).',
+            ),
+            buildReadOnlyRow(
+                'MCP Support',
+                'Native MCP client built into binary — connects to stdio, HTTP, and SSE servers with auto tool discovery.',
+            ),
+            buildReadOnlyRow(
+                'Code Intelligence',
+                'Built-in Language Server Protocol (LSP) diagnostics, format-on-write, and cross-file symbol indexing.',
+            ),
+            buildReadOnlyRow(
+                'Execution & Shell',
+                'Built-in Bash sandbox with background tasks, Python/Jupyter kernel, Puppeteer browser automation, and native host control.',
+            ),
+            buildReadOnlyRow(
+                'Search & Traversal',
+                'Built-in ripgrep, ast-grep (structural search), semantic file search, and glob tools.',
+            ),
+        ], 'omp-capabilities'),
+        buildSection('Plugins & Extensions', [
+            buildReadOnlyRow('User plugins', '~/.omp/plugins/'),
+            buildReadOnlyRow('Project plugins', '.omp/plugins/'),
+            buildReadOnlyRow(
+                'Skills Registry',
+                'skills.omp.sh — install community skills via `omp skill install` in terminal.',
+            ),
+            buildListEditor('extensions', cfg.extensionPaths, 'Path to extension file (.ts, .js)'),
+            buildAddRow('extensions', 'Add extension path', 'Absolute or ~ path'),
+        ], 'omp-plugins'),
     ]);
 }
 
@@ -256,9 +455,10 @@ function buildSkillsTab(data: SettingsData): HTMLElement {
     const cfg = data.piConfig ?? emptyPiConfig();
     const skillsSection = buildSection('Installed skills', [buildSkillsPlaceholder()]);
     skillsSection.id = 'skills-section';
+    const storageHint = data.backend === 'omp' ? 'saved to config.yml (skills.customDirectories)' : 'saved to settings.json (skills)';
     return buildTabPanel('skills', [
         buildSection('Skill paths', [
-            buildListEditor('skillpaths', cfg.skillPaths, 'Directory containing SKILL.md files'),
+            buildListEditor('skillpaths', cfg.skillPaths, `Directory containing SKILL.md files (${storageHint})`),
             buildAddRow('skillpaths', 'Add skill directory', 'Absolute or ~ path'),
             buildPiSkillCommandsToggle(cfg.enableSkillCommands),
         ], 'skills'),
@@ -318,7 +518,7 @@ function buildExtensionLoadIssuesBanner(data: SettingsData): HTMLElement | null 
         .join('');
     const more =
         issues.length > 6
-            ? `<p class="setting-description">…and ${issues.length - 6} more (Output → vs-pi-agent)</p>`
+            ? `<p class="setting-description">…and ${issues.length - 6} more (Output → Oh My Pi Chater)</p>`
             : '';
     const rebuildBtn =
         native > 0
@@ -349,7 +549,7 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
     const snap = mcpSnapshot ?? data.mcpSnapshot;
     const children: HTMLElement[] = [];
 
-    children.push(buildMcpHelpBlock(snap, cfg));
+    children.push(buildMcpHelpBlock(snap, cfg, data.backend));
 
     if (!snap) {
         const loading = el('p', 'setting-description');
@@ -358,7 +558,7 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
         return buildSection('MCP servers', children, 'mcp');
     }
 
-    if (!snap.hasMcpAdapter) {
+    if (!snap.hasMcpAdapter && data.backend !== 'omp') {
         children.push(buildMcpAdapterWarning());
     }
 
@@ -399,19 +599,32 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
     return buildSection('MCP servers', children, 'mcp');
 }
 
-function buildMcpHelpBlock(snap: McpSettingsSnapshot | null | undefined, cfg: PiAgentConfigData): HTMLElement {
+function buildMcpHelpBlock(
+    snap: McpSettingsSnapshot | null | undefined,
+    cfg: PiAgentConfigData,
+    backend: AgentBackend = 'pi',
+): HTMLElement {
     const proxy = snap ? !snap.disableProxyTool : true;
     const direct = snap?.globalDirectTools;
+    const isOmp = backend === 'omp';
     const row = el('div', 'setting-row mcp-help');
+    const setupSteps = isOmp
+        ? `<ol>
+               <li><strong>Native MCP:</strong> Oh My Pi has native built-in MCP client support (no external adapter package required).</li>
+               <li>Define servers in <code>mcp.json</code> or project <code>.mcp.json</code>.</li>
+               <li>After changes, use <strong>Reload active session</strong>.</li>
+           </ol>`
+        : `<ol>
+               <li>Install <code>npm:pi-mcp-adapter</code> in Packages (you have ${cfg.packages.some((p) => p.includes('pi-mcp-adapter')) ? 'it' : 'not yet'}).</li>
+               <li>Define servers in <code>mcp.json</code> — not as separate npm packages per server.</li>
+               <li>After changes, use <strong>Reload active session</strong>.</li>
+           </ol>`;
+
     row.innerHTML = `
         <details class="mcp-help-details">
-            <summary>How the model discovers and uses MCP</summary>
+            <summary>How the model discovers and uses MCP (${isOmp ? 'omp native' : 'pi-mcp-adapter'})</summary>
             <div class="mcp-help-body">
-                <ol>
-                    <li>Install <code>npm:pi-mcp-adapter</code> in Packages (you have ${cfg.packages.some((p) => p.includes('pi-mcp-adapter')) ? 'it' : 'not yet'}).</li>
-                    <li>Define servers in <code>mcp.json</code> — not as separate npm packages per server.</li>
-                    <li>After changes, use <strong>Reload active session</strong>.</li>
-                </ol>
+                ${setupSteps}
                 <p><strong>Default (proxy):</strong> The model gets one compact <code>mcp</code> tool (~200 tokens). It calls <code>mcp({ search: "…" })</code> to find tools, then <code>mcp({ tool: "…", args: … })</code>. Servers connect lazily on first use.</p>
                 <p><strong>Direct tools:</strong> Set <code>"directTools": true</code> on a server (or globally in <code>mcp.json</code> settings). Tool names and schemas are injected into context — higher token cost, model sees them like built-in tools.</p>
                 <p class="setting-description">Current: proxy ${proxy ? 'on' : 'off'}, global directTools ${direct ? 'on' : 'off or unset'}.</p>
@@ -550,15 +763,17 @@ function buildExtensionOnlySections(data: SettingsData): HTMLElement {
     return wrap;
 }
 
-function buildFileButtons(): HTMLElement {
+function buildFileButtons(backend: AgentBackend = 'pi'): HTMLElement {
     const row = el('div', 'setting-row file-buttons');
+    const settingsFile = backend === 'omp' ? 'config.yml' : 'settings.json';
+    const authFile = backend === 'omp' ? 'models.yml' : 'auth.json';
     row.innerHTML = `
         <div class="btn-row">
-            <button type="button" class="setting-btn secondary" data-open-file="settings">Open settings.json</button>
-            <button type="button" class="setting-btn secondary" data-open-file="auth">Open auth.json</button>
+            <button type="button" class="setting-btn secondary" data-open-file="settings">Open ${settingsFile}</button>
+            <button type="button" class="setting-btn secondary" data-open-file="auth">Open ${authFile}</button>
             <button type="button" class="setting-btn secondary" data-open-file="mcp">Open mcp.json</button>
         </div>
-        <p class="setting-description">Edits in the editor are saved to disk; use Reload session after changing packages or extensions.</p>
+        <p class="setting-description">Edits in the editor are saved to disk; use Reload session after changing configuration.</p>
     `;
     return row;
 }
@@ -576,10 +791,11 @@ function buildAuthActionsRow(): HTMLElement {
     return row;
 }
 
-function buildAuthProvidersList(cfg: PiAgentConfigData): HTMLElement {
+function buildAuthProvidersList(cfg: PiAgentConfigData, backend: AgentBackend = 'pi'): HTMLElement {
     const row = el('div', 'setting-row');
     if (cfg.authProviders.length === 0) {
-        row.innerHTML = `<p class="setting-description">No providers in auth.json yet. Use <strong>Configure provider</strong> above or open auth.json.</p>`;
+        const fileHint = backend === 'omp' ? 'models.yml or agent.db' : 'auth.json';
+        row.innerHTML = `<p class="setting-description">No providers configured in ${fileHint} yet. Use <strong>Configure provider</strong> above or open ${backend === 'omp' ? 'models.yml' : 'auth.json'}.</p>`;
         return row;
     }
     const items = cfg.authProviders.map((p) =>
@@ -706,10 +922,10 @@ function buildRecommendedPackagesBanner(missing?: string[]): HTMLElement | null 
     const row = el('div', 'setting-row pi-config-error');
     row.innerHTML = `
         <p class="setting-description">
-            <strong>Recommended for vs-pi-agent:</strong>
+            <strong>Recommended for Oh My Pi Chater:</strong>
             ${missing.map((s) => `<code>${escHtml(s)}</code>`).join(', ')} —
             not in your Pi packages yet. Use command palette
-            <strong>vs-pi-agent: Install Recommended Packages</strong> or add manually below.
+            <strong>Oh My Pi Chater: Install Recommended Packages</strong> or add manually below.
         </p>
     `;
     return row;
@@ -799,14 +1015,37 @@ function buildSelect(key: string, label: string, value: string, options: { value
     return row;
 }
 
-function buildTextInput(key: string, label: string, value: string, description: string): HTMLElement {
+function buildTextInput(key: string, label: string, value: string, description: string, placeholder = description.split('.')[0]): HTMLElement {
     const row = el('div', 'setting-row');
     row.innerHTML = `
         <div class="setting-label-row">
             <label for="setting-${key}">${escHtml(label)}</label>
         </div>
-        <input type="text" id="setting-${key}" class="setting-input" data-key="${key}" value="${escHtml(value)}" placeholder="${escHtml(description.split('.')[0])}">
+        <input type="text" id="setting-${key}" class="setting-input" data-key="${key}" value="${escHtml(value)}" placeholder="${escHtml(placeholder)}">
         <p class="setting-description">${escHtml(description)}</p>
+    `;
+    return row;
+}
+
+function buildNumberInput(key: string, label: string, value: number, min: number, max: number, step: number, description: string): HTMLElement {
+    const row = el('div', 'setting-row');
+    row.innerHTML = `
+        <div class="setting-label-row">
+            <label for="setting-${key}">${escHtml(label)}</label>
+        </div>
+        <input type="number" id="setting-${key}" class="setting-input setting-input--number" data-key="${key}" value="${value}" min="${min}" max="${max}" step="${step}">
+        <p class="setting-description">${escHtml(description)}</p>
+    `;
+    return row;
+}
+
+function buildSttTestRow(): HTMLElement {
+    const row = el('div', 'setting-row');
+    row.innerHTML = `
+        <div class="api-key-actions">
+            <button class="setting-btn secondary" id="btn-test-stt" type="button">Test connection</button>
+        </div>
+        <p class="setting-description">Toggle recording with the mic button in the chat input or <kbd>Ctrl+Alt+M</kbd>. Audio is captured with <code>arecord</code>, <code>parecord</code> or SoX <code>rec</code>; Silero VAD splits it into utterances locally.</p>
     `;
     return row;
 }
@@ -929,6 +1168,7 @@ function buildShortcutsInfo(): HTMLElement {
         <div class="shortcuts-list">
             <div class="shortcut-item"><kbd>Ctrl+Shift+L</kbd><span>Focus chat</span></div>
             <div class="shortcut-item"><kbd>Ctrl+Shift+N</kbd><span>New session</span></div>
+            <div class="shortcut-item"><kbd>Ctrl+Alt+M</kbd><span>Voice input</span></div>
             <div class="shortcut-item"><kbd>Escape</kbd><span>Stop generation</span></div>
         </div>
         <p class="setting-description">
@@ -950,7 +1190,7 @@ function renderSkillsSection(): void {
     if (!container) return;
 
     if (loadedSkills.length === 0) {
-        container.innerHTML = `<p class="setting-description">No skills found. Add skill paths in the Skills tab or place SKILL.md under <code>~/.pi/agent/skills/</code>.</p>`;
+        container.innerHTML = `<p class="setting-description">No skills found. Add skill paths in the Skills tab or place SKILL.md under <code>~/.agents/skills/</code> or <code>.agents/skills/</code>.</p>`;
         return;
     }
 
@@ -971,6 +1211,15 @@ function renderSkillsSection(): void {
 }
 
 function bindEvents(): void {
+    document.querySelectorAll('.backend-segment-btn').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            const b = (e.currentTarget as HTMLElement).dataset.backend as AgentBackend;
+            if (b && b !== currentSettings?.backend) {
+                vscode.postMessage({ type: 'setBackend', backend: b });
+            }
+        });
+    });
+
     document.querySelectorAll('.setting-select[data-key]').forEach((select) => {
         select.addEventListener('change', () => {
             const key = (select as HTMLSelectElement).dataset.key!;
@@ -978,19 +1227,41 @@ function bindEvents(): void {
         });
     });
 
+    // Save text inputs on 'change' (blur / Enter) to prevent re-rendering and flickering while typing
     document.querySelectorAll('.setting-input[data-key]').forEach((input) => {
-        let debounce: ReturnType<typeof setTimeout>;
-        input.addEventListener('input', () => {
-            clearTimeout(debounce);
-            debounce = setTimeout(() => {
-                const key = (input as HTMLInputElement).dataset.key!;
-                let value: any = (input as HTMLInputElement).value;
-                if (key === 'allowedTools') {
-                    value = value.split(',').map((s: string) => s.trim()).filter(Boolean);
+        if ((input as HTMLInputElement).dataset.key === 'voice.sttUrl') return;
+        input.addEventListener('change', () => {
+            const field = input as HTMLInputElement;
+            const key = field.dataset.key!;
+            let value: string | string[] | number = field.value;
+            if (key === 'allowedTools') {
+                value = field.value.split(',').map((s) => s.trim()).filter(Boolean);
+            } else if (field.type === 'number') {
+                if (Number.isNaN(field.valueAsNumber)) {
+                    return;
                 }
-                vscode.postMessage({ type: 'updateSetting', key, value });
-            }, 500);
+                value = Math.min(Number(field.max), Math.max(Number(field.min), field.valueAsNumber));
+            }
+            vscode.postMessage({ type: 'updateSetting', key, value });
         });
+    });
+
+    // When typing a new STT URL, hide the previous checkmark until tested
+    const sttUrlField = document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null;
+    sttUrlField?.addEventListener('input', () => {
+        applySttValidity(false);
+    });
+
+    document.getElementById('btn-test-stt')?.addEventListener('click', () => {
+        if (pendingSttUrl !== null) return;
+        const btn = document.getElementById('btn-test-stt') as HTMLButtonElement | null;
+        const field = document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null;
+        pendingSttUrl = field?.value.trim() ?? '';
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+        }
+        vscode.postMessage({ type: 'testStt', url: pendingSttUrl });
     });
 
     document.querySelectorAll('input[type="checkbox"][data-key]').forEach((cb) => {

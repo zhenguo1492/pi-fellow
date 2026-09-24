@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isImageFilePath, parseUserMessageForDisplay } from '../../../shared/attachmentMessageDisplay';
+import { buildEditorContextFragment } from '../../../shared/editorContext';
 
 describe('parseUserMessageForDisplay', () => {
     it('strips file blocks and keeps user text', () => {
@@ -27,5 +28,21 @@ describe('parseUserMessageForDisplay', () => {
         const { displayText, fileAttachments } = parseUserMessageForDisplay(raw);
         expect(displayText).toBe('');
         expect(fileAttachments).toHaveLength(1);
+    });
+
+    it('turns an editor-context selection into a chip carrying its line range', () => {
+        const raw = `why?\n${buildEditorContextFragment('/proj/src/a.ts', { startLine: 3, endLine: 7, text: 'const x = 1;' })}`;
+        const { displayText, fileAttachments } = parseUserMessageForDisplay(raw);
+        expect(displayText).toBe('why?');
+        expect(fileAttachments).toEqual([
+            { displayName: 'a.ts', path: '/proj/src/a.ts', startLine: 3, endLine: 7 },
+        ]);
+    });
+
+    it('turns a file-only editor context into a chip without lines', () => {
+        const raw = `explain\n${buildEditorContextFragment('/proj/b.py')}`;
+        const { displayText, fileAttachments } = parseUserMessageForDisplay(raw);
+        expect(displayText).toBe('explain');
+        expect(fileAttachments).toEqual([{ displayName: 'b.py', path: '/proj/b.py' }]);
     });
 });

@@ -38,8 +38,10 @@ export function shouldHideMessageInChat(msg: any): boolean {
     }
 
     if (msg.role === 'assistant') {
+        // Hide only a reply that was nothing but the plan; a step with no text (thinking and
+        // tool calls only) still belongs in the transcript.
         const stripped = stripProposedPlanBlocks(text);
-        if (!stripped || stripped === '**Proposed Plan**') {
+        if (stripped === '**Proposed Plan**' || (!stripped && text.trim())) {
             return true;
         }
     }

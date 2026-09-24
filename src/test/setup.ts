@@ -51,7 +51,11 @@ export function getModelRegistry(): ModelRegistry {
 }
 
 beforeAll(async () => {
-    await initTestInfra();
+    try {
+        await initTestInfra();
+    } catch {
+        // Ignored when running unit tests without local pi-coding-agent
+    }
 }, 30_000);
 
 afterAll(() => {
