@@ -2,6 +2,8 @@
 
 状态：草案 · 仅设计，未实现
 
+原型：已验证的语音环路在独立项目 `voice-loop-prototype` 里（本机 `~/source/ai/voice-loop-prototype`，从本仓库 f8d8f06 抽出）。下文的"原型文档"指该项目的 `docs/voice-loop-prototype.md`。
+
 ## 1. 目标
 
 在 VS Code 扩展中提供一个**实时语音聊天机器人**。它和用户持续对话，同时指挥 omp/pi 干活。
@@ -112,11 +114,11 @@ flowchart TB
 
 - worker 就是现有侧边栏里的那个会话。用户在聊天面板里看到的内容和语音驱动的内容是同一个会话，两种操作方式可以混用。
 - 语音智能体是一个隐藏的 omp 子进程，不写会话文件（`--no-session`），生命周期与"语音模式"开关绑定。
-- 麦克风和播放在扩展启动的**隐藏 Chrome** 里：webview 开不了麦克风，而且回声消除要靠 Chrome 的 AEC3，它必须同时掌握播放和录音。Chrome 通过本地 WebSocket 和扩展进程交换 PCM；VAD、STT、LLM、TTS 和所有决策都在扩展进程里。依据见[原型文档](voice-loop-prototype.md) §3、§8。
+- 麦克风和播放在扩展启动的**隐藏 Chrome** 里：webview 开不了麦克风，而且回声消除要靠 Chrome 的 AEC3，它必须同时掌握播放和录音。Chrome 通过本地 WebSocket 和扩展进程交换 PCM；VAD、STT、LLM、TTS 和所有决策都在扩展进程里。依据见原型文档 §3、§8。
 
 ## 4. 运行模型：接口 + 中心状态机 + 取消令牌
 
-**决定（2026-09-24，原型验证后）：不实现 Pipecat 式的帧流水线（Frame / FrameProcessor / Pipeline）。** 原型已按本节结构实现（`src/voice/prototype-voice-loop/`）。
+**决定（2026-09-24，原型验证后）：不实现 Pipecat 式的帧流水线（Frame / FrameProcessor / Pipeline）。** 原型已按本节结构实现（独立项目 `voice-loop-prototype`）。
 
 ### 4.1 为什么不用帧
 
@@ -175,7 +177,7 @@ flowchart TB
 
 **约定**：abort 之后，这一轮不再向状态机投递任何事件，**唯一的例外是 `llmEnd`**。`llmEnd` 只表示"LLM 空闲了，可以发下一条 prompt"，因为 omp 一次只处理一条 prompt。因此状态机不需要判断事件是否过时。
 
-原型实测：打断时由 `cancelTurn` 一处完成全部停止；扬声器录音显示输出 0.3 s 内静音，被取消那一轮之后没有任何播放事件（[原型文档](voice-loop-prototype.md) §5）。它替换了原型早期分散的四处处理：播放器代次计数、`discarding` 标记、按 `turnId` 丢弃事件、单独的页面 flush。
+原型实测：打断时由 `cancelTurn` 一处完成全部停止；扬声器录音显示输出 0.3 s 内静音，被取消那一轮之后没有任何播放事件（原型文档 §5）。它替换了原型早期分散的四处处理：播放器代次计数、`discarding` 标记、按 `turnId` 丢弃事件、单独的页面 flush。
 
 ### 4.5 与 Pipecat 概念的对照
 
@@ -194,7 +196,7 @@ flowchart TB
 
 ### 5.1 AudioIO（麦克风 + 播放）
 
-- 默认：扩展找到本机的 Chrome、Edge、Chromium 或 Brave，以无界面方式启动，加载本地音频页面。页面负责 `getUserMedia`（开启回声消除、降噪、自动增益）和 WebAudio 播放，通过本地 WebSocket 与扩展交换 PCM。协议和启动参数见[原型文档](voice-loop-prototype.md) §3.2。
+- 默认：扩展找到本机的 Chrome、Edge、Chromium 或 Brave，以无界面方式启动，加载本地音频页面。页面负责 `getUserMedia`（开启回声消除、降噪、自动增益）和 WebAudio 播放，通过本地 WebSocket 与扩展交换 PCM。协议和启动参数见原型文档 §3.2。
 - 找不到 Chrome 时，用 `vscode.env.openExternal` 打开同一页面，并提示用户保持标签页打开。
 - 听写功能仍用 `dictation.ts` 的命令行录音。进入语音模式时停用听写按钮，避免两边同时占用麦克风。
 
@@ -202,7 +204,7 @@ flowchart TB
 
 - 复用 `SileroVad` 和 `SpeechSegmenter`。
 - 听写的结束阈值 `vadStopSecs=0.8` 对讨论场景来说太短。语音模式使用独立配置 `turnStopSecs`，默认 1.2 s（待调）。
-- `userSpeechStart` 需要**持续约 200 ms 的语音**才触发，避免咳嗽、键盘声造成误打断。机器人说话时还要经过插嘴确认（STT + 回声比对，见[原型文档](voice-loop-prototype.md) §4.3）。
+- `userSpeechStart` 需要**持续约 200 ms 的语音**才触发，避免咳嗽、键盘声造成误打断。机器人说话时还要经过插嘴确认（STT + 回声比对，见原型文档 §4.3）。
 - 增强（P3）：接入 Smart Turn v3 做语义层面的说完判定。
 
 ### 5.3 Stt
@@ -271,7 +273,7 @@ synthesize(text, signal) → AsyncIterable<{ pcm: Int16Array, sampleRate }>
 
 - 每句合成完成后按顺序交给 AudioIO 播放，采样率以每句返回的实际值为准。
 - 打断：由本轮取消令牌统一停止（§4.4）。已完整播放的句子记在状态机里，用于 `<interrupted>` 补偿。
-- 播放进度目前是估算的：写出时刻加 80 ms 延迟，以句为单位。改进方向：由浏览器页面回报每句实际的开始和结束时间（[原型文档](voice-loop-prototype.md) §10）。
+- 播放进度目前是估算的：写出时刻加 80 ms 延迟，以句为单位。改进方向：由浏览器页面回报每句实际的开始和结束时间（原型文档 §10）。
 
 ### 5.8 WorkerObserver
 
@@ -640,7 +642,7 @@ stateDiagram-v2
 
 | # | 问题 | 影响 | 当前决策 / 待办 |
 |---|---|---|---|
-| R1 | 回声：外放时麦克风收到 bot 自己的声音，导致误打断甚至自言自语 | 高 | **已解决**：隐藏 Chrome 的 AEC3，加上插嘴需 STT 确认 + 回声比对。原型实测外放不再被自己打断；PipeWire `echo-cancel` 效果明显更差，已放弃（[原型文档](voice-loop-prototype.md) §8 P1、P10）。"按住说话"半双工作为兜底保留 |
+| R1 | 回声：外放时麦克风收到 bot 自己的声音，导致误打断甚至自言自语 | 高 | **已解决**：隐藏 Chrome 的 AEC3，加上插嘴需 STT 确认 + 回声比对。原型实测外放不再被自己打断；PipeWire `echo-cancel` 效果明显更差，已放弃（原型文档 §8 P1、P10）。"按住说话"半双工作为兜底保留 |
 | R2 | `omp say` 没有中文音色、不能流式输出 | 中 | 默认使用 OpenAI 兼容 TTS；`omp say` 作为可选后端。待验证：omp 的 `modelRoles.speech`（云端 Kokoro）能否被外部复用 |
 | R3 | 被打断后，omp 上下文里保留了未念出的文字 | 中 | 用 `<interrupted>` 补偿（§5.4） |
 | R4 | 两个 omp 进程共享同一账号的额度 | 低–中 | 语音轮次短；可以配置更便宜的模型 |
