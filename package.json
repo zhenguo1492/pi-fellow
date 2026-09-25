@@ -254,7 +254,8 @@
     "test": "vitest",
     "test:unit": "vitest run",
     "test:integration": "node out/test/integration/runTest.js",
-    "test:all": "npm run test:unit && npm run test:integration"
+    "test:all": "npm run test:unit && npm run test:integration",
+    "proto:voice": "bun src/voice/prototype-voice-loop/main.ts"
   },
   "dependencies": {
     "marked": "^18.0.2",
