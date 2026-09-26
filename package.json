@@ -23,6 +23,13 @@
           "title": "Oh My Pi Chater",
           "icon": "media/oh-my-pi-chater.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "oh-my-pi-chater-voice",
+          "title": "Bot",
+          "icon": "media/voice-panel.svg"
+        }
       ]
     },
     "views": {
@@ -31,6 +38,13 @@
           "type": "webview",
           "id": "oh-my-pi-chater.chat",
           "name": "Oh My Pi Chater"
+        }
+      ],
+      "oh-my-pi-chater-voice": [
+        {
+          "type": "webview",
+          "id": "oh-my-pi-chater.voice",
+          "name": "Bot"
         }
       ]
     },
@@ -47,6 +61,31 @@
           "command": "oh-my-pi-chater.attachFilesFromExplorer",
           "when": "resourceScheme == file",
           "group": "9_cutcopypaste@5"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "oh-my-pi-chater.voiceAgent.followPi",
+          "when": "oh-my-pi-chater.piFocus && !oh-my-pi-chater.piFollowing",
+          "group": "navigation@90"
+        },
+        {
+          "command": "oh-my-pi-chater.voiceAgent.unfollowPi",
+          "when": "oh-my-pi-chater.piFocus && oh-my-pi-chater.piFollowing",
+          "group": "navigation@90"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "oh-my-pi-chater.voiceView.history",
+          "when": "view == oh-my-pi-chater.voice",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "oh-my-pi-chater.voiceAgent.toggleFollowPi",
+          "when": "false"
         }
       ]
     },
@@ -78,6 +117,61 @@
       {
         "command": "oh-my-pi-chater.toggleDictation",
         "title": "Oh My Pi Chater: Toggle Voice Input"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.debugWorkerControl",
+        "title": "Oh My Pi Chater: Voice Agent — Debug Worker Control"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.typeMessage",
+        "title": "Oh My Pi Chater: Voice Agent — Type a Message"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.start",
+        "title": "Oh My Pi Chater: Voice Agent — Start Voice Mode"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.stop",
+        "title": "Oh My Pi Chater: Voice Agent — Stop"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.toggleMute",
+        "title": "Oh My Pi Chater: Voice Agent — Mute / Unmute Microphone"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.hush",
+        "title": "Oh My Pi Chater: Voice Agent — Stop Speaking"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.clearHighlight",
+        "title": "Oh My Pi Chater: Voice Agent — Clear Pi Highlight"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.followPi",
+        "title": "Oh My Pi Chater: Voice Agent — Follow Pi",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.unfollowPi",
+        "title": "Oh My Pi Chater: Voice Agent — Stop Following Pi",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.toggleFollowPi",
+        "title": "Oh My Pi Chater: Voice Agent — Follow / Stop Following Pi"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.toggleMode",
+        "title": "Oh My Pi Chater: Voice Agent — Switch Delegate / Pair Mode"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceView.show",
+        "title": "Oh My Pi Chater: Voice Agent — Show Bot View"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceView.history",
+        "title": "Oh My Pi Chater: Voice Agent — Past Conversations",
+        "icon": "$(history)"
       },
       {
         "command": "oh-my-pi-chater.attachFilesFromExplorer",
@@ -130,7 +224,14 @@
       {
         "command": "oh-my-pi-chater.toggleDictation",
         "key": "ctrl+alt+m",
-        "mac": "cmd+alt+m"
+        "mac": "cmd+alt+m",
+        "when": "!oh-my-pi-chater.voiceMode"
+      },
+      {
+        "command": "oh-my-pi-chater.voiceAgent.toggleMute",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m",
+        "when": "oh-my-pi-chater.voiceMode"
       },
       {
         "command": "oh-my-pi-chater.abort",
@@ -154,7 +255,7 @@
             "Oh My Pi: standalone binary, state in ~/.omp/agent",
             "pi: Node CLI, state in ~/.pi/agent"
           ],
-          "description": "Agent CLI family to run in RPC mode. Reload the window after changing."
+          "description": "Default agent CLI family to run in RPC mode. Switching backend in the chat or settings panel applies only to the current workspace window and overrides this default there. Reload the window after changing."
         },
         "oh-my-pi-chater.cliPath": {
           "type": "string",
@@ -241,6 +342,116 @@
           "minimum": 0.2,
           "maximum": 3,
           "description": "Voice input: pause (seconds) that ends an utterance and sends it to speech-to-text."
+        },
+        "oh-my-pi-chater.voiceAgent.model": {
+          "type": "string",
+          "default": "",
+          "description": "Voice agent: omp model (provider/id) for the voice conversation. Empty uses the current chat tab's model when the voice agent starts. Takes effect after Voice Agent — Stop."
+        },
+        "oh-my-pi-chater.voiceAgent.thinking": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Voice agent: thinking level. Off keeps spoken replies fast. Takes effect after Voice Agent — Stop."
+        },
+        "oh-my-pi-chater.voiceAgent.confirmBeforeDispatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Voice agent: a new task for an idle worker is only sent after you agree to the plan in a later message."
+        },
+        "oh-my-pi-chater.voiceAgent.followPi": {
+          "type": "boolean",
+          "default": true,
+          "description": "Voice agent: follow Pi when VS Code starts. Following, the editor opens and scrolls to the code Pi talks about, reads or writes; typing in the editor stops following. Toggle with the eye button in the editor title bar or Pi's status bar item."
+        },
+        "oh-my-pi-chater.voiceAgent.narration": {
+          "type": "string",
+          "default": "important",
+          "enum": [
+            "off",
+            "important",
+            "all"
+          ],
+          "enumDescriptions": [
+            "Only speak when spoken to.",
+            "Speak up when the worker needs an answer, fails or finishes, and when research comes back.",
+            "As important, plus progress updates while the worker is busy."
+          ],
+          "description": "Voice agent: when it speaks up on its own about the current task."
+        },
+        "oh-my-pi-chater.voiceAgent.minProactiveGapSecs": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "description": "Voice agent: quiet seconds after any reply before it announces finished work, research or progress. Worker questions and errors are announced right away."
+        },
+        "oh-my-pi-chater.voiceAgent.narrationIntervalSecs": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "description": "Voice agent: with narration \"all\", seconds without a reply before a progress update."
+        },
+        "oh-my-pi-chater.voiceAgent.turnStopSecs": {
+          "type": "number",
+          "default": 1.2,
+          "minimum": 0.3,
+          "maximum": 3,
+          "description": "Voice mode: seconds of silence that end your turn. Takes effect when voice mode starts."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.provider": {
+          "type": "string",
+          "default": "openai",
+          "enum": [
+            "chatterbox",
+            "kokoro",
+            "openai"
+          ],
+          "enumDescriptions": [
+            "chatterbox-tts (multilingual): sends language zh for sentences with Chinese, en otherwise; reads mixed Chinese and English.",
+            "Kokoro-FastAPI: speaks Chinese runs with lang_code z and the rest in the voice's own language.",
+            "Any other OpenAI-compatible service: no language field."
+          ],
+          "description": "Voice mode: which kind of text-to-speech service tts.url is; decides how the language is sent."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.url": {
+          "type": "string",
+          "default": "",
+          "description": "Voice mode: OpenAI-compatible text-to-speech base URL, e.g. http://127.0.0.1:8881/v1. Takes effect when voice mode starts."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.model": {
+          "type": "string",
+          "default": "",
+          "description": "Voice mode: text-to-speech model. Empty uses the provider's: chatterbox-multilingual, kokoro, or tts-1."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.voice": {
+          "type": "string",
+          "default": "",
+          "description": "Voice mode: text-to-speech voice. Empty uses the provider's: default (chatterbox), af_sarah (Kokoro), or alloy."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.speed": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.5,
+          "maximum": 2,
+          "description": "Voice mode: speaking speed."
+        },
+        "oh-my-pi-chater.voiceAgent.historySessions": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Voice view: past voice conversations kept per workspace (one per task and voice mode run)."
+        },
+        "oh-my-pi-chater.voiceAgent.debugTranscript": {
+          "type": "boolean",
+          "default": false,
+          "description": "Voice view: also show what each turn sent to the voice model and the updates it chose not to speak about (<silent/>). For troubleshooting."
         }
       }
     }
@@ -258,12 +469,14 @@
   },
   "dependencies": {
     "marked": "^18.0.2",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.100.0",
+    "@types/ws": "^8.18.1",
     "@vscode/test-electron": "^2.5.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-serialize": "^0.14.0",

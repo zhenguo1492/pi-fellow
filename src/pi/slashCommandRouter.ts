@@ -40,8 +40,8 @@ const GUI_SLASH: Record<string, SettingsFocusSection | 'settings' | 'sessions' |
     'setup-custom-providers': 'defaults',
     profile: 'defaults',
     stt: 'stt',
-    tts: 'stt',
-    voice: 'stt',
+    tts: 'tts',
+    voice: 'voice',
 };
 
 function parseSlash(text: string): { command: string; args: string } {

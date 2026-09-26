@@ -1,30 +1,47 @@
 /**
- * Composer mic button: toggles host-side dictation (the webview itself cannot
- * open the microphone) and inserts transcripts at the caret.
+ * Composer mic button. Voice agent off: it toggles host-side dictation (the webview itself cannot
+ * open the microphone): recording, it is a green stop button; stopped, it spins, disabled, until
+ * what was said is transcribed and inserted at the caret. Voice agent on: it owns the microphone,
+ * the mic is green while open and a click mutes it. It also decides which lines of the voice bar's
+ * waveform show (voiceWave.ts): the microphone's while open, the bot's while it speaks.
  */
-import type { DictationStatus } from '../shared/protocol';
+import type { DictationStatus, VoiceServiceCheck } from '../shared/protocol';
+import type { VoiceStatus } from '../shared/voiceViewProtocol';
+import { setWaveOpen } from './voiceWave';
 import { vscode } from './vscodeApi';
 
 const MIC_BUTTON_ID = 'btn-mic';
 const SHORTCUT = navigator.userAgent.includes('Mac') ? '⌘⌥M' : 'Ctrl+Alt+M';
-/** Waveform bars; each shows one level report, newest on the right. */
-const WAVE_BARS = 5;
-/** Bar height at silence, so the waveform reads as "listening" rather than empty. */
-const WAVE_MIN_SCALE = 0.18;
 
 let status: DictationStatus = { recording: false, speaking: false, pending: 0 };
-let levels: number[] = new Array(WAVE_BARS).fill(0);
-let isSttValid = false;
+/** The STT service's check; absent until the host reports it (the mic stays hidden until then). */
+let stt: VoiceServiceCheck | undefined;
+/** The voice agent's state; while it is on or starting it owns the microphone. */
+let voice: VoiceStatus | undefined;
 
-export function setSttValid(valid: boolean): void {
-    isSttValid = valid;
+export function setSttCheck(next: VoiceServiceCheck): void {
+    stt = next;
     renderMicButton();
 }
 
+/** Voice mode on or starting: the mic shows and mutes the voice agent's microphone. */
+function voiceOwnsMic(): boolean {
+    return voice !== undefined && (voice.phase !== 'off' || voice.starting);
+}
+
+export function applyVoiceMicStatus(next: VoiceStatus | undefined): void {
+    voice = next;
+    renderMicButton();
+}
+
+const MIC_PATH = '<rect x="5.5" y="1.75" width="5" height="8" rx="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M3.25 7.5a4.75 4.75 0 009.5 0M8 12.25v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>';
+
 export const micButtonHtml = `
     <button id="${MIC_BUTTON_ID}" class="composer-action-btn composer-action-btn--ghost mic-btn" type="button" hidden>
-        <svg class="mic-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5.5" y="1.75" width="5" height="8" rx="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M3.25 7.5a4.75 4.75 0 009.5 0M8 12.25v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-        <span class="mic-wave" aria-hidden="true">${'<span class="mic-wave-bar"></span>'.repeat(WAVE_BARS)}</span>
+        <svg class="mic-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">${MIC_PATH}</svg>
+        <svg class="mic-off-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">${MIC_PATH}<path d="M2.5 1.5l11 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <svg class="mic-stop-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>
+        <svg class="mic-busy-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5" opacity=".25"/><path d="M13.5 8A5.5 5.5 0 008 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
     </button>`;
 
 const STATUS_ID = 'dictation-status';
@@ -45,7 +62,11 @@ export function bindMicButton(): void {
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', (e) => {
         e.preventDefault();
-        vscode.postMessage({ type: 'toggleDictation' });
+        if (!voiceOwnsMic()) {
+            vscode.postMessage({ type: 'toggleDictation' });
+        } else if (voice && voice.phase !== 'standby' && !voice.starting) {
+            vscode.postMessage({ type: 'voiceAgent', action: { type: 'mute', muted: !voice.muted } });
+        }
     });
     renderMicButton();
 }
@@ -55,41 +76,75 @@ export function applyDictationStatus(next: DictationStatus): void {
     renderMicButton();
 }
 
-/** Shifts one level report (0..1) into the waveform. */
-export function applyDictationLevel(level: number): void {
-    levels = [...levels.slice(1), level];
-    renderWave();
-}
-
-function renderWave(): void {
-    const bars = document.querySelectorAll<HTMLElement>(`#${MIC_BUTTON_ID} .mic-wave-bar`);
-    bars.forEach((bar, i) => {
-        bar.style.transform = `scaleY(${(WAVE_MIN_SCALE + (1 - WAVE_MIN_SCALE) * (levels[i] ?? 0)).toFixed(3)})`;
-    });
-}
-
 function renderMicButton(): void {
-    const btn = document.getElementById(MIC_BUTTON_ID);
+    const btn = document.getElementById(MIC_BUTTON_ID) as HTMLButtonElement | null;
     if (!btn) {
         return;
     }
-    btn.hidden = !isSttValid;
-    btn.classList.toggle('is-recording', status.recording);
-    btn.classList.toggle('is-speaking', status.speaking);
-    btn.classList.toggle('is-pending', status.pending > 0);
-    renderStatusLine();
-    if (!status.recording) {
-        levels = levels.map(() => 0);
-        renderWave();
+    if (voice && voiceOwnsMic()) {
+        renderVoiceMic(btn, voice);
+        return;
     }
-    const label = status.recording
-        ? `Stop voice input (${SHORTCUT})`
-        : status.pending > 0
-          ? 'Transcribing…'
-          : `Voice input (${SHORTCUT})`;
+    // Unusable without a working STT service: red, and the tooltip says why. A click still reaches
+    // the host, which repeats the reason and opens Settings → Voice.
+    const unavailable = stt?.ok !== true;
+    // Stopped with speech still being transcribed: a spinner, and no new recording until it lands.
+    const busy = !status.recording && status.pending > 0;
+    btn.hidden = stt === undefined;
+    btn.disabled = busy;
+    btn.classList.remove('is-voice', 'is-muted');
+    btn.classList.toggle('is-unavailable', unavailable);
+    btn.setAttribute('aria-disabled', String(unavailable || busy));
+    // Recording: a green stop button; a click stops it and transcribes what was said.
+    btn.classList.toggle('is-recording', status.recording);
+    btn.classList.toggle('is-live', status.recording);
+    btn.classList.toggle('is-speaking', status.speaking);
+    btn.classList.toggle('is-busy', busy);
+    btn.setAttribute('aria-busy', String(busy));
+    renderStatusLine();
+    setWaveOpen({ user: status.recording, bot: false });
+    const label = unavailable
+        ? (stt?.reason ?? 'Speech-to-text is unavailable.')
+        : status.recording
+          ? `Stop voice input and transcribe (${SHORTCUT})`
+          : busy
+            ? 'Transcribing…'
+            : `Voice input (${SHORTCUT})`;
     btn.title = label;
     btn.setAttribute('aria-label', label);
     btn.setAttribute('aria-pressed', status.recording ? 'true' : 'false');
+}
+
+/** Voice mode: the mic is green while open; a click mutes (mic-off icon) or unmutes it. */
+function renderVoiceMic(btn: HTMLButtonElement, v: VoiceStatus): void {
+    // Starting, or another window has the voice: nothing to mute here.
+    const idle = v.starting || v.phase === 'standby';
+    const open = !v.muted && !idle;
+    btn.hidden = false;
+    btn.disabled = idle;
+    btn.classList.add('is-voice');
+    btn.classList.remove('is-unavailable', 'is-recording', 'is-busy');
+    btn.setAttribute('aria-busy', 'false');
+    btn.removeAttribute('aria-disabled');
+    btn.classList.toggle('is-muted', v.muted);
+    btn.classList.toggle('is-live', open);
+    btn.classList.toggle('is-speaking', open && v.phase === 'userSpeaking');
+    // The robot status line says what the voice agent is doing.
+    const line = document.getElementById(STATUS_ID);
+    if (line) {
+        line.hidden = true;
+    }
+    setWaveOpen({ user: open, bot: v.phase === 'speaking' });
+    const label = v.starting
+        ? 'The voice agent is starting'
+        : v.phase === 'standby'
+          ? 'Another VS Code window has the microphone'
+          : v.muted
+            ? `Unmute the microphone (${SHORTCUT})`
+            : `Mute the microphone (${SHORTCUT})`;
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-pressed', v.muted ? 'true' : 'false');
 }
 
 function renderStatusLine(): void {

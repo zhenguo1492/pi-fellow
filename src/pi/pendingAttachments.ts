@@ -64,4 +64,6 @@ export function toPreviewList(items: PendingAttachment[]): PendingAttachmentPrev
 export interface QueuedPrompt {
     text: string;
     attachments: PendingAttachment[];
+    /** Sent by the voice agent: its user message gets the "From voice" tag once it runs. */
+    fromVoice?: boolean;
 }

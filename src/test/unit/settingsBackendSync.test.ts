@@ -5,6 +5,7 @@ import type { PiChatSession } from '../../pi/slashCommands';
 const state = vi.hoisted(() => ({
     backend: 'pi' as 'pi' | 'omp',
     listeners: [] as Array<(event: { affectsConfiguration: (key: string) => boolean }) => void>,
+    backendListeners: [] as Array<(backend: 'pi' | 'omp') => void>,
     messages: [] as Array<{ type: string; data?: { backend: string } }>,
     dispose: undefined as (() => void) | undefined,
 }));
@@ -15,14 +16,7 @@ vi.mock('vscode', () => ({
     Uri: { joinPath: (...parts: unknown[]) => parts.join('/') },
     workspace: {
         getConfiguration: () => ({
-            get: (key: string, fallback: unknown) => key === 'backend' ? state.backend : fallback,
-            update: async (key: string, value: 'pi' | 'omp') => {
-                if (key !== 'backend') return;
-                state.backend = value;
-                for (const listener of state.listeners) {
-                    listener({ affectsConfiguration: (name) => name === 'oh-my-pi-chater' || name === 'oh-my-pi-chater.backend' });
-                }
-            },
+            get: (_key: string, fallback: unknown) => fallback,
         }),
         onDidChangeConfiguration: (listener: (event: { affectsConfiguration: (key: string) => boolean }) => void) => {
             state.listeners.push(listener);
@@ -49,7 +43,16 @@ vi.mock('vscode', () => ({
 vi.mock('../../pi/piCliPaths', () => ({
     getAgentLayout: () => ({ backend: state.backend, agentDir: `/agent/${state.backend}` }),
     getAvailableBackends: () => ['omp', 'pi'],
-    clearCliTargetCache: () => {},
+    setWindowBackend: (backend: 'pi' | 'omp') => {
+        state.backend = backend;
+        for (const listener of state.backendListeners) {
+            listener(backend);
+        }
+    },
+    onDidChangeWindowBackend: (listener: (backend: 'pi' | 'omp') => void) => {
+        state.backendListeners.push(listener);
+        return { dispose: () => { state.backendListeners.splice(state.backendListeners.indexOf(listener), 1); } };
+    },
 }));
 vi.mock('../../pi/piCliSync', () => ({
     getPiAgentDir: (backend: string) => `/agent/${backend}`,
@@ -62,8 +65,14 @@ vi.mock('../../pi/piPackageCatalogPicker', () => ({}));
 vi.mock('../../pi/piExtensionCompat', () => ({}));
 vi.mock('../../pi/slashCommands', () => ({}));
 vi.mock('../../voice/stt', () => ({}));
-vi.mock('../../voice/voiceSettings', () => ({ readVoiceSettings: () => ({}) }));
+vi.mock('../../voice/voiceSettings', () => ({
+    readVoiceSettings: () => ({}),
+    readTtsSettings: () => ({}),
+    onVoiceReadinessChange: () => ({ dispose: () => {} }),
+    voiceReadiness: () => ({ stt: { ok: true }, tts: { ok: true } }),
+}));
 
+import { setWindowBackend } from '../../pi/piCliPaths';
 import { SettingsPanel } from '../../providers/settings-panel';
 
 describe('settings backend selection', () => {
@@ -71,6 +80,7 @@ describe('settings backend selection', () => {
         state.dispose?.();
         state.messages.length = 0;
         state.listeners.length = 0;
+        state.backendListeners.length = 0;
         state.backend = 'pi';
         state.dispose = undefined;
     });
@@ -86,7 +96,7 @@ describe('settings backend selection', () => {
         const shownBackend = () => state.messages.filter((msg) => msg.type === 'settings').at(-1)?.data?.backend;
         expect(shownBackend()).toBe('pi');
 
-        await vi.mocked(vscode.workspace.getConfiguration().update)('backend', 'omp', vscode.ConfigurationTarget.Global);
+        setWindowBackend('omp');
         expect(shownBackend()).toBe('omp');
 
         SettingsPanel.show({} as vscode.Uri, {} as vscode.SecretStorage, staleSession);
@@ -96,7 +106,7 @@ describe('settings backend selection', () => {
         SettingsPanel.show({} as vscode.Uri, {} as vscode.SecretStorage, staleSession);
         expect(shownBackend()).toBe('omp');
 
-        await vi.mocked(vscode.workspace.getConfiguration().update)('backend', 'pi', vscode.ConfigurationTarget.Global);
+        setWindowBackend('pi');
         expect(shownBackend()).toBe('pi');
     });
 });

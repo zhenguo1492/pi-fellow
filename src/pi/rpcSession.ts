@@ -440,7 +440,9 @@ export class PiRpcSessionManager {
             await this._bridge.followUp(text, rpcImages);
             return;
         }
-        if (this._shim?.isStreaming) {
+        // An explicit streamingBehavior is sent even when idle: pi and omp then run it as a plain
+        // prompt, and the send cannot race a run that started after isStreaming was last updated.
+        if (options.streamingBehavior || this._shim?.isStreaming) {
             const behavior = options.streamingBehavior ?? 'steer';
             await this._bridge.prompt(text, rpcImages, behavior);
             return;

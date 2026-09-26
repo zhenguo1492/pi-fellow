@@ -1,4 +1,6 @@
 import type { EditorContextInfo } from './editorContext';
+import type { VoiceAgentAction, VoiceStatus, VoiceViewClientMessage, VoiceViewHostMessage } from './voiceViewProtocol';
+import type { TtsConfig } from '../voiceAgent/tts';
 
 export interface ContextUsageInfo {
     tokens: number | null;
@@ -132,6 +134,8 @@ export interface SettingsData {
     extensionLoadIssues?: PiExtensionLoadIssue[];
     loadedExtensionCount?: number;
     voice: VoiceSettings;
+    tts: TtsConfig;
+    voiceReadiness: VoiceReadiness;
 }
 
 export interface VoiceSettings {
@@ -140,7 +144,19 @@ export interface VoiceSettings {
     language: string;
     vadConfidence: number;
     vadStopSecs: number;
-    sttValid?: boolean;
+}
+
+/** A voice service's last check against the current settings; `reason` (when not ok) is shown on the disabled button. */
+export interface VoiceServiceCheck {
+    ok: boolean;
+    reason?: string;
+    /** The check of the current settings has not answered yet. */
+    checking?: boolean;
+}
+
+export interface VoiceReadiness {
+    stt: VoiceServiceCheck;
+    tts: VoiceServiceCheck;
 }
 
 /** Voice dictation state shown on the composer's mic button. */
@@ -151,6 +167,16 @@ export interface DictationStatus {
     /** Speech segments sent to STT whose text has not arrived yet. */
     pending: number;
 }
+
+/** One STT dry run in the settings, as it happens. */
+export type SttDryRunEvent =
+    | { kind: 'status'; status: DictationStatus }
+    /** Microphone level 0..1. */
+    | { kind: 'level'; level: number }
+    | { kind: 'text'; text: string }
+    | { kind: 'error'; message: string }
+    /** Microphone off and every transcript delivered. */
+    | { kind: 'ended' };
 
 export interface ToolCallPendingInfo {
     toolCallId: string;
@@ -244,8 +270,10 @@ export interface SerializedAgentState {
     tuiMode?: boolean;
     /** omp /login or /logout was requested: chat shows a banner that finishes it in the TUI. */
     tuiAuthPrompt?: TuiAuthCommand;
-    /** Whether voice input (STT) is configured and valid (HTTP 200). Mic button shows only when true. */
-    sttValid?: boolean;
+    /** Whether the speech services answered their checks: gates the composer mic (STT) and the voice agent (both). */
+    voiceReadiness?: VoiceReadiness;
+    /** The voice agent's state for the robot status line and the composer mic; absent until it is known. */
+    voice?: VoiceStatus;
 }
 
 export type TuiAuthCommand = 'login' | 'logout';
@@ -348,6 +376,10 @@ export type ClientMessage =
     | { type: 'prompt'; text: string; attachments?: any[] }
     | { type: 'slashCommand'; text: string }
     | { type: 'steer'; text: string }
+    /** From the Bot view in the bottom panel. */
+    | { type: 'voice'; message: VoiceViewClientMessage }
+    /** From the chat's robot status line, composer mic and composer, for the voice agent. */
+    | { type: 'voiceAgent'; action: VoiceAgentAction }
     | { type: 'pickAttachments' }
     | { type: 'addPastedImages'; items: { mimeType: string; dataBase64: string; name?: string }[] }
     | { type: 'addDroppedTextFiles'; files: { name: string; text: string }[] }
@@ -385,7 +417,8 @@ export type ClientMessage =
     | { type: 'setBackend'; backend: AgentBackend }
     | { type: 'closeTab'; tabId: string }
     | { type: 'switchTab'; tabId: string }
-    | { type: 'openSettings' }
+    /** `section`: scroll the settings to it (`voice`, `mcp`, …). */
+    | { type: 'openSettings'; section?: string }
     | { type: 'getSkills' }
     | { type: 'getSlashCommands' }
     | { type: 'queueMessage'; text: string }
@@ -452,7 +485,13 @@ export type SettingsClientMessage =
     | { type: 'runPiLogin' }
     | { type: 'runPiLogout' }
     | { type: 'rebuildNativeModules' }
-    | { type: 'testStt'; url?: string };
+    /** Saves the section as given (even if the check fails), then checks the service. */
+    | { type: 'testStt'; settings: VoiceSettings }
+    | { type: 'testTts'; settings: TtsConfig }
+    /** Dry runs use the form's values, saved or not. `run` tags the events of one recording. */
+    | { type: 'startSttDryRun'; run: number; settings: VoiceSettings }
+    | { type: 'stopSttDryRun' }
+    | { type: 'ttsDryRun'; settings: TtsConfig; text: string };
 
 // Extension -> Webview messages
 export type ServerMessage =
@@ -483,8 +522,8 @@ export type ServerMessage =
     | { type: 'dictationStatus'; status: DictationStatus }
     /** Transcribed utterance to insert at the composer caret. */
     | { type: 'dictationText'; text: string }
-    /** Microphone level 0..1 while recording. */
-    | { type: 'dictationLevel'; level: number }
+    /** Microphone level 0..1 while recording, with its spectrum (as in `voiceLevel`). */
+    | { type: 'dictationLevel'; level: number; bands?: number[] }
     | { type: 'toast'; message: string; variant?: 'info' | 'error' }
     | {
           type: 'workspaceFiles';
@@ -506,7 +545,20 @@ export type ServerMessage =
     | { type: 'tuiSnapshot'; tabId: string; data: string }
     | { type: 'tuiExit'; tabId: string; exitCode: number }
     /** Active editor file/selection the next prompt carries; `enabled` is the user's include toggle. */
-    | { type: 'editorContext'; context: EditorContextInfo | null; enabled: boolean };
+    | { type: 'editorContext'; context: EditorContextInfo | null; enabled: boolean }
+    /** For the Bot view in the bottom panel. */
+    | { type: 'voice'; message: VoiceViewHostMessage }
+    /** The voice agent's state changed: robot status line and composer mic. */
+    | { type: 'voiceStatus'; status: VoiceStatus }
+    /**
+     * Voice mode, ~16 per second: the microphone's level (0..1) while it listens, the bot's while a
+     * reply plays, with the spectrum of that moment: energy 0..1 per mel band, lowest first
+     * (src/voice/micLevel.ts `spectrumBands`). Absent bands mean silence.
+     */
+    | { type: 'voiceLevel'; level: number; source: VoiceLevelSource; bands?: number[] };
+
+/** Whose sound a voice level measures: the user's microphone or the bot's reply. */
+export type VoiceLevelSource = 'user' | 'bot';
 
 // Extension -> Settings webview messages
 export type SettingsServerMessage =
@@ -518,4 +570,7 @@ export type SettingsServerMessage =
     | { type: 'error'; message: string }
     | { type: 'mcpSnapshot'; snapshot: McpSettingsSnapshot }
     | { type: 'scrollToSection'; section: string }
-    | { type: 'sttTestResult'; ok: boolean; status?: number; message: string };
+    | { type: 'voiceTestResult'; service: 'stt' | 'tts'; ok: boolean; message: string; check: VoiceServiceCheck }
+    | { type: 'sttDryRun'; run: number; event: SttDryRunEvent }
+    | { type: 'ttsDryRunResult'; ok: true; audio: string; seconds: number; elapsedMs: number }
+    | { type: 'ttsDryRunResult'; ok: false; message: string };

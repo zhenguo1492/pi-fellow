@@ -12,18 +12,29 @@ vi.mock('vscode', () => ({
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { testSttConnectivity } from '../../../voice/stt';
-import { isSttValid, readVoiceSettings, setSttValid, onSttValidityChange } from '../../../voice/voiceSettings';
+import { testTtsConnectivity } from '../../../voiceAgent/tts';
+import { onVoiceReadinessChange, probeStt, recordSttCheck, sttCheck } from '../../../voice/voiceSettings';
 
 describe('STT Connectivity and Validity', () => {
     const originalFetch = globalThis.fetch;
 
     beforeEach(() => {
         voiceConfig.sttUrl = 'http://127.0.0.1:8010/v1';
-        setSttValid(false);
+        recordSttCheck(voiceConfig.sttUrl, false, 'reset');
     });
 
     afterEach(() => {
         globalThis.fetch = originalFetch;
+    });
+
+    it('a wrong URL saved over a working one makes STT unusable once its check lands', async () => {
+        recordSttCheck(voiceConfig.sttUrl, true, 'ok');
+        expect(sttCheck().ok).toBe(true);
+
+        voiceConfig.sttUrl = 'http://127.0.0.1:8019/v1';
+        globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }));
+        await probeStt();
+        expect(sttCheck()).toEqual({ ok: false, reason: expect.stringContaining('8019/v1/models failed: fetch failed (ECONNREFUSED)') });
     });
 
     it('rejects empty URL without fetching', async () => {
@@ -71,12 +82,38 @@ describe('STT Connectivity and Validity', () => {
         expect(res.message).toContain('ECONNREFUSED');
     });
     it('does not reuse verification when the configured STT URL changes', () => {
-        setSttValid(true);
-        expect(readVoiceSettings().sttValid).toBe(true);
+        recordSttCheck(voiceConfig.sttUrl, true, 'ok');
+        expect(sttCheck().ok).toBe(true);
 
         voiceConfig.sttUrl = 'http://127.0.0.1:8210/v1';
-        expect(isSttValid()).toBe(false);
-        expect(readVoiceSettings().sttValid).toBe(false);
+        expect(sttCheck().ok).toBe(false);
+    });
+
+    it('explains why STT is unusable: no URL, or the failed check', () => {
+        voiceConfig.sttUrl = '';
+        expect(sttCheck()).toEqual({ ok: false, reason: expect.stringMatching(/not configured/) });
+
+        voiceConfig.sttUrl = 'http://127.0.0.1:8010/v1';
+        recordSttCheck(voiceConfig.sttUrl, false, 'GET http://127.0.0.1:8010/v1/models failed: fetch failed (ECONNREFUSED)');
+        expect(sttCheck().reason).toContain('ECONNREFUSED');
+    });
+
+    it('ignores a check of a URL that is no longer configured', () => {
+        recordSttCheck('http://127.0.0.1:9999/v1', true, 'ok');
+        expect(sttCheck().ok).toBe(false);
+    });
+
+    it('fails TTS when the server does not list the model requests will name', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+            status: 200,
+            json: async () => ({ data: [{ id: 'chatterbox-multilingual' }] }),
+        } as unknown as Response);
+
+        const tts = { provider: 'kokoro' as const, url: 'http://127.0.0.1:8881/v1', model: '', voice: '', speed: 1 };
+        const res = await testTtsConnectivity(tts);
+        expect(res.ok).toBe(false);
+        expect(res.message).toContain('"kokoro"');
+        expect((await testTtsConnectivity({ ...tts, provider: 'chatterbox' })).ok).toBe(true);
     });
 
     it('does not accept HTTP 200 from a generic base page after /models fails', async () => {
@@ -99,28 +136,24 @@ describe('STT Connectivity and Validity', () => {
     });
 
 
-    it('tracks sttValid and notifies listeners on change', () => {
-        expect(isSttValid()).toBe(false);
-
-        const states: boolean[] = [];
-        const sub = onSttValidityChange((valid) => {
-            states.push(valid);
+    it('notifies readiness listeners only when a check changes', () => {
+        const calls: boolean[] = [];
+        const sub = onVoiceReadinessChange(() => {
+            calls.push(sttCheck().ok);
         });
 
-        setSttValid(true);
-        expect(isSttValid()).toBe(true);
-        expect(states).toEqual([true]);
+        recordSttCheck(voiceConfig.sttUrl, true, 'ok');
+        expect(calls).toEqual([true]);
 
-        // Duplicate set does not fire listener again
-        setSttValid(true);
-        expect(states).toEqual([true]);
+        // Duplicate result does not fire listener again
+        recordSttCheck(voiceConfig.sttUrl, true, 'ok');
+        expect(calls).toEqual([true]);
 
-        setSttValid(false);
-        expect(isSttValid()).toBe(false);
-        expect(states).toEqual([true, false]);
+        recordSttCheck(voiceConfig.sttUrl, false, 'HTTP 500');
+        expect(calls).toEqual([true, false]);
 
         sub.dispose();
-        setSttValid(true);
-        expect(states).toEqual([true, false]); // Disposed listener not called
+        recordSttCheck(voiceConfig.sttUrl, true, 'ok');
+        expect(calls).toEqual([true, false]); // Disposed listener not called
     });
 });

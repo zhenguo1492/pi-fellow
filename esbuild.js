@@ -41,6 +41,13 @@ const settingsWebviewConfig = {
     minify: false,
 };
 
+/** The voice panel in its own view in the bottom panel (src/voiceAgent/voicePanelView.ts). */
+const voiceViewConfig = {
+    ...settingsWebviewConfig,
+    entryPoints: ['src/webview/voiceView.ts'],
+    outfile: 'out/webview/voiceView.js',
+};
+
 async function copyStyles() {
     const stylesDir = path.join('out', 'webview', 'styles');
     await fs.promises.mkdir(stylesDir, { recursive: true });
@@ -70,12 +77,14 @@ async function build() {
         const extCtx = await esbuild.context(extensionConfig);
         const webCtx = await esbuild.context(webviewConfig);
         const settingsCtx = await esbuild.context(settingsWebviewConfig);
-        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch()]);
+        const voiceCtx = await esbuild.context(voiceViewConfig);
+        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), voiceCtx.watch()]);
         console.log('Watching for changes...');
     } else {
         await esbuild.build(extensionConfig);
         await esbuild.build(webviewConfig);
         await esbuild.build(settingsWebviewConfig);
+        await esbuild.build(voiceViewConfig);
         await Promise.all([copyStyles(), copyOrtRuntime()]);
         console.log('Build complete.');
     }

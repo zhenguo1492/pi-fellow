@@ -1,5 +1,12 @@
 import * as vscode from 'vscode';
-import type { SettingsClientMessage, SettingsServerMessage, SettingsData, SkillInfo, AgentBackend } from '../shared/protocol';
+import type {
+    SettingsClientMessage,
+    SettingsServerMessage,
+    SettingsData,
+    SkillInfo,
+    AgentBackend,
+    VoiceSettings,
+} from '../shared/protocol';
 import type { PiChatSession } from '../pi/slashCommands';
 import {
     addPiExtensionPath,
@@ -24,11 +31,22 @@ import {
 import { showPiPackageCatalogPicker } from '../pi/piPackageCatalogPicker';
 import { loadMcpSettingsSnapshot, probeMcpServer, setMcpServerEnabled } from '../pi/mcpConfig';
 import { getMissingRecommendedPackages } from '../pi/recommendedPackages';
-import { getAgentLayout, getAvailableBackends, clearCliTargetCache } from '../pi/piCliPaths';
+import { getAgentLayout, getAvailableBackends, onDidChangeWindowBackend, setWindowBackend } from '../pi/piCliPaths';
 import { rebuildAgentNativeModules } from '../pi/piExtensionCompat';
 import { runPiLoginFlow, runPiLogoutFlow } from '../pi/slashCommands';
 import { testSttConnectivity } from '../voice/stt';
-import { readVoiceSettings, setSttValid } from '../voice/voiceSettings';
+import { VoiceDryRun } from '../voice/voiceDryRun';
+import {
+    onVoiceReadinessChange,
+    readTtsSettings,
+    readVoiceSettings,
+    recordSttCheck,
+    recordTtsCheck,
+    saveTtsSettings,
+    saveVoiceSettings,
+    voiceReadiness,
+} from '../voice/voiceSettings';
+import { testTtsConnectivity, type TtsConfig } from '../voiceAgent/tts';
 
 const API_KEY_PREFIX = 'oh-my-pi-chater.apiKey.';
 
@@ -43,6 +61,7 @@ export class SettingsPanel {
     private _outputChannel: vscode.OutputChannel | undefined;
     private _disposables: vscode.Disposable[] = [];
     private _mcpProbeResults = new Map<string, { ok: boolean; message: string }>();
+    private _voiceDryRun: VoiceDryRun;
 
     private constructor(
         panel: vscode.WebviewPanel,
@@ -59,6 +78,8 @@ export class SettingsPanel {
         this._piSession = piSession;
         this._currentBackend = getAgentLayout().backend;
         this._outputChannel = outputChannel;
+        this._voiceDryRun = new VoiceDryRun(extensionUri, (message) => this._post(message));
+        this._disposables.push(this._voiceDryRun);
 
         this._panel.webview.html = this._getHtml();
 
@@ -78,7 +99,15 @@ export class SettingsPanel {
                 void this._sendSettings();
             }
         });
-        this._disposables.push(configListener);
+        this._disposables.push(
+            configListener,
+            onDidChangeWindowBackend((backend) => {
+                this._currentBackend = backend;
+                void this._sendSettings();
+            }),
+            // The STT check mark follows the automatic checks too, not only the Test button.
+            onVoiceReadinessChange(() => void this._sendSettings()),
+        );
 
         void this._sendSettings();
         void this._sendSkills();
@@ -185,10 +214,8 @@ export class SettingsPanel {
                     break;
                 case 'setBackend':
                     if (msg.backend === 'omp' || msg.backend === 'pi') {
+                        setWindowBackend(msg.backend);
                         this._currentBackend = msg.backend;
-                        const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
-                        await config.update('backend', msg.backend, vscode.ConfigurationTarget.Global);
-                        clearCliTargetCache();
                         await this._afterPiConfigChange(`Switched to ${msg.backend} backend`);
                     }
                     break;
@@ -304,7 +331,19 @@ export class SettingsPanel {
                     await this._sendSettings();
                     break;
                 case 'testStt':
-                    await this._testStt(msg.url);
+                    await this._testStt(msg.settings);
+                    break;
+                case 'testTts':
+                    await this._testTts(msg.settings);
+                    break;
+                case 'startSttDryRun':
+                    await this._voiceDryRun.startStt(msg.run, msg.settings);
+                    break;
+                case 'stopSttDryRun':
+                    await this._voiceDryRun.stopStt();
+                    break;
+                case 'ttsDryRun':
+                    await this._voiceDryRun.synthesize(msg.settings, msg.text);
                     break;
             }
         } catch (err: any) {
@@ -384,47 +423,37 @@ export class SettingsPanel {
 
     private async _updateSetting(key: string, value: unknown): Promise<void> {
         const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
-        if (key === 'voice.sttUrl') {
-            setSttValid(false);
-        }
         await config.update(key, value, vscode.ConfigurationTarget.Global);
     }
 
-    private async _testStt(urlOverride?: string): Promise<void> {
+    /** Saves the STT section as typed (a failing check still saves it), then checks the service. */
+    private async _testStt(settings: VoiceSettings): Promise<void> {
+        await saveVoiceSettings(settings);
         const { sttUrl, sttModel } = readVoiceSettings();
-        const effectiveUrl = (urlOverride !== undefined ? urlOverride.trim() : sttUrl);
-        if (!effectiveUrl) {
-            setSttValid(false);
-            this._post({
-                type: 'sttTestResult',
-                ok: false,
-                message: 'Enter a Speech-to-text URL first.',
-            });
-            return;
-        }
-        try {
-            const res = await testSttConnectivity(effectiveUrl, sttModel);
-            if (res.ok && urlOverride !== undefined) {
-                const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
-                await config.update('voice.sttUrl', effectiveUrl, vscode.ConfigurationTarget.Global);
-            }
-            setSttValid(res.ok);
-            this._post({
-                type: 'sttTestResult',
-                ok: res.ok,
-                message: res.ok
-                    ? `STT connected (HTTP 200) — ${sttModel || res.models[0] || 'ready'}`
-                    : `Connection failed: ${res.message}`,
-            });
-        } catch (err: unknown) {
-            setSttValid(false);
-            const message = err instanceof Error ? err.message : String(err);
-            this._post({
-                type: 'sttTestResult',
-                ok: false,
-                message: `Connection failed: ${message}`,
-            });
-        }
+        const res = await testSttConnectivity(sttUrl, sttModel);
+        recordSttCheck(sttUrl, res.ok, res.message);
+        this._post({
+            type: 'voiceTestResult',
+            service: 'stt',
+            ok: res.ok,
+            message: res.ok ? `Saved. STT connected — ${sttModel || res.models[0] || 'ready'}` : `Saved, but the check failed: ${res.message}`,
+            check: voiceReadiness().stt,
+        });
+    }
+
+    /** Saves the TTS section as typed (a failing check still saves it), then checks the service. */
+    private async _testTts(settings: TtsConfig): Promise<void> {
+        await saveTtsSettings(settings);
+        const saved = readTtsSettings();
+        const res = await testTtsConnectivity(saved);
+        recordTtsCheck(saved, res.ok, res.message);
+        this._post({
+            type: 'voiceTestResult',
+            service: 'tts',
+            ok: res.ok,
+            message: res.ok ? `Saved. TTS connected — ${res.message}` : `Saved, but the check failed: ${res.message}`,
+            check: voiceReadiness().tts,
+        });
     }
 
     private async _sendSettings(): Promise<void> {
@@ -476,6 +505,8 @@ export class SettingsPanel {
             sessionStoragePath: config.get<string>('sessionStoragePath', ''),
             contextUsageWarningThreshold: config.get<number>('contextUsageWarningThreshold', 80),
             voice: readVoiceSettings(),
+            tts: readTtsSettings(),
+            voiceReadiness: voiceReadiness(),
         };
 
         if (this._piSession && this._piSession.backend === backend) {
@@ -577,7 +608,7 @@ export class SettingsPanel {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+          content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; media-src data:;">
     <link rel="stylesheet" href="${styleUri}">
     <title>Oh My Pi Chater Settings</title>
 </head>

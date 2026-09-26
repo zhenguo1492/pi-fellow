@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import type { DictationStatus, ServerMessage } from '../shared/protocol';
 import { SettingsPanel } from '../providers/settings-panel';
-import { DictationSession } from './dictation';
+import { DictationSession, dictationSegmenterParams } from './dictation';
 import { SileroVad } from './sileroVad';
 import { SttClient } from './stt';
-import { isSttValid, readVoiceSettings } from './voiceSettings';
+import { readVoiceSettings, sttCheck } from './voiceSettings';
 
 /** Microphone dictation into the chat composer (mic button / `oh-my-pi-chater.toggleDictation`). */
 export class VoiceInput implements vscode.Disposable {
@@ -13,6 +13,8 @@ export class VoiceInput implements vscode.Disposable {
     private readonly live = new Map<DictationSession, DictationStatus>();
     private vad: Promise<SileroVad> | undefined;
     private starting = false;
+    /** Voice mode owns the microphone; dictation stays off until it ends. */
+    private blocked = false;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -32,6 +34,14 @@ export class VoiceInput implements vscode.Disposable {
         await this.start();
     }
 
+    /** Stops dictation and refuses to start it while `blocked` (voice mode is on). */
+    async setBlocked(blocked: boolean): Promise<void> {
+        this.blocked = blocked;
+        if (blocked && this.current?.isRecording) {
+            await this.current.stop();
+        }
+    }
+
     dispose(): void {
         void this.current?.stop();
     }
@@ -40,13 +50,14 @@ export class VoiceInput implements vscode.Disposable {
         if (this.starting) {
             return;
         }
+        if (this.blocked) {
+            this.post({ type: 'toast', message: 'Voice mode is using the microphone — dictation is off until voice mode ends.' });
+            return;
+        }
         const settings = readVoiceSettings();
-        if (!settings.sttUrl || !isSttValid()) {
-            this.post({
-                type: 'toast',
-                variant: 'error',
-                message: 'Voice input requires a valid speech-to-text service (HTTP 200) — check Settings → STT.',
-            });
+        const stt = sttCheck();
+        if (!stt.ok) {
+            this.post({ type: 'toast', variant: 'error', message: stt.reason ?? 'Speech-to-text is unavailable.' });
             SettingsPanel.showWithSection('stt');
             return;
         }
@@ -59,22 +70,23 @@ export class VoiceInput implements vscode.Disposable {
                 this.vad = undefined;
                 throw err;
             });
+            const vad = await this.vad;
+            // Voice mode may have started while the VAD model was loading.
+            if (this.blocked) {
+                return;
+            }
             const session: DictationSession = new DictationSession(
-                await this.vad,
+                vad,
                 new SttClient({ url: settings.sttUrl, model: settings.sttModel, language: settings.language }),
-                {
-                    confidence: settings.vadConfidence,
-                    startSecs: 0.15,
-                    stopSecs: settings.vadStopSecs,
-                    preRollSecs: 0.3,
-                    maxSegmentSecs: 28,
-                },
+                dictationSegmenterParams(settings),
                 {
                     status: (status) => this.onStatus(session, status),
                     text: (text) => this.post({ type: 'dictationText', text }),
-                    level: (level) => this.post({ type: 'dictationLevel', level }),
+                    level: (level, bands) => this.post({ type: 'dictationLevel', level, bands }),
                     error: (message) => this.fail(message),
                 },
+                // Stop, then transcribe: the mic spins until the text lands.
+                'onStop',
             );
             this.current = session;
             session.start();

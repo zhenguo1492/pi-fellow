@@ -15,6 +15,7 @@
     --success-fg: var(--vscode-testing-iconPassed, #73c991);
     --link: var(--vscode-textLink-foreground, #3794ff);
     --font-mono: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, 'Courier New', monospace);
+    --warning-fg: var(--vscode-editorWarning-foreground, #cca700);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -275,46 +276,203 @@ body {
     flex: 1;
 }
 
-.stt-url-icon {
+/* Test button beside a Voice URL: always "Test"; after a check a green check or a red cross follows it. */
+.voice-test-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 4px;
     flex-shrink: 0;
-}
-.stt-url-icon[hidden],
-.stt-status-badge[hidden] {
-    display: none;
-}
-
-.stt-status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    font-weight: 500;
-    padding: 2px 8px;
-    border-radius: 12px;
-    user-select: none;
-}
-
-.stt-status-badge--valid {
-    color: var(--success-fg, #73c991);
-    background: color-mix(in srgb, var(--success-fg, #73c991) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--success-fg, #73c991) 32%, transparent);
-}
-
-.stt-test-btn {
-    flex-shrink: 0;
-    white-space: nowrap;
-    padding: 5px 12px;
+    /* Fits "Test" plus the mark, so the URL field does not jump when the mark appears. */
+    width: 66px;
     height: 30px;
+    padding: 0 8px;
+    white-space: nowrap;
+}
+.voice-test-btn svg {
+    display: none;
+    flex-shrink: 0;
+}
+.voice-test-btn[data-state='ok'] .voice-test-ok,
+.voice-test-btn[data-state='failed'] .voice-test-failed {
+    display: inline;
+}
+.setting-btn.voice-test-btn[data-state='testing'] {
+    color: var(--muted);
+    animation: voice-test-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voice-test-pulse {
+    50% {
+        opacity: 0.45;
+    }
+}
+.setting-btn.voice-test-btn[data-state='ok'] {
+    color: var(--success-fg);
+    border-color: color-mix(in srgb, var(--success-fg) 45%, transparent);
+}
+.setting-btn.voice-test-btn[data-state='failed'] {
+    color: var(--error-fg);
+    border-color: color-mix(in srgb, var(--error-fg) 45%, transparent);
 }
 
-.stt-guide-note {
+.voice-guide-note {
     margin-bottom: 16px;
     color: var(--muted);
     font-size: 12px;
     line-height: 1.5;
+}
+
+/* Dry run at the bottom of a Voice section, and the section's state. */
+.voice-actions-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.voice-status {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.voice-status:empty {
+    display: none;
+}
+.voice-status[data-state='ok'] {
+    color: var(--success-fg);
+}
+.voice-status[data-state='error'] {
+    color: var(--error-fg);
+}
+.voice-status[data-state='dirty'] {
+    color: var(--warning-fg);
+}
+.voice-status[data-state='testing'] {
+    color: var(--muted);
+}
+
+/* Dry-run dialog */
+.voice-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.45);
+}
+.voice-dialog {
+    width: min(520px, 100%);
+    max-height: 100%;
+    overflow: auto;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+    padding: 16px 18px;
+}
+.voice-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.voice-dialog-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+}
+.voice-dialog-close {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+.voice-dialog-close:hover {
+    color: var(--fg);
+}
+.voice-dialog-meta {
+    margin: 4px 0 14px;
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    word-break: break-all;
+}
+.voice-dialog-hint {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 12px;
+}
+.voice-dialog-status {
+    min-height: 18px;
+    margin: 8px 0;
+    font-size: 12px;
+    color: var(--muted);
+    word-break: break-word;
+}
+.voice-dialog-status[data-state='ok'] {
+    color: var(--success-fg);
+}
+.voice-dialog-status[data-state='error'] {
+    color: var(--error-fg);
+}
+.voice-dialog-meter {
+    height: 4px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--fg) 10%, transparent);
+    overflow: hidden;
+}
+.voice-dialog-meter span {
+    display: block;
+    width: 0%;
+    height: 100%;
+    background: var(--link);
+    transition: width 0.08s linear;
+}
+.voice-dialog-transcript {
+    margin-top: 12px;
+    min-height: 64px;
+    padding: 10px 12px;
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    background: var(--input-bg);
+    color: var(--input-fg);
+    font-size: 14px;
+    line-height: 1.5;
+}
+.voice-dialog-transcript[data-empty='true']::before {
+    content: 'The transcript appears here.';
+    color: var(--muted);
+    font-size: 12px;
+}
+.voice-dialog-text {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    background: var(--input-bg);
+    color: var(--input-fg);
+    font: inherit;
+    resize: vertical;
+}
+.voice-dialog-text:focus {
+    outline: none;
+    border-color: var(--focus-border);
+}
+.voice-dialog-player audio {
+    width: 100%;
+    margin-top: 4px;
+}
+.voice-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+.voice-dialog-footer [hidden] {
+    display: none;
 }
 
 .setting-select {

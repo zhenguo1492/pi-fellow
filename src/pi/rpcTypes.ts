@@ -44,7 +44,19 @@ export type RpcCommand =
     | { id?: string; type: 'get_messages' }
     | { id?: string; type: 'get_commands' | 'get_available_commands' }
     | { id?: string; type: 'get_tree' }
-    | { id?: string; type: 'negotiate_protocol'; protocolVersion: 2 };
+    | { id?: string; type: 'negotiate_protocol'; protocolVersion: 2 }
+    | { id?: string; type: 'set_host_tools'; tools: RpcHostToolDefinition[] };
+
+/** omp only: a tool the host executes; omp calls it back with `host_tool_call` (omp docs rpc.md). */
+export interface RpcHostToolDefinition {
+    name: string;
+    label?: string;
+    description: string;
+    /** JSON Schema of the arguments object. */
+    parameters: Record<string, unknown>;
+    /** Omitted → `discoverable`, which hides the tool until the model searches for it. */
+    loadMode?: 'essential' | 'discoverable';
+}
 
 export interface RpcSlashCommand {
     name: string;

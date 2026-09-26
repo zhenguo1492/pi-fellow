@@ -8,6 +8,7 @@ import type {
     PiRpcOutbound,
     RpcCommand,
     RpcExtensionUIResponse,
+    RpcHostToolDefinition,
     RpcImageContent,
     RpcResponse,
     RpcSessionState,
@@ -51,6 +52,7 @@ export class PiRpcBridge {
     private _process: ChildProcessWithoutNullStreams | null = null;
     private _stopReading: (() => void) | null = null;
     private _listeners = new Set<PiRpcBridgeListener>();
+    private _exitListeners = new Set<(error: Error | null) => void>();
     private _pending = new Map<string, PendingRequest>();
     private _requestId = 0;
     private _stderr = '';
@@ -66,6 +68,12 @@ export class PiRpcBridge {
     on(listener: PiRpcBridgeListener): () => void {
         this._listeners.add(listener);
         return () => this._listeners.delete(listener);
+    }
+
+    /** Called once when the CLI process exits; `error` is set for a non-zero exit. */
+    onExit(listener: (error: Error | null) => void): () => void {
+        this._exitListeners.add(listener);
+        return () => this._exitListeners.delete(listener);
     }
 
     private _emit(event: PiRpcOutbound): void {
@@ -115,6 +123,9 @@ export class PiRpcBridge {
                 );
             }
             this._rejectPending(this._exitError ?? new Error('Pi RPC process exited'));
+            for (const listener of this._exitListeners) {
+                listener(this._exitError);
+            }
         });
 
         child.on('error', (error) => {
@@ -360,6 +371,11 @@ export class PiRpcBridge {
 
     async newSession(): Promise<{ cancelled: boolean }> {
         return this._data(await this._send({ type: 'new_session' }));
+    }
+
+    /** omp only: replaces the host-owned tool set; resolves with the registered names. */
+    async setHostTools(tools: RpcHostToolDefinition[]): Promise<string[]> {
+        return this._data<{ toolNames: string[] }>(await this._send({ type: 'set_host_tools', tools })).toolNames;
     }
 
     async getState(): Promise<RpcSessionState> {

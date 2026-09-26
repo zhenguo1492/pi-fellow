@@ -114,13 +114,59 @@ export function clearCliTargetCache(): void {
     cachedAvailable = undefined;
 }
 
+const WINDOW_BACKEND_STATE_KEY = 'oh-my-pi-chater.windowBackend';
+
+/** Backend picked in this window's chat/settings UI; each window runs its own extension host. */
+let windowBackend: AgentBackend | undefined;
+let windowState: vscode.Memento | undefined;
+const windowBackendListeners = new Set<(backend: AgentBackend) => void>();
+
+function emitWindowBackend(): void {
+    const backend = getAgentLayout().backend;
+    for (const listener of windowBackendListeners) {
+        listener(backend);
+    }
+}
+
 /**
- * CLI to run. `oh-my-pi-chater.backend` picks the family (`auto` prefers omp, then pi);
- * `oh-my-pi-chater.cliPath` pins the executable. Sync so agent-dir lookups stay sync.
+ * `oh-my-pi-chater.backend` is a user setting shared by every VS Code window, so the UI picker must not
+ * write it: switching in one window would switch every other window mid-task. The pick lives in
+ * `workspaceState` instead; the setting stays the default for workspaces that never picked one.
+ */
+export function initWindowBackend(workspaceState: vscode.Memento): vscode.Disposable {
+    windowState = workspaceState;
+    const saved = workspaceState.get<string>(WINDOW_BACKEND_STATE_KEY);
+    windowBackend = saved === 'omp' || saved === 'pi' ? saved : undefined;
+    return vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!windowBackend && e.affectsConfiguration('oh-my-pi-chater.backend')) {
+            emitWindowBackend();
+        }
+    });
+}
+
+/** Switch this window's backend (persisted per workspace); other windows are unaffected. */
+export function setWindowBackend(backend: AgentBackend): void {
+    const previous = getAgentLayout().backend;
+    windowBackend = backend;
+    void windowState?.update(WINDOW_BACKEND_STATE_KEY, backend);
+    if (backend !== previous) {
+        emitWindowBackend();
+    }
+}
+
+/** Fires with the effective backend when this window's backend changes. */
+export function onDidChangeWindowBackend(listener: (backend: AgentBackend) => void): vscode.Disposable {
+    windowBackendListeners.add(listener);
+    return { dispose: () => windowBackendListeners.delete(listener) };
+}
+
+/**
+ * CLI to run. This window's picked backend wins, then `oh-my-pi-chater.backend` (`auto` prefers omp,
+ * then pi); `oh-my-pi-chater.cliPath` pins the executable. Sync so agent-dir lookups stay sync.
  */
 export function resolveCliTarget(preferredBackend?: BackendSetting): CliTarget {
     const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
-    const setting = preferredBackend ?? config.get<BackendSetting>('backend', 'auto');
+    const setting = preferredBackend ?? windowBackend ?? config.get<BackendSetting>('backend', 'auto');
     const configured = config.get<string>('cliPath', '').trim();
     const key = `${setting}\0${configured}\0${process.env.PATH ?? ''}`;
     if (cachedTarget?.key === key && fs.existsSync(cachedTarget.target.cliPath)) {
@@ -173,9 +219,10 @@ export function getAgentLayout(preferredBackend?: AgentBackend): AgentLayout {
         try {
             backend = resolveCliTarget().backend;
         } catch {
-            backend = vscode.workspace.getConfiguration('oh-my-pi-chater').get<BackendSetting>('backend', 'auto') === 'omp'
-                ? 'omp'
-                : 'pi';
+            backend = windowBackend
+                ?? (vscode.workspace.getConfiguration('oh-my-pi-chater').get<BackendSetting>('backend', 'auto') === 'omp'
+                    ? 'omp'
+                    : 'pi');
         }
     }
     return { backend, agentDir: resolveAgentDir(backend) };

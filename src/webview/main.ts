@@ -38,14 +38,25 @@ import { readImageFileAsItem } from './fileDropReaders';
 import { createToolView, installToolViewInteractions, toToolResult, updateToolView } from './toolView';
 import { bindModelPicker, setPickerCurrentModel, setPickerModels } from './modelPicker';
 import {
-    applyDictationLevel,
     applyDictationStatus,
+    applyVoiceMicStatus,
     bindMicButton,
     dictationStatusHtml,
     insertDictatedText,
     micButtonHtml,
-    setSttValid as setDictationSttValid,
+    setSttCheck,
 } from './dictation';
+import {
+    applyVoiceBarStatus,
+    bindVoiceBar,
+    composerTarget,
+    sendToVoice,
+    setVoiceReadiness,
+    voiceBarHtml,
+    voicePlaceholder,
+    voiceTargetHtml,
+} from './voiceBar';
+import { pushSpectrum } from './voiceWave';
 
 import { vscode } from './vscodeApi';
 const iconsBaseUri = document.getElementById('app')?.dataset.iconsUri ?? '';
@@ -121,6 +132,8 @@ let editorContext: { context: EditorContextInfo | null; enabled: boolean } = {
     context: null,
     enabled: true,
 };
+/** Pending image attachment whose preview is open above the composer chip row. */
+let previewedAttachmentId: string | null = null;
 
 function emptyPlanMode(): PlanModeInfo {
     return {
@@ -212,6 +225,14 @@ function handleMessage(msg: ServerMessage): void {
             editorContext = { context: msg.context, enabled: msg.enabled };
             updateEditorContextBar();
             break;
+        case 'voiceStatus':
+            applyVoiceMicStatus(msg.status);
+            applyVoiceBarStatus(msg.status);
+            updateInputArea();
+            break;
+        case 'voiceLevel':
+            pushSpectrum(msg.source, msg.bands);
+            break;
         case 'agentEvent':
             handleAgentEvent(msg.event);
             break;
@@ -276,7 +297,7 @@ function handleMessage(msg: ServerMessage): void {
             insertDictatedText(msg.text);
             break;
         case 'dictationLevel':
-            applyDictationLevel(msg.level);
+            pushSpectrum('user', msg.bands);
             break;
         case 'toast':
             showToast(msg.message, msg.variant === 'error' ? 'error' : 'info');
@@ -376,9 +397,12 @@ function applyStateSync(s: SerializedAgentState): void {
     }
     state.tuiMode = s.tuiMode ?? false;
     state.tuiAuthPrompt = s.tuiAuthPrompt;
-    if (s.sttValid !== undefined) {
-        setDictationSttValid(Boolean(s.sttValid));
+    if (s.voiceReadiness) {
+        setSttCheck(s.voiceReadiness.stt);
+        setVoiceReadiness(s.voiceReadiness);
     }
+    applyVoiceMicStatus(s.voice);
+    applyVoiceBarStatus(s.voice);
     const tabSwitched = prevTab !== state.activeTabId;
 
     if (tabSwitched || !skeletonBuilt) {
@@ -475,7 +499,15 @@ function handleAgentEvent(event: any): void {
         case 'message_start': {
             const msg = event.message;
             if (msg?.role === 'user') {
+                if (msg.steering === true) {
+                    // omp has no queue_update: the delivered steer is what leaves the queue.
+                    const idx = state.steeringMessages.indexOf(extractText(msg));
+                    state.steeringMessages = state.steeringMessages.filter((_, i) => i !== (idx >= 0 ? idx : 0));
+                }
                 appendUserMessageImmediate(msg);
+                if (msg.steering === true) {
+                    updatePendingMessagesInChat();
+                }
             } else if (msg?.role === 'assistant') {
                 // Each assistant message is one step: its own thinking/text, placed after the
                 // previous step's tool cards.
@@ -959,6 +991,8 @@ function render(): void {
 
     // Input container: changed-files slot + queued section + slash menu + input-area (persistent textarea) + footer
     const inputContainer = el('div', 'input-container');
+    // The voice agent's tool belt: the header of the input box, above everything else in it.
+    inputContainer.insertAdjacentHTML('afterbegin', voiceBarHtml);
     const planPanel = el('div', 'plan-panel');
     planPanel.id = 'plan-panel';
     inputContainer.appendChild(planPanel);
@@ -989,10 +1023,6 @@ function render(): void {
     modelPicker.innerHTML =
         '<div id="model-list" class="model-list" role="listbox" aria-label="Favorite models" tabindex="-1"></div>';
     inputContainer.appendChild(modelPicker);
-    const attachmentsStrip = el('div', 'attachments-strip');
-    attachmentsStrip.id = 'attachments-strip';
-    attachmentsStrip.style.display = 'none';
-    inputContainer.appendChild(attachmentsStrip);
     const dropShiftHint = el('div', 'drop-shift-hint');
     dropShiftHint.id = 'drop-shift-hint';
     dropShiftHint.hidden = true;
@@ -1001,6 +1031,20 @@ function render(): void {
     composerEditBanner.id = 'composer-edit-banner';
     composerEditBanner.style.display = 'none';
     inputContainer.appendChild(composerEditBanner);
+    // Editor-context chip and pending attachment chips share one row; image chips toggle
+    // the preview panel above it.
+    const attachmentPreview = el('div', 'attachment-preview');
+    attachmentPreview.id = 'attachment-preview';
+    attachmentPreview.hidden = true;
+    attachmentPreview.title = 'Click to close preview';
+    attachmentPreview.addEventListener('click', () => {
+        previewedAttachmentId = null;
+        updateAttachmentPreview();
+    });
+    inputContainer.appendChild(attachmentPreview);
+    const chipRow = el('div', 'composer-chip-row');
+    chipRow.id = 'composer-chip-row';
+    chipRow.hidden = true;
     const editorContextBar = el('div', 'editor-context-bar');
     editorContextBar.id = 'editor-context-bar';
     editorContextBar.style.display = 'none';
@@ -1012,7 +1056,30 @@ function render(): void {
         updateEditorContextBar();
         vscode.postMessage({ type: 'setEditorContextEnabled', enabled: editorContext.enabled });
     });
-    inputContainer.appendChild(editorContextBar);
+    const attachmentsStrip = el('div', 'attachments-strip');
+    attachmentsStrip.id = 'attachments-strip';
+    attachmentsStrip.style.display = 'none';
+    attachmentsStrip.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        const remove = target.closest<HTMLElement>('.attachment-remove');
+        if (remove?.dataset.id) {
+            vscode.postMessage({ type: 'removeAttachment', id: remove.dataset.id });
+            return;
+        }
+        const chip = target.closest<HTMLElement>('.attachment-chip');
+        if (chip?.dataset.id) {
+            activateComposerAttachment(chip.dataset.id);
+        }
+    });
+    attachmentsStrip.addEventListener('keydown', (e) => {
+        const chip = e.target as HTMLElement;
+        if ((e.key === 'Enter' || e.key === ' ') && chip.classList.contains('attachment-chip') && chip.dataset.id) {
+            e.preventDefault();
+            activateComposerAttachment(chip.dataset.id);
+        }
+    });
+    chipRow.append(editorContextBar, attachmentsStrip);
+    inputContainer.appendChild(chipRow);
     const area = el('div', 'input-area');
     area.innerHTML = `
         <div class="composer-toolbar">
@@ -1036,7 +1103,7 @@ function render(): void {
             <button id="btn-model" class="composer-model-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="composer-model-label" id="model-chip-label"></span>
                 <svg class="dropdown-chevron" width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 10.5l5-5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>${dictationStatusHtml}
+            </button>${dictationStatusHtml}${voiceTargetHtml}
         </div>`;
     inputContainer.appendChild(area);
     app.appendChild(inputContainer);
@@ -1063,6 +1130,7 @@ function render(): void {
     updateMessages();
     updateInputArea();
     updateEditorContextBar();
+    updateAttachmentsStrip();
         updateConnectionBanner();
         updateChangedFiles();
         scrollToBottom();
@@ -1626,33 +1694,86 @@ function hasSendableInput(text: string): boolean {
 
 function updateAttachmentsStrip(): void {
     const strip = document.getElementById('attachments-strip');
-    const container = document.querySelector('.input-container');
     if (!strip) return;
 
-    const has = state.pendingAttachments.length > 0;
-    container?.classList.toggle('has-attachments', has);
-
-    if (!has) {
+    if (state.pendingAttachments.length === 0) {
         strip.style.display = 'none';
         strip.innerHTML = '';
+    } else {
+        strip.style.display = '';
+        strip.innerHTML = state.pendingAttachments
+            .map((a) => renderComposerAttachmentChip(a, a.id === previewedAttachmentId, escHtml, escAttr))
+            .join('');
+    }
+    updateComposerChipRow();
+    updateAttachmentPreview();
+}
+
+/** Image chips toggle the in-composer preview; other files open in the editor. */
+function activateComposerAttachment(id: string): void {
+    const a = state.pendingAttachments.find((x) => x.id === id);
+    if (!a) return;
+    if (!a.isImage) {
+        if (a.absolutePath) {
+            vscode.postMessage({ type: 'openFile', filePath: a.absolutePath });
+        }
         return;
     }
-    strip.style.display = '';
-    strip.innerHTML = state.pendingAttachments
-        .map((a) => renderComposerAttachmentChip(a, escHtml, escAttr))
-        .join('');
+    previewedAttachmentId = previewedAttachmentId === id ? null : id;
+    updateAttachmentPreview();
+}
 
-    strip.querySelectorAll('.attachment-remove').forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const id = (btn as HTMLElement).dataset.id;
-            if (id) {
-                vscode.postMessage({ type: 'removeAttachment', id });
-            }
-        });
+function updateAttachmentPreview(): void {
+    const box = document.getElementById('attachment-preview');
+    if (!box) return;
+    const a = previewedAttachmentId
+        ? state.pendingAttachments.find((x) => x.id === previewedAttachmentId)
+        : undefined;
+    if (!a) {
+        previewedAttachmentId = null;
+    }
+    document.querySelectorAll<HTMLElement>('#attachments-strip .attachment-chip').forEach((chip) => {
+        const active = chip.dataset.id === previewedAttachmentId;
+        chip.classList.toggle('attachment-chip--active', active);
+        if (chip.hasAttribute('aria-pressed')) {
+            chip.setAttribute('aria-pressed', String(active));
+        }
     });
-
-    bindAttachmentOpenClicks();
+    if (!a) {
+        box.hidden = true;
+        box.replaceChildren();
+        delete box.dataset.id;
+        return;
+    }
+    if (box.dataset.id === a.id) return;
+    box.dataset.id = a.id;
+    box.hidden = false;
+    const img = document.createElement('img');
+    img.className = 'attachment-preview-img';
+    img.alt = a.displayName;
+    if (a.previewDataUrl) {
+        img.src = a.previewDataUrl;
+        box.replaceChildren(img);
+        return;
+    }
+    const status = el('div', 'message-image-loading');
+    box.replaceChildren(status);
+    if (!a.absolutePath) {
+        status.textContent = `无法预览: ${a.displayName}`;
+        return;
+    }
+    status.textContent = '正在读取图片…';
+    requestImagePreview(a.absolutePath).then(
+        (dataUrl) => {
+            if (box.dataset.id !== a.id) return;
+            img.src = dataUrl;
+            box.replaceChildren(img);
+        },
+        (err: unknown) => {
+            if (box.dataset.id !== a.id) return;
+            status.textContent = `无法加载图片: ${err instanceof Error ? err.message : '未知错误'}`;
+        },
+    );
 }
 
 function updateEditorContextBar(): void {
@@ -1662,26 +1783,36 @@ function updateEditorContextBar(): void {
     if (!context) {
         bar.style.display = 'none';
         bar.innerHTML = '';
-        return;
+    } else {
+        bar.style.display = '';
+        bar.innerHTML = renderEditorContextChip(context, enabled, escHtml, escAttr);
     }
-    bar.style.display = '';
-    bar.innerHTML = renderEditorContextChip(context, enabled, escHtml, escAttr);
+    updateComposerChipRow();
+}
+
+function updateComposerChipRow(): void {
+    const row = document.getElementById('composer-chip-row');
+    if (row) {
+        row.hidden = !editorContext.context && state.pendingAttachments.length === 0;
+    }
 }
 
 function updateComposerToolbar(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
     const canSend = hasSendableInput(text);
+    // Typed text for the voice agent neither steers nor interrupts omp.
+    const toVoice = !composerEdit && composerTarget(text, state.pendingAttachments.length) === 'voice';
 
     const steerBtn = document.getElementById('btn-steer');
     const sendBtn = document.getElementById('btn-send') as HTMLButtonElement | null;
 
     if (steerBtn) {
-        steerBtn.hidden = !state.isStreaming;
+        steerBtn.hidden = !state.isStreaming || toVoice;
     }
     if (sendBtn) {
         const showStop = state.isStreaming && !composerEdit && !canSend;
-        const showInterruptSend = state.isStreaming && !composerEdit && canSend;
+        const showInterruptSend = state.isStreaming && !composerEdit && canSend && !toVoice;
         sendBtn.classList.toggle('composer-action-btn--as-stop', showStop);
         sendBtn.classList.toggle('composer-action-btn--as-queue', showInterruptSend);
         const sendIcon = sendBtn.querySelector('.composer-btn-icon--send') as HTMLElement | null;
@@ -1701,6 +1832,9 @@ function updateComposerToolbar(): void {
         } else if (showInterruptSend) {
             sendBtn.title = 'Send now (interrupt current work)';
             sendBtn.setAttribute('aria-label', 'Send now and interrupt current work');
+        } else if (toVoice) {
+            sendBtn.title = 'Send to the voice agent (Enter)';
+            sendBtn.setAttribute('aria-label', 'Send to the voice agent');
         } else {
             sendBtn.title = 'Send (Enter)';
             sendBtn.setAttribute('aria-label', 'Send message');
@@ -1709,6 +1843,23 @@ function updateComposerToolbar(): void {
         sendBtn.toggleAttribute('disabled', disabled);
         sendBtn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     }
+}
+
+/**
+ * The composer's text goes to the voice agent (voice mode on, omp not ticked, no slash command or
+ * attachment): sends it there and clears the box. False when it is for omp.
+ */
+function sendComposerToVoice(): boolean {
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    const text = input?.value.trim() ?? '';
+    if (!input || !text || composerEdit || composerTarget(text, state.pendingAttachments.length) !== 'voice') {
+        return false;
+    }
+    sendToVoice(text);
+    input.value = '';
+    input.style.height = 'auto';
+    updateComposerToolbar();
+    return true;
 }
 
 function submitWhileStreaming(mode: 'queue' | 'interrupt'): void {
@@ -1754,6 +1905,9 @@ function requestAbort(): void {
 
 function handleSendButtonClick(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    if (sendComposerToVoice()) {
+        return;
+    }
     if (state.isStreaming) {
         const text = input?.value.trim() ?? '';
         if (hasSendableInput(text)) {
@@ -1786,11 +1940,12 @@ function updateInputArea(): void {
     if (input) {
         input.placeholder = composerEdit
             ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
-            : state.isStreaming
-            ? 'Enter to queue · ↑ send now · Ctrl+Enter steer · Esc stop...'
-            : state.planMode.enabled
-              ? 'Plan mode: describe what to build (read-only until you implement)...'
-              : 'Ask Pi anything...';
+            : (voicePlaceholder() ??
+              (state.isStreaming
+                  ? 'Enter to queue · ↑ send now · Ctrl+Enter steer · Esc stop...'
+                  : state.planMode.enabled
+                    ? 'Plan mode: describe what to build (read-only until you implement)...'
+                    : 'Ask Pi anything...'));
     }
 
     updateComposerToolbar();
@@ -2526,24 +2681,6 @@ function bindAttachmentOpenClicks(): void {
             });
         });
 
-    document.querySelectorAll('.attachment-chip[data-filepath]:not([data-open-bound])').forEach((node) => {
-        const chip = node as HTMLElement;
-        chip.setAttribute('data-open-bound', '1');
-        const open = (e: Event) => {
-            if ((e.target as HTMLElement).closest('.attachment-remove')) {
-                return;
-            }
-            postOpen(chip.dataset.filepath);
-        };
-        chip.addEventListener('click', open);
-        chip.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                open(e);
-            }
-        });
-    });
-
     document.querySelectorAll('.message-image[data-filepath]:not([data-open-bound])').forEach((node) => {
         const img = node as HTMLImageElement;
         img.setAttribute('data-open-bound', '1');
@@ -2849,6 +2986,9 @@ function bindMessageActionButtons(): void {
     });
 }
 
+/** Marks a worker user message the voice agent dispatched (design §11.3); the host sets `_fromVoice`. */
+const FROM_VOICE_TAG = '<span class="from-voice">🎙 From voice</span>';
+
 function renderMessage(
     msg: any,
     index: number,
@@ -2873,6 +3013,7 @@ function renderMessage(
         steeringEl.innerHTML = `<div class="pending-message pending-message--steer">
             <span class="pending-message-indicator" aria-hidden="true"></span>
             <span class="pending-message-label">Steering</span>
+            ${msg._fromVoice ? FROM_VOICE_TAG : ''}
             <span class="pending-message-text">${escHtml(displayText || extractText(msg) || '(attachments)')}</span>
         </div>`;
         return steeringEl;
@@ -2889,6 +3030,9 @@ function renderMessage(
             checkpointBtn.dataset.turn = String(turnNumber);
             checkpointBtn.innerHTML = '&#8634;';
             wrapper.appendChild(checkpointBtn);
+        }
+        if (msg._fromVoice) {
+            wrapper.insertAdjacentHTML('beforeend', FROM_VOICE_TAG);
         }
         const rawText = extractText(msg);
         const { displayText, fileAttachments: parsedFiles } = parseUserMessageForDisplay(rawText);
@@ -3820,6 +3964,9 @@ function bindStableEvents(): void {
                 }
                 return;
             }
+            if (sendComposerToVoice()) {
+                return;
+            }
             if (state.isStreaming) {
                 const text = input.value.trim();
                 if (hasSendableInput(text)) {
@@ -3900,6 +4047,7 @@ function bindStableEvents(): void {
     bindFileMentionMenu();
     bindModelPicker();
     bindMicButton();
+    bindVoiceBar(() => updateInputArea());
 
     const backendBtn = document.getElementById('btn-backend');
     const backendMenu = document.getElementById('backend-dropdown-menu');

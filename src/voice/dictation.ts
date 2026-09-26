@@ -4,14 +4,16 @@
  * VS Code webviews cannot open the microphone, so audio is captured in the
  * extension host by a command-line recorder (ALSA `arecord`, PulseAudio
  * `parecord`, sox `rec`) writing raw 16 kHz mono s16le to stdout — the same
- * fallback Claude Code's extension uses. Each utterance is transcribed as soon
- * as the VAD sees it end, so text lands in the composer while the user keeps
- * talking; transcripts are delivered in speaking order.
+ * fallback Claude Code's extension uses. The VAD cuts the recording into utterances; each is
+ * transcribed as soon as it ends (`asSpoken`: the settings dry run) or all of them once the
+ * recording stops (`onStop`: the composer mic). Transcripts are delivered in speaking order.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { DictationStatus } from '../shared/protocol';
+import type { DictationStatus, VoiceSettings } from '../shared/protocol';
+import { MicLevelMeter, frameDb } from './micLevel';
+import { describeError } from './modelsProbe';
 import { SpeechSegmenter, type SegmenterParams } from './speechSegmenter';
 import { VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE, type SileroVad } from './sileroVad';
 import type { SttClient } from './stt';
@@ -19,17 +21,15 @@ import type { SttClient } from './stt';
 export interface DictationEvents {
     status(status: DictationStatus): void;
     text(text: string): void;
-    /** Microphone level 0..1, ~10 times a second while recording. */
-    level(level: number): void;
+    /** Microphone level 0..1 and its spectrum ({@link spectrumBands}), ~16 times a second while recording. */
+    level(level: number, bands: number[]): void;
     error(message: string): void;
 }
 
 const FRAME_BYTES = VAD_FRAME_SAMPLES * 2;
-/** Frames between level reports (2 × 32 ms ≈ 16 Hz, enough for a live waveform). */
-const LEVEL_EVERY_FRAMES = 2;
-/** dBFS mapped to level 0 and 1: laptop-mic room noise sits near -50, conversational speech at arm's length -35..-20. */
-const LEVEL_FLOOR_DB = -50;
-const LEVEL_CEIL_DB = -25;
+
+/** When captured utterances go to STT: as each ends, or all at once when the recording stops. */
+export type TranscribeWhen = 'asSpoken' | 'onStop';
 
 /** Linux tools first: sox `rec` there takes ~2 s to start delivering audio. */
 const RECORDERS: { bin: string; args: string[] }[] = [
@@ -57,6 +57,11 @@ function findRecorder(): { command: string; args: string[] } | undefined {
     return undefined;
 }
 
+/** How dictation cuts the microphone into utterances; shared by the chat mic and the settings dry run. */
+export function dictationSegmenterParams(s: VoiceSettings): SegmenterParams {
+    return { confidence: s.vadConfidence, startSecs: 0.15, stopSecs: s.vadStopSecs, preRollSecs: 0.3, maxSegmentSecs: 28 };
+}
+
 export class DictationSession {
     private proc: ChildProcess | undefined;
     private draining: Promise<void> | undefined;
@@ -64,19 +69,22 @@ export class DictationSession {
     private readonly segmenter: SpeechSegmenter;
     private recording = false;
     private pending = 0;
-    private frameCount = 0;
-    private levelPeak = 0;
+    private readonly level: MicLevelMeter;
     private stderr = '';
     /** Chains transcript delivery so text arrives in speaking order. */
     private delivery: Promise<void> = Promise.resolve();
+    /** Utterances waiting for `stop` (`onStop`), in speaking order. */
+    private held: Int16Array[] = [];
 
     constructor(
         private readonly vad: SileroVad,
         private readonly stt: SttClient,
         vadParams: SegmenterParams,
         private readonly events: DictationEvents,
+        private readonly when: TranscribeWhen,
     ) {
         this.segmenter = new SpeechSegmenter(vadParams, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE);
+        this.level = new MicLevelMeter((level, bands) => this.events.level(level, bands), VAD_SAMPLE_RATE);
     }
 
     get isRecording(): boolean {
@@ -119,7 +127,7 @@ export class DictationSession {
         });
     }
 
-    /** Stops the microphone; speech already captured is still transcribed. */
+    /** Stops the microphone; speech captured and not yet transcribed is transcribed now. */
     async stop(): Promise<void> {
         if (!this.recording) {
             return;
@@ -131,8 +139,12 @@ export class DictationSession {
         this.buffered = Buffer.alloc(0);
         const tail = this.segmenter.flush();
         if (tail) {
-            this.transcribe(tail);
+            this.held.push(tail);
         }
+        for (const pcm of this.held) {
+            this.transcribe(pcm);
+        }
+        this.held = [];
         this.emitStatus();
     }
 
@@ -151,13 +163,10 @@ export class DictationSession {
             const bytes = this.buffered.subarray(0, FRAME_BYTES);
             this.buffered = this.buffered.subarray(FRAME_BYTES);
             const frame = new Int16Array(VAD_FRAME_SAMPLES);
-            let sumSquares = 0;
             for (let i = 0; i < VAD_FRAME_SAMPLES; i++) {
-                const s = bytes.readInt16LE(i * 2);
-                frame[i] = s;
-                sumSquares += s * s;
+                frame[i] = bytes.readInt16LE(i * 2);
             }
-            this.reportLevel(Math.sqrt(sumSquares / VAD_FRAME_SAMPLES) / 32768);
+            this.level.push(frame, frameDb(frame));
 
             let confidence: number;
             try {
@@ -169,7 +178,12 @@ export class DictationSession {
             }
             const wasSpeaking = this.segmenter.inSpeech;
             for (const event of this.segmenter.push(frame, confidence)) {
-                if (event.type === 'segment') {
+                if (event.type !== 'segment') {
+                    continue;
+                }
+                if (this.when === 'onStop') {
+                    this.held.push(event.pcm);
+                } else {
                     this.transcribe(event.pcm);
                 }
             }
@@ -182,24 +196,13 @@ export class DictationSession {
         }
     }
 
-    /** RMS → 0..1 between {@link LEVEL_FLOOR_DB} and {@link LEVEL_CEIL_DB}, peak-held over each report window. */
-    private reportLevel(rms: number): void {
-        const db = 20 * Math.log10(Math.max(rms, 1e-6));
-        const level = (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB);
-        this.levelPeak = Math.max(this.levelPeak, Math.min(1, Math.max(0, level)));
-        if (++this.frameCount % LEVEL_EVERY_FRAMES === 0) {
-            this.events.level(this.levelPeak);
-            this.levelPeak = 0;
-        }
-    }
-
     private transcribe(pcm: Int16Array): void {
         this.pending++;
         this.emitStatus();
         // Requests run concurrently; only delivery is serialized.
         const result = this.stt.transcribe(pcm, VAD_SAMPLE_RATE).then(
             (text) => ({ text }),
-            (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+            (error: unknown) => ({ error: describeError(error) }),
         );
         this.delivery = this.delivery.then(async () => {
             const outcome = await result;

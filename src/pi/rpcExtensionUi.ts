@@ -6,6 +6,9 @@ import type { PiRpcBridge } from './piRpcBridge';
 import type { PiExtensionChrome } from './piExtensionChrome';
 
 type PendingDialog = {
+    request: ExtensionUiRequestPayload;
+    /** Epoch ms the request reached the extension. */
+    receivedAt: number;
     resolve: (response: RpcExtensionUIResponse) => void;
     clearTimers: () => void;
 };
@@ -16,6 +19,7 @@ type PendingDialog = {
  */
 export class RpcExtensionUiHandler {
     private readonly _pending = new Map<string, PendingDialog>();
+    private readonly _pendingListeners = new Set<() => void>();
     private _post: ((msg: ServerMessage) => void) | undefined;
     private _chrome: PiExtensionChrome | undefined;
 
@@ -35,39 +39,51 @@ export class RpcExtensionUiHandler {
             pending.resolve({ type: 'extension_ui_response', id: '', cancelled: true });
         }
         this._pending.clear();
+        this._firePendingChanged();
+        this._pendingListeners.clear();
     }
 
-    handleWebviewResponse(payload: { id: string; cancelled?: boolean; value?: string; confirmed?: boolean }): void {
+    /** A dialog started waiting, or stopped waiting (answered, timed out, disposed). */
+    onDidChangePending(listener: () => void): { dispose(): void } {
+        this._pendingListeners.add(listener);
+        return { dispose: () => this._pendingListeners.delete(listener) };
+    }
+
+    private _firePendingChanged(): void {
+        for (const listener of [...this._pendingListeners]) {
+            listener();
+        }
+    }
+
+    /** Dialogs still waiting for an answer, oldest first. */
+    pendingRequests(): Array<ExtensionUiRequestPayload & { receivedAt: number }> {
+        return [...this._pending.values()].map((pending) => ({ ...pending.request, receivedAt: pending.receivedAt }));
+    }
+
+    /**
+     * Answer a pending dialog from the webview or voice control; the first answer wins.
+     * Returns false when the request was already answered, timed out, or never existed.
+     */
+    respond(payload: { id: string; cancelled?: boolean; value?: string; confirmed?: boolean }): boolean {
         const pending = this._pending.get(payload.id);
         if (!pending) {
-            return;
+            return false;
         }
         pending.clearTimers();
         this._pending.delete(payload.id);
+        this._firePendingChanged();
+        // No-op when the webview answered itself; closes its dialog when voice control answered.
+        this._post?.({ type: 'extensionUiDismiss', id: payload.id });
 
+        const { id } = payload;
         if (payload.cancelled) {
-            this._bridge.sendExtensionUiResponse({
-                type: 'extension_ui_response',
-                id: payload.id,
-                cancelled: true,
-            });
-            return;
+            this._bridge.sendExtensionUiResponse({ type: 'extension_ui_response', id, cancelled: true });
+        } else if (payload.confirmed !== undefined) {
+            this._bridge.sendExtensionUiResponse({ type: 'extension_ui_response', id, confirmed: payload.confirmed });
+        } else {
+            this._bridge.sendExtensionUiResponse({ type: 'extension_ui_response', id, value: payload.value ?? '' });
         }
-
-        if (payload.confirmed !== undefined) {
-            this._bridge.sendExtensionUiResponse({
-                type: 'extension_ui_response',
-                id: payload.id,
-                confirmed: payload.confirmed,
-            });
-            return;
-        }
-
-        this._bridge.sendExtensionUiResponse({
-            type: 'extension_ui_response',
-            id: payload.id,
-            value: payload.value ?? '',
-        });
+        return true;
     }
 
     handleRequest(req: RpcExtensionUIRequest): void {
@@ -119,23 +135,29 @@ export class RpcExtensionUiHandler {
     ): Promise<void> {
         const method = req.method as ExtensionUiRequestPayload['method'];
         const id = req.id;
+        const request: ExtensionUiRequestPayload = { id, method, ...fields };
 
         if (req.timeout) {
             const timer = setTimeout(() => {
+                this._post?.({ type: 'extensionUiDismiss', id });
                 this._finish(id, { type: 'extension_ui_response', id, cancelled: true });
             }, req.timeout);
             this._pending.set(id, {
+                request,
+                receivedAt: Date.now(),
                 resolve: (r) => this._bridge.sendExtensionUiResponse(r),
                 clearTimers: () => clearTimeout(timer),
             });
         } else {
             this._pending.set(id, {
+                request,
+                receivedAt: Date.now(),
                 resolve: (r) => this._bridge.sendExtensionUiResponse(r),
                 clearTimers: () => {},
             });
         }
+        this._firePendingChanged();
 
-        const request: ExtensionUiRequestPayload = { id, method, ...fields };
         if (this._post) {
             this._post({ type: 'extensionUiRequest', request });
         } else {
@@ -151,6 +173,7 @@ export class RpcExtensionUiHandler {
         }
         pending.clearTimers();
         this._pending.delete(id);
+        this._firePendingChanged();
         pending.resolve(response);
     }
 

@@ -24,6 +24,8 @@
     --user-card-border: color-mix(in srgb, var(--user-accent) 22%, var(--border));
     --user-sticky-bg: color-mix(in srgb, var(--bg) 88%, transparent);
     --surface-raised: color-mix(in srgb, var(--fg) 3%, var(--card-bg));
+    /* The voice agent's colour; the voice panel (voice.css) uses it too. */
+    --voice-accent: #ff8a5c;
     --font-mono: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, 'Courier New', monospace);
     --radius: 8px;
     --radius-lg: 12px;
@@ -32,6 +34,9 @@
     --chat-pad-x: 12px;
     --chat-pad-y: 8px;
 }
+body.vscode-light { --voice-accent: #d9480f; }
+body.vscode-high-contrast { --voice-accent: #ffa07a; }
+body.vscode-high-contrast-light { --voice-accent: #b33c00; }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -1106,6 +1111,25 @@ body {
     overflow: hidden;
 }
 
+/* User message dispatched by the voice agent (design §11.3). */
+.from-voice {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    line-height: 16px;
+    padding: 0 6px;
+    margin-bottom: 3px;
+    border-radius: 9px;
+    color: var(--voice-accent);
+    background: color-mix(in srgb, var(--voice-accent) 12%, transparent);
+    white-space: nowrap;
+}
+.pending-message .from-voice {
+    flex-shrink: 0;
+    margin: 1px 0 0;
+}
+
 .user-prompt-attachments--hidden {
     display: none;
 }
@@ -1959,20 +1983,25 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 }
 
 /* ── Attachments (composer + sent messages) ── */
-.input-container.has-attachments .input-area {
-    padding-top: 4px;
-}
-
-.attachments-strip {
+/* Editor-context chip + pending attachment chips share one wrapping row. */
+.composer-chip-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    padding: 8px 10px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 85%, var(--fg) 6%);
+    padding: 6px 10px 0;
+    min-width: 0;
 }
 
-.attachment-chip,
+.composer-chip-row[hidden] {
+    display: none;
+}
+
+.editor-context-bar,
+.attachments-strip {
+    display: contents;
+}
+
 .message-attachment-chip {
     display: inline-flex;
     align-items: center;
@@ -1987,9 +2016,66 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.attachment-chip:hover {
+.attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: min(100%, 200px);
+    min-width: 0;
+    height: 22px;
+    padding: 0 2px 0 6px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+    color: var(--fg);
+    font-size: 11px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.attachment-chip:hover,
+.attachment-chip--active {
     border-color: color-mix(in srgb, var(--focus-border) 45%, var(--border));
-    background: color-mix(in srgb, var(--fg) 6%, var(--bg));
+    background: color-mix(in srgb, var(--fg) 7%, var(--bg));
+}
+
+.attachment-chip-glyph {
+    display: flex;
+    flex-shrink: 0;
+}
+
+.attachment-chip-glyph--file {
+    color: color-mix(in srgb, var(--focus-border) 85%, var(--fg));
+}
+
+.attachment-chip-glyph--image {
+    color: color-mix(in srgb, var(--success-fg) 80%, var(--fg));
+}
+
+.attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.attachment-preview {
+    display: flex;
+    justify-content: flex-start;
+    margin: 6px 10px 0;
+    cursor: zoom-out;
+}
+
+.attachment-preview[hidden] {
+    display: none;
+}
+
+.attachment-preview-img {
+    display: block;
+    max-width: 100%;
+    max-height: 200px;
+    object-fit: contain;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
 }
 
 .attachment-chip-icon {
@@ -2024,15 +2110,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     height: 12px;
 }
 
-.attachment-thumb {
-    width: 28px;
-    height: 28px;
-    object-fit: cover;
-    border-radius: 6px;
-    flex-shrink: 0;
-    border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-}
-
 .attachment-chip-text {
     display: flex;
     flex-direction: column;
@@ -2041,7 +2118,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     flex: 1;
 }
 
-.attachment-name,
 .message-attachment-name {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2070,9 +2146,8 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
-    margin-left: 2px;
+    width: 16px;
+    height: 16px;
     padding: 0;
     flex-shrink: 0;
     border: none;
@@ -2091,12 +2166,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 }
 
 /* ── Editor context (active file/selection sent with the prompt) ── */
-.editor-context-bar {
-    display: flex;
-    padding: 6px 10px 0;
-    min-width: 0;
-}
-
 .editor-context-chip {
     display: inline-flex;
     align-items: center;
@@ -2404,56 +2473,305 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--focus-border) 35%, transparent);
 }
 
-/* Voice input mic: while recording the glyph becomes a waveform driven by the mic level. */
-.mic-btn {
-    position: relative;
-}
-
-.mic-wave {
-    display: none;
-    align-items: center;
-    gap: 2px;
-    height: 14px;
-}
-
-.mic-wave-bar {
-    width: 2px;
-    height: 14px;
-    border-radius: 1px;
-    background: currentColor;
-    transform: scaleY(0.18);
-    transition: transform 0.08s linear;
-}
-
-.mic-btn.is-recording .mic-icon {
+/* Voice input mic: green while the microphone is open. Dictation: a stop button while recording,
+   a spinner (disabled) while transcribing. Voice mode: a slashed mic when muted. */
+.mic-btn .mic-off-icon,
+.mic-btn .mic-stop-icon,
+.mic-btn .mic-busy-icon,
+.mic-btn.is-muted .mic-icon,
+.mic-btn.is-recording .mic-icon,
+.mic-btn.is-busy .mic-icon {
     display: none;
 }
 
-.mic-btn.is-recording .mic-wave {
-    display: inline-flex;
+.mic-btn.is-muted .mic-off-icon,
+.mic-btn.is-recording .mic-stop-icon,
+.mic-btn.is-busy .mic-busy-icon {
+    display: block;
 }
 
-/* Recording uses the theme's link blue (textLink.foreground), not the error red. */
-.mic-btn.is-recording {
-    background: color-mix(in srgb, var(--link) 14%, transparent);
-    border-color: color-mix(in srgb, var(--link) 55%, var(--border));
-    color: var(--link);
+.mic-btn.is-live {
+    background: color-mix(in srgb, var(--success-fg) 14%, transparent);
+    border-color: color-mix(in srgb, var(--success-fg) 55%, var(--border));
+    color: var(--success-fg);
     transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
-.mic-btn.is-recording:hover {
-    background: color-mix(in srgb, var(--link) 20%, transparent);
-    border-color: color-mix(in srgb, var(--link) 70%, var(--border));
-    color: var(--link);
+.mic-btn.is-live:hover {
+    background: color-mix(in srgb, var(--success-fg) 20%, transparent);
+    border-color: color-mix(in srgb, var(--success-fg) 70%, var(--border));
+    color: var(--success-fg);
 }
 
-.mic-btn.is-recording.is-speaking {
-    background: color-mix(in srgb, var(--link) 24%, transparent);
+.mic-btn.is-live.is-speaking {
+    background: color-mix(in srgb, var(--success-fg) 24%, transparent);
 }
 
-.mic-btn.is-pending:not(.is-recording) {
+.mic-btn.is-busy,
+.mic-btn.is-busy:hover {
+    background: transparent;
     color: var(--fg);
+    cursor: progress;
+}
+
+.mic-btn.is-busy .mic-busy-icon {
+    animation: tab-spin 0.8s linear infinite;
+}
+
+.mic-btn.is-voice:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* The voice bar's wave (src/webview/voiceWave.ts): fills the space between the status and the
+   buttons, fading out at both ends; green is the microphone, blue the bot speaking. Each line has
+   a main layer (0) and two fainter ones (1: out-of-phase echo, 2: upper bands). It fades out
+   (.is-fading, 250 ms, matching FADE_MS) before it hides. */
+.voice-wave {
+    display: block;
+    width: 100%;
+    height: 18px;
+    margin: 0 24px;
+    cursor: default;
+    opacity: 1;
+    transition: opacity 0.25s ease-out;
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 12%, #000 97%, transparent);
+    mask-image: linear-gradient(to right, transparent, #000 12%, #000 97%, transparent);
+}
+
+.voice-wave.is-fading {
+    opacity: 0;
+}
+
+.voice-wave[hidden] {
+    display: none;
+}
+
+.voice-wave svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.voice-wave-line {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.voice-wave-line[data-layer='1'] {
+    stroke-width: 1;
+    opacity: 0.45;
+}
+
+.voice-wave-line[data-layer='2'] {
+    stroke-width: 0.75;
+    opacity: 0.3;
+}
+
+.voice-wave-line[data-source='user'] {
+    stroke: var(--success-fg);
+}
+
+.voice-wave-line[data-source='bot'] {
+    stroke: var(--link);
+}
+
+/* Unusable until its speech services pass their check (mic: STT; robot: STT and TTS): red; the tooltip says why. */
+.mic-btn.is-unavailable,
+.mic-btn.is-unavailable:hover,
+.voice-bar-robot.is-unavailable,
+.voice-bar-robot.is-unavailable:hover {
+    background: color-mix(in srgb, var(--error-fg) 22%, transparent);
+    border-color: color-mix(in srgb, var(--error-fg) 60%, transparent);
+    color: var(--error-fg);
+    cursor: not-allowed;
+}
+
+/* ── Voice agent tool belt: the header of the input box (src/webview/voiceBar.ts) ── */
+.voice-bar {
+    --vb-state: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+    font-size: 11px;
+    color: var(--muted);
+    user-select: none;
+}
+
+.voice-bar.on {
+    border-bottom-color: color-mix(in srgb, var(--vb-state) 35%, var(--border));
+    background: color-mix(in srgb, var(--vb-state) 5%, transparent);
+}
+
+.voice-bar[data-state='listening'],
+.voice-bar[data-state='userSpeaking'],
+.voice-bar[data-state='transcribing'] {
+    --vb-state: var(--link);
+}
+
+.voice-bar[data-state='thinking'] {
+    --vb-state: var(--warning-fg);
+}
+
+.voice-bar[data-state='synthesizing'] {
+    --vb-state: var(--voice-accent);
+}
+
+.voice-bar[data-state='speaking'] {
+    --vb-state: var(--success-fg);
+}
+
+.voice-bar-robot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+}
+
+.voice-bar-robot svg,
+.voice-bar-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+.voice-bar-robot:hover {
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    color: var(--fg);
+}
+
+.voice-bar.on .voice-bar-robot {
+    color: var(--vb-state);
+    border-color: color-mix(in srgb, var(--vb-state) 45%, transparent);
+    background: color-mix(in srgb, var(--vb-state) 12%, transparent);
+}
+
+.voice-bar[data-state='starting'] .voice-bar-robot {
     animation: pulse-dot 1.2s ease-in-out infinite;
+    cursor: default;
+}
+
+.voice-bar-dot {
+    display: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--vb-state);
+}
+
+.voice-bar.on .voice-bar-dot {
+    display: inline-block;
+}
+
+.voice-bar[data-state='userSpeaking'] .voice-bar-dot,
+.voice-bar[data-state='thinking'] .voice-bar-dot,
+.voice-bar[data-state='synthesizing'] .voice-bar-dot,
+.voice-bar[data-state='speaking'] .voice-bar-dot {
+    animation: pulse-dot 0.9s ease-in-out infinite;
+}
+
+.voice-bar.on .voice-bar-label {
+    color: var(--vb-state);
+    font-weight: 600;
+}
+
+.voice-bar-label {
+    white-space: nowrap;
+    cursor: default;
+}
+
+/* Muted mic while the agent is on: a grey tag; the robot keeps the agent's colour. */
+.voice-bar-muted {
+    padding: 0 6px;
+    border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
+    border-radius: 8px;
+    line-height: 16px;
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+    cursor: default;
+}
+
+.voice-bar-muted[hidden] {
+    display: none;
+}
+
+.voice-bar-spacer {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+}
+
+.voice-bar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 20px;
+    padding: 0 3px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+}
+
+.voice-bar-btn:hover {
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    color: var(--fg);
+}
+
+.voice-bar-btn[hidden] {
+    display: none;
+}
+
+.voice-bar-btn[data-act='hush'] {
+    color: var(--success-fg);
+}
+
+/* Composer footer: send to the worker instead of the voice agent. */
+.voice-target {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    padding-left: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+}
+
+.voice-target[hidden] {
+    display: none;
+}
+
+.voice-target input {
+    margin: 0;
+    width: 12px;
+    height: 12px;
+    accent-color: var(--link);
+    cursor: pointer;
+}
+
+.voice-target:has(input:checked) {
+    color: var(--fg);
 }
 
 .composer-btn-icon {

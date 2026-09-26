@@ -1,0 +1,279 @@
+/*
+ * The Bot view in the bottom panel (docs/voice-agent-design.md §11, src/webview/voicePanel.ts),
+ * loaded after main.css: the engines and token use at the top, then cards and the transcript,
+ * filling the view. Everything is scoped under .vp.
+ */
+
+.vp {
+    --voice: var(--voice-accent);
+    --user: var(--user-accent);
+    --ok: var(--success-fg);
+    --warn: var(--warning-fg);
+    --error: var(--error-fg);
+    --focus: var(--focus-border);
+    --hover: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, .31));
+    --btn2-bg: var(--vscode-button-secondaryBackground, #3a3d41);
+    --btn2-fg: var(--vscode-button-secondaryForeground, #ccc);
+    --btn2-hover: var(--vscode-button-secondaryHoverBackground, #45494e);
+    --state: var(--ok);
+    /* Transcript type: VS Code's UI font size (as in the chat's messages), a little more line spacing. */
+    --vp-font: var(--vscode-font-size, 13px);
+    --vp-line: 1.6;
+    /* Labels, tags, chips, cards. */
+    --vp-small: calc(var(--vp-font) - 1.5px);
+    /* Transcript text per speaker: light tints on dark themes, dark shades on light themes. */
+    --text-user: #b3bbff;
+    --text-voice: #ffbf9f;
+    --text-narr: #f0d98c;
+    /* The word being spoken. */
+    --word-bg: color-mix(in srgb, var(--voice) 42%, transparent);
+    --word-fg: #fff;
+
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    background: var(--vscode-panel-background, var(--bg));
+    color: var(--fg);
+    user-select: text;
+}
+body.vscode-light .vp {
+    --text-user: #2d3a9e;
+    --text-voice: #a13a0c;
+    --text-narr: #6f5600;
+    --word-bg: color-mix(in srgb, var(--voice) 24%, transparent);
+    --word-fg: #000;
+}
+body.vscode-high-contrast .vp {
+    --text-user: #cdd3ff;
+    --text-voice: #ffd2bc;
+    --text-narr: #ffe9a6;
+}
+body.vscode-high-contrast-light .vp {
+    --text-user: #1a237a;
+    --text-voice: #7a2800;
+    --text-narr: #514000;
+    --word-bg: color-mix(in srgb, var(--voice) 24%, transparent);
+    --word-fg: #000;
+}
+/* The state line along the top of the view (same colours as the chat's robot status line). */
+.vp::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--state); opacity: .7;
+}
+.vp[data-state="off"]::before { opacity: .25; }
+.vp[data-state="speaking"]::before,
+.vp[data-state="synthesizing"]::before,
+.vp[data-state="thinking"]::before {
+    background: linear-gradient(90deg, transparent, var(--state), transparent) 0 0 / 200% 100%;
+    opacity: 1;
+    animation: vp-flow 1.4s linear infinite;
+}
+.vp[data-state="listening"]    { --state: var(--link); }
+.vp[data-state="userSpeaking"] { --state: var(--link); }
+.vp[data-state="transcribing"] { --state: var(--link); }
+.vp[data-state="thinking"]     { --state: var(--warn); }
+.vp[data-state="synthesizing"] { --state: var(--voice); }
+.vp[data-state="speaking"]     { --state: var(--ok); }
+.vp[data-state="standby"],
+.vp[data-state="muted"],
+.vp[data-state="off"]          { --state: var(--muted); }
+
+/* ── Header: engines, context window, tokens ── */
+.vp-head {
+    position: relative;
+    z-index: 5;
+    flex-shrink: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    font-size: var(--vp-small);
+    line-height: 1.6;
+}
+/* One summary line; clicking it (.open) floats the details over the transcript without moving it. */
+.vp-sum {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+    padding: 3px 12px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.vp-sum:hover { background: var(--hover); }
+.vp-sum:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+.vp-sum-v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
+.vp.vp-configured .vp-sum-v { color: var(--muted); }
+.vp-sk { color: var(--muted); font-family: var(--vscode-font-family, sans-serif); font-weight: 600; letter-spacing: .02em; }
+.vp-sum .vp-car { flex-shrink: 0; font-size: .7em; opacity: .7; transition: transform .15s; }
+.vp-head.open .vp-sum .vp-car { transform: rotate(90deg); }
+.vp-detail {
+    display: none; flex-direction: column; gap: 1px; padding: 2px 12px 6px;
+    position: absolute; top: 100%; left: 0; right: 0;
+    max-height: 70vh; overflow: auto;
+    background: var(--vscode-panel-background, var(--bg));
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .3);
+}
+.vp-head.open .vp-detail { display: flex; }
+.vp-row, .vp-tokens > summary { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vp-k { flex-shrink: 0; width: 4.6em; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+.vp-v, .vp-tok-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
+.vp-sep { margin: 0 5px; color: var(--muted); opacity: .7; }
+.vp.vp-configured .vp-eng .vp-v { color: var(--muted); }
+.vp-meter-bar { display: inline-block; width: 90px; height: 5px; margin-right: 8px; vertical-align: 1px; border-radius: 3px; background: color-mix(in srgb, var(--muted) 25%, transparent); overflow: hidden; }
+.vp-meter-bar i { display: block; height: 100%; border-radius: 3px; background: var(--link); }
+.vp-tokens[hidden] { display: none; }
+.vp-tokens > summary { list-style: none; cursor: pointer; border-radius: 4px; }
+.vp-tokens > summary::-webkit-details-marker { display: none; }
+.vp-tokens > summary:hover { background: var(--hover); }
+.vp-tokens > summary:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+.vp-tokens .vp-car { flex-shrink: 0; font-size: .7em; opacity: .7; transition: transform .15s; }
+.vp-tokens[open] .vp-car { transform: rotate(90deg); }
+.vp-calls { max-height: 180px; overflow: auto; margin: 4px 0 2px; }
+.vp-calls table { border-collapse: collapse; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
+.vp-calls th, .vp-calls td { padding: 0 12px 0 0; text-align: right; white-space: nowrap; }
+.vp-calls th:nth-child(-n+2), .vp-calls td:nth-child(-n+2) { text-align: left; }
+.vp-calls th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--vscode-panel-background, var(--bg)); }
+.vp-calls-empty { color: var(--muted); }
+
+/* ── Cards: tasks to confirm, background research; one line each ── */
+.vp-cards { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 0; }
+.vp-cards:empty, .vp.readonly .vp-cards { display: none; }
+.vp-card {
+    display: flex; align-items: center; gap: 6px; min-width: 0;
+    padding: 3px 4px 3px 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card-bg); font-size: var(--vp-small); line-height: 22px;
+    animation: vp-rise .3s ease-out both;
+}
+.vp-card.settled { animation: none; }
+.vp-card-h { flex-shrink: 0; font-size: calc(var(--vp-small) - 1px); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.vp-q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vp-m { flex-shrink: 0; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); color: var(--muted); }
+.vp-ask { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 6%, var(--card-bg)); }
+.vp-ask .vp-card-h { color: color-mix(in srgb, var(--warn) 80%, var(--fg)); }
+.vp-card-btns { flex-shrink: 0; display: flex; gap: 4px; }
+.vp-pbtn { height: 22px; padding: 0 8px; border: 0; border-radius: 4px; font: inherit; font-size: var(--vp-small); cursor: pointer; background: var(--btn-bg); color: var(--btn-fg); }
+.vp-pbtn:hover { background: var(--btn-hover); }
+.vp-pbtn.sec { background: var(--btn2-bg); color: var(--btn2-fg); }
+.vp-pbtn.sec:hover { background: var(--btn2-hover); }
+.vp-pbtn:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
+.vp-research.failed .vp-q { color: var(--muted); }
+.vp-spin { flex-shrink: 0; display: inline-block; width: 8px; height: 8px; border: 1.5px solid var(--link); border-right-color: transparent; border-radius: 50%; animation: vp-spin .8s linear infinite; }
+
+.vp-banner { display: none; flex-shrink: 0; margin: 8px 10px 0; padding: 3px 10px; border-radius: 5px; font-size: var(--vp-small); color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
+.vp.readonly .vp-banner { display: block; }
+
+/* ── Transcript: one row per utterance, speaker label + colour bar ── */
+.vp-stream {
+    flex: 1;
+    /* About three rows even at the smallest. */
+    min-height: calc(var(--vp-font) * var(--vp-line) * 3 + 8px);
+    overflow-y: auto;
+    padding: 8px 8px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: var(--vp-font);
+    line-height: var(--vp-line);
+}
+.vp-stream::-webkit-scrollbar { width: 8px; }
+.vp-stream::-webkit-scrollbar-thumb { background: var(--scrollbar); border: 2px solid transparent; background-clip: content-box; border-radius: 5px; }
+.vp-empty { margin: auto 0; padding: 4px 8px; color: var(--muted); text-align: center; }
+
+/* No row backgrounds: the speaker shows in the label, the bar and the text colour. */
+.vp-turn {
+    --c: var(--muted);
+    --t: var(--fg);
+    flex-shrink: 0;
+    display: grid;
+    /* Wide enough for the longest label ("Update") at the label size. */
+    grid-template-columns: 4.4em minmax(0, 1fr);
+    column-gap: 8px;
+    padding: 2px 8px;
+    border-left: 2px solid var(--c);
+    border-radius: 0 4px 4px 0;
+    animation: vp-rise .28s ease-out both;
+}
+.vp-turn.user { --c: var(--user); --t: var(--text-user); }
+.vp-turn.bot  { --c: var(--voice); --t: var(--text-voice); }
+.vp-turn.narr { --c: var(--warn); --t: var(--text-narr); }
+.vp-turn.sys  { --c: transparent; --t: var(--muted); }
+.vp-turn.silent { opacity: .6; }
+.vp-who { color: var(--c); font-size: var(--vp-small); font-weight: 600; line-height: calc(var(--vp-font) * var(--vp-line)); white-space: nowrap; display: flex; align-items: flex-start; gap: 3px; cursor: default; }
+.vp-turn.sys .vp-who { color: var(--muted); font-weight: 500; }
+.vp-src { font-size: .85em; opacity: .75; font-weight: 400; }
+.vp-txt { min-width: 0; overflow-wrap: anywhere; color: var(--t); }
+.vp-line { white-space: pre-wrap; }
+
+/* Spoken sentences: pending dim, played normal, cut struck through; the word being spoken is highlighted. */
+.vp-s { transition: opacity .2s; }
+.vp-s.pending { opacity: .42; }
+.vp-w { border-radius: 2px; animation-name: vp-word; animation-timing-function: step-end; animation-fill-mode: none; }
+.vp-s.cut { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--error) 70%, transparent); opacity: .5; }
+.vp-cut-tag, .vp-barge, .vp-kind { display: inline-block; padding: 0 6px; font-size: calc(var(--vp-small) - 1px); line-height: 1.5; vertical-align: 1px; white-space: nowrap; }
+.vp-cut-tag { margin-left: 5px; border-radius: 7px; color: var(--error); border: 1px solid color-mix(in srgb, var(--error) 40%, transparent); }
+.vp-barge { margin-right: 5px; border-radius: 7px; color: var(--user); border: 1px solid color-mix(in srgb, var(--user) 45%, transparent); }
+.vp-kind { margin-right: 5px; font-family: var(--font-mono); border-radius: 3px; background: color-mix(in srgb, var(--k, var(--warn)) 16%, transparent); color: color-mix(in srgb, var(--k, var(--warn)) 80%, var(--fg)); }
+.vp-kind.needs_input { --k: var(--warn); } .vp-kind.error { --k: var(--error); } .vp-kind.done { --k: var(--ok); } .vp-kind.research { --k: var(--link); } .vp-kind.progress { --k: var(--muted); }
+.vp-partial { color: var(--muted); font-style: italic; }
+.vp-err { color: var(--error); margin-top: 2px; }
+
+.vp-dots { display: inline-flex; gap: 3px; vertical-align: middle; }
+.vp-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--warn); animation: vp-blink 1s infinite; }
+.vp-dots i:nth-child(2) { animation-delay: .15s; } .vp-dots i:nth-child(3) { animation-delay: .3s; }
+
+/* Tool and lookup chips */
+.vp-chips { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; align-items: flex-start; }
+.vp-chips:empty { display: none; }
+details.vp-chip { max-width: 100%; }
+details.vp-chip > summary { list-style: none; cursor: pointer; display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 6px; padding: 0 7px 0 6px; border-radius: 4px; font-size: var(--vp-small); line-height: 1.6; color: var(--muted); border: 1px solid var(--border); }
+details.vp-chip > summary::-webkit-details-marker { display: none; }
+details.vp-chip > summary:hover { color: var(--fg); background: var(--hover); }
+details.vp-chip > summary:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+details.vp-chip > summary .vp-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+details.vp-chip > summary > span:not(.vp-t) { flex-shrink: 0; white-space: nowrap; }
+details.vp-chip > summary .vp-tn { font-weight: 500; color: var(--c, var(--muted)); }
+details.vp-chip > summary .vp-car { font-size: .7em; transition: transform .15s; opacity: .7; }
+details.vp-chip[open] > summary .vp-car { transform: rotate(90deg); }
+details.vp-chip.dispatch { --c: var(--voice); } details.vp-chip.confirm { --c: var(--ok); } details.vp-chip.answer { --c: var(--warn); }
+details.vp-chip.read, details.vp-chip.research { --c: var(--link); } details.vp-chip.status { --c: var(--muted); } details.vp-chip.proposal { --c: var(--warn); }
+details.vp-chip.stop, details.vp-chip.failed { --c: var(--error); }
+.vp-chip-body { margin: 4px 0 2px; padding: 5px 10px; border-left: 2px solid var(--c, var(--border)); background: var(--code-bg); border-radius: 0 4px 4px 0; font-family: var(--font-mono); font-size: var(--vp-small); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.vp-res { display: block; margin-top: 4px; padding-top: 4px; border-top: 1px dashed color-mix(in srgb, var(--muted) 35%, transparent); color: var(--muted); }
+.vp-res:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+details.vp-chip.failed .vp-res { color: var(--error); }
+.vp-st-ok { color: var(--ok); } .vp-st-wait { color: var(--warn); } .vp-st-no { color: var(--error); }
+
+/* Debug transcript: what went to the voice model this turn. */
+.vp-attach { margin: 2px 0 4px; padding: 4px 8px; font-family: var(--font-mono); font-size: calc(var(--vp-small) - 1px); line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 4px; }
+.vp-attach:empty { display: none; }
+
+/* Latency: a stopwatch beside the speaker label toggles the breakdown under the turn. */
+.vp-timing {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: calc(var(--vp-font) * var(--vp-line)); margin-left: 2px; padding: 0;
+    border: 0; border-radius: 4px; background: none; color: var(--muted); opacity: .7; cursor: pointer;
+}
+.vp-timing[hidden] { display: none; }
+.vp-timing:hover { opacity: 1; color: var(--fg); background: var(--hover); }
+.vp-timing.open { opacity: 1; color: var(--c); }
+.vp-timing:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+.vp-timing-body { width: fit-content; max-width: 100%; color: var(--muted); }
+.vp-timing-body[hidden] { display: none; }
+
+/* ── Narrow: fewer extras ── */
+@container (max-width: 360px) {
+    .vp-card-h { display: none; }
+}
+@container (max-width: 260px) {
+    .vp-turn { grid-template-columns: minmax(0, 1fr); }
+}
+
+@keyframes vp-spin { to { transform: rotate(360deg); } }
+@keyframes vp-blink { 0%, 100% { opacity: .2; } 40% { opacity: 1; } }
+@keyframes vp-flow { to { background-position: -200% 0; } }
+@keyframes vp-rise { from { opacity: 0; transform: translateY(4px); } }
+/* Highlight without padding, so the line does not reflow as it moves from word to word. */
+@keyframes vp-word { from, to { background: var(--word-bg); color: var(--word-fg); box-shadow: 0 0 0 1px var(--word-bg); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .vp-turn, .vp-card { animation: none; }
+    .vp::before { animation: none !important; }
+}

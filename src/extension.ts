@@ -16,9 +16,9 @@ import { SidebarProvider } from './providers/sidebar';
 import { StatusBarManager } from './providers/status-bar';
 import { SettingsPanel } from './providers/settings-panel';
 import { clearExtensionApiKeySecrets, getPiAgentDir, isSyncWithPiCli } from './pi/piCliSync';
-import { verifyPiCliAvailable, resolvePiCliInvocation } from './pi/piCliPaths';
+import { verifyPiCliAvailable, resolvePiCliInvocation, initWindowBackend } from './pi/piCliPaths';
 import { canLoadPiNativeModules } from './pi/piExtensionCompat';
-import { isSttValid } from './voice/voiceSettings';
+import { probeStt, probeTts } from './voice/voiceSettings';
 import { maybePromptForRecommendedPackages } from './pi/recommendedPackagesPrompt';
 import { setPiExtensionPath } from './pi/extensionPath';
 
@@ -29,6 +29,8 @@ import { createBootErrorWebviewProvider } from './providers/boot-error-webview';
 import { rebuildAgentNativeModules } from './pi/piExtensionCompat';
 import { registerAttachFromExplorer } from './pi/attachFromExplorer';
 import { ensurePastedAttachmentsDir } from './pi/pastedAttachmentStore';
+import { registerWorkerControlCommands } from './voiceAgent/workerControlCommands';
+import { registerVoiceAgentCommands } from './voiceAgent/voiceAgentCommands';
 
 let piSession: PiChatSession | undefined;
 let sidebarProviderForShutdown: SidebarProvider | undefined;
@@ -49,6 +51,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('Oh My Pi Chater');
     outputChannel.appendLine('Oh My Pi Chater extension activating...');
     setPiExtensionPath(context.extensionPath);
+    context.subscriptions.push(initWindowBackend(context.workspaceState));
 
     if (!(await verifyPiCliAvailable(outputChannel))) {
         registerBootErrorSidebar(
@@ -115,6 +118,10 @@ export async function activate(context: vscode.ExtensionContext) {
         sidebarProviderForShutdown = sidebarProvider;
 
         registerAttachFromExplorer(context, () => sidebarProvider);
+        context.subscriptions.push(
+            ...registerWorkerControlCommands(sidebarProvider, outputChannel),
+            ...registerVoiceAgentCommands(context, { worker: sidebarProvider, chat: sidebarProvider }),
+        );
 
         context.subscriptions.push(
             // Retained so switching to another view container keeps the terminals (TUI mode) and chat DOM.
@@ -239,11 +246,17 @@ export async function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(
             vscode.workspace.onDidChangeConfiguration((e) => {
                 if (e.affectsConfiguration('oh-my-pi-chater.voice.sttUrl')) {
-                    // A changed URL invalidates its previous verification and updates the mic.
-                    isSttValid();
+                    // A changed URL invalidates its previous verification; re-check the new one.
+                    void probeStt();
+                }
+                if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent.tts')) {
+                    void probeTts();
                 }
             }),
         );
+        // The mic needs a verified STT server, the voice agent STT and TTS; check the configured ones at startup.
+        void probeStt();
+        void probeTts();
 
         outputChannel.appendLine('Oh My Pi Chater extension activated.');
     } catch (err: any) {

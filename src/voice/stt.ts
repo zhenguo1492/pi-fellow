@@ -2,6 +2,7 @@
  * OpenAI-compatible speech-to-text (`POST {base}/audio/transcriptions`), as
  * served by OpenAI, Groq, speaches / faster-whisper-server, whisper.cpp server…
  */
+import { openAiBaseUrl, probeModels, type ModelsProbeResult } from './modelsProbe';
 
 export interface SttConfig {
     /** Base URL (`http://127.0.0.1:8010/v1`; a bare host gets `/v1`) or the full `/audio/transcriptions` URL. */
@@ -15,21 +16,9 @@ export interface SttConfig {
 const TRANSCRIPTIONS_PATH = '/audio/transcriptions';
 const REQUEST_TIMEOUT_MS = 60_000;
 
-/**
- * `{base}` in front of `/models` and `/audio/transcriptions`. A bare host
- * (`http://127.0.0.1:8010`) means the OpenAI-standard `/v1` mount point.
- */
-function sttBaseUrl(url: string): string {
-    let base = url.trim().replace(/\/+$/, '');
-    if (base.endsWith(TRANSCRIPTIONS_PATH)) {
-        base = base.slice(0, -TRANSCRIPTIONS_PATH.length);
-    }
-    return new URL(base).pathname === '/' ? `${base}/v1` : base;
-}
-
 /** Lists the server's model ids; doubles as a connectivity check. */
 export async function listSttModels(url: string): Promise<string[]> {
-    const modelsUrl = `${sttBaseUrl(url)}/models`;
+    const modelsUrl = `${openAiBaseUrl(url, TRANSCRIPTIONS_PATH)}/models`;
     const res = await fetch(modelsUrl, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) {
         throw new Error(`GET ${modelsUrl} → HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -38,67 +27,18 @@ export async function listSttModels(url: string): Promise<string[]> {
     return (body.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === 'string');
 }
 
-export interface SttConnectivityResult {
-    ok: boolean;
-    status?: number;
-    message: string;
-    models: string[];
-}
-
-/**
- * Tests whether the STT endpoint is reachable and returns HTTP 200.
- * Only HTTP 200 is considered valid.
- */
-export async function testSttConnectivity(url: string, model?: string): Promise<SttConnectivityResult> {
+/** Reachable (HTTP 200 with a model list) = valid; a configured model the server lacks is only noted. */
+export async function testSttConnectivity(url: string, model?: string): Promise<ModelsProbeResult> {
     const trimmed = url.trim();
     if (!trimmed) {
         return { ok: false, message: 'Speech-to-text URL is empty', models: [] };
     }
-    try {
-        const modelsUrl = `${sttBaseUrl(trimmed)}/models`;
-        const res = await fetch(modelsUrl, { signal: AbortSignal.timeout(8_000) });
-        if (res.status === 200) {
-            let body: { data?: { id?: unknown }[] };
-            try {
-                body = (await res.json()) as { data?: { id?: unknown }[] };
-            } catch {
-                return { ok: false, status: 200, message: 'The STT /models endpoint did not return JSON', models: [] };
-            }
-            if (!Array.isArray(body?.data)) {
-                return { ok: false, status: 200, message: 'The STT /models endpoint did not return a model list', models: [] };
-            }
-            const models = body.data.map((m) => m?.id).filter((id): id is string => typeof id === 'string');
-            if (model && model.trim() && models.length > 0 && !models.includes(model.trim())) {
-                return {
-                    ok: true,
-                    status: 200,
-                    message: `Connected (HTTP 200), but model "${model}" is not in server list (${models.join(', ') || 'none'})`,
-                    models,
-                };
-            }
-            return {
-                ok: true,
-                status: 200,
-                message: `Connected (HTTP 200) — ${models.length > 0 ? `${models.length} model(s) available` : 'ready'}`,
-                models,
-            };
-        }
-
-
-        return {
-            ok: false,
-            status: res.status,
-            message: `Server returned HTTP ${res.status}`,
-            models: [],
-        };
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return {
-            ok: false,
-            message: msg,
-            models: [],
-        };
+    const res = await probeModels(trimmed, TRANSCRIPTIONS_PATH, 'STT');
+    const wanted = model?.trim();
+    if (res.ok && wanted && res.models.length > 0 && !res.models.includes(wanted)) {
+        return { ...res, message: `Connected (HTTP 200), but model "${wanted}" is not in server list (${res.models.join(', ')})` };
     }
+    return res;
 }
 
 /** 16-bit mono PCM → WAV container. */
@@ -143,7 +83,7 @@ export class SttClient {
             form.append('language', this.config.language.trim());
         }
         form.append('response_format', 'json');
-        const endpoint = `${sttBaseUrl(this.config.url)}${TRANSCRIPTIONS_PATH}`;
+        const endpoint = `${openAiBaseUrl(this.config.url, TRANSCRIPTIONS_PATH)}${TRANSCRIPTIONS_PATH}`;
         const res = await fetch(endpoint, {
             method: 'POST',
             body: form,

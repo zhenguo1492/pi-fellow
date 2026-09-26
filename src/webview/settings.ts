@@ -8,8 +8,11 @@ import type {
     McpServerSummary,
     McpScopeId,
     AgentBackend,
+    VoiceSettings,
 } from '../shared/protocol';
+import type { TtsConfig } from '../voiceAgent/tts';
 import { getKemdiMcpHints } from '../shared/kemdiMcpHints';
+import { applySttDryRun, applyTtsDryRunResult, openSttDryRun, openTtsDryRun } from './voiceDryRun';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: SettingsClientMessage): void;
@@ -19,12 +22,12 @@ declare function acquireVsCodeApi(): {
 
 const vscode = acquireVsCodeApi();
 
-type SettingsTabId = 'general' | 'auth' | 'stt' | 'packages' | 'skills' | 'mcp' | 'commands';
+type SettingsTabId = 'general' | 'auth' | 'voice' | 'packages' | 'skills' | 'mcp' | 'commands';
 
 const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
     { id: 'general', label: 'General' },
     { id: 'auth', label: 'Auth & models' },
-    { id: 'stt', label: 'STT' },
+    { id: 'voice', label: 'Voice' },
     { id: 'packages', label: 'Packages' },
     { id: 'skills', label: 'Skills' },
     { id: 'mcp', label: 'MCP' },
@@ -35,9 +38,9 @@ const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
 const SECTION_TO_TAB: Record<string, SettingsTabId> = {
     connection: 'general',
     'chat-ui': 'general',
-    voice: 'stt',
-    stt: 'stt',
-    tts: 'stt',
+    voice: 'voice',
+    stt: 'voice',
+    tts: 'voice',
     auth: 'auth',
     defaults: 'auth',
     packages: 'packages',
@@ -48,30 +51,39 @@ const SECTION_TO_TAB: Record<string, SettingsTabId> = {
 };
 
 let currentSettings: SettingsData | null = null;
-let pendingSttUrl: string | null = null;
+/** Voice tab fields typed but not saved yet, by element id: they survive re-renders until Test saves them. */
+const voiceDrafts = new Map<string, string>();
+/** A section's Test is saving and checking; its button waits. */
+const voiceTesting: Record<VoiceService, boolean> = { stt: false, tts: false };
 let loadedSkills: SkillInfo[] = [];
 let mcpSnapshot: McpSettingsSnapshot | null = null;
 let activeTab: SettingsTabId = (vscode.getState()?.activeTab as SettingsTabId) ?? 'general';
-if ((activeTab as string) === 'voice' || (activeTab as string) === 'tts') {
-    activeTab = 'stt';
+if ((activeTab as string) === 'stt' || (activeTab as string) === 'tts') {
+    activeTab = 'voice';
 }
 
 window.addEventListener('message', (event) => {
     const msg = event.data as SettingsServerMessage;
     switch (msg.type) {
-        case 'settings':
+        case 'settings': {
+            const previous = currentSettings;
             currentSettings = msg.data;
             if (msg.data.mcpSnapshot) {
                 mcpSnapshot = msg.data.mcpSnapshot;
             }
-            // Keep the current draft when settings arrive during editing.
-            if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
-                const draft = (document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null)?.value.trim();
-                applySttValidity(Boolean(msg.data.voice?.sttValid) && draft === msg.data.voice?.sttUrl);
+            if (previous && withoutVoice(previous) === withoutVoice(msg.data)) {
+                // Only the voice settings changed (e.g. a Test saved them): update in place, so the
+                // fields keep their undo history (Ctrl+Z back to the previous URL).
+                syncVoiceFields();
+            } else if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+                // Keep the current draft when settings arrive during editing.
+                renderVoiceStatus('stt');
+                renderVoiceStatus('tts');
             } else {
                 render(msg.data);
             }
             break;
+        }
         case 'mcpSnapshot':
             mcpSnapshot = msg.snapshot;
             renderMcpSection();
@@ -99,42 +111,171 @@ window.addEventListener('message', (event) => {
         case 'scrollToSection':
             scrollToSettingsSection(msg.section);
             break;
-        case 'sttTestResult': {
-            const draft = (document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null)?.value.trim();
-            const testedUrl = pendingSttUrl;
-            const matches = testedUrl !== null && draft === testedUrl;
-            if (currentSettings?.voice) {
-                currentSettings.voice.sttValid = msg.ok && matches;
-                if (msg.ok && matches && testedUrl !== null) currentSettings.voice.sttUrl = testedUrl;
+        case 'voiceTestResult':
+            voiceTesting[msg.service] = false;
+            if (currentSettings) {
+                // Saved as sent: the form's values are the settings now, whatever the check said.
+                if (msg.service === 'stt') {
+                    currentSettings.voice = readSttForm();
+                } else {
+                    currentSettings.tts = readTtsForm();
+                }
+                currentSettings.voiceReadiness[msg.service] = msg.check;
             }
-            pendingSttUrl = null;
-            restoreTestBtn();
-            applySttValidity(msg.ok && matches);
+            document.querySelectorAll(`[data-draft="${msg.service}"] [data-key]`).forEach((field) => voiceDrafts.delete(field.id));
+            renderVoiceStatus(msg.service);
             showToast(msg.message, msg.ok ? 'info' : 'error');
             break;
-        }
+        case 'sttDryRun':
+            applySttDryRun(msg.run, msg.event);
+            break;
+        case 'ttsDryRunResult':
+            applyTtsDryRunResult(msg);
+            break;
     }
 });
 
-function restoreTestBtn(): void {
-    const btn = document.getElementById('btn-test-stt') as HTMLButtonElement | null;
-    if (btn) {
-        btn.disabled = false;
-        btn.textContent = 'Test connection';
-    }
+/** The settings minus the Voice tab's, to tell a voice-only change from one that needs a full render. */
+function withoutVoice(data: SettingsData): string {
+    return JSON.stringify({ ...data, voice: undefined, tts: undefined, voiceReadiness: undefined });
 }
 
-function applySttValidity(valid: boolean): void {
-    const check = document.getElementById('stt-url-check');
-    if (check) {
-        check.hidden = !valid;
-        check.classList.toggle('is-valid', valid);
-        check.title = valid ? 'Connected (HTTP 200)' : 'Not connected';
+/** The saved value behind a Voice field (`voice.sttUrl`, `voiceAgent.tts.speed`, …). */
+function savedVoiceValue(data: SettingsData, key: string): string | number | undefined {
+    const [section, name] = key.startsWith('voiceAgent.tts.')
+        ? [data.tts, key.slice('voiceAgent.tts.'.length)]
+        : key.startsWith('voice.')
+          ? [data.voice, key.slice('voice.'.length)]
+          : [undefined, ''];
+    const value: unknown = section ? Object.entries(section).find(([k]) => k === name)?.[1] : undefined;
+    return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+/**
+ * Shows newly saved voice settings without rebuilding the fields: a field with an unsaved draft keeps
+ * it, and one that already shows the saved value is not touched (writing `.value` would clear its undo).
+ */
+function syncVoiceFields(): void {
+    const data = currentSettings;
+    if (!data) {
+        return;
     }
-    const badge = document.getElementById('stt-status-badge');
-    if (badge) {
-        badge.hidden = !valid;
+    document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-draft] [data-key]').forEach((field) => {
+        const saved = savedVoiceValue(data, field.dataset.key ?? '');
+        if (saved === undefined || voiceDrafts.has(field.id)) {
+            return;
+        }
+        const shown = typeof saved === 'number' ? Number(field.value) === saved : field.value.trim() === saved;
+        if (!shown) {
+            field.value = String(saved);
+        }
+    });
+    renderVoiceStatus('stt');
+    renderVoiceStatus('tts');
+}
+
+type VoiceService = 'stt' | 'tts';
+
+function voiceServiceOf(value: string | undefined): VoiceService | undefined {
+    return value === 'stt' || value === 'tts' ? value : undefined;
+}
+
+function fieldText(key: string): string {
+    const field = document.getElementById(`setting-${key}`);
+    return field instanceof HTMLInputElement || field instanceof HTMLSelectElement ? field.value.trim() : '';
+}
+
+/** A number field's value clamped to its range; `fallback` while it does not parse. */
+function fieldNumber(key: string, fallback: number): number {
+    const field = document.getElementById(`setting-${key}`);
+    if (!(field instanceof HTMLInputElement) || Number.isNaN(field.valueAsNumber)) {
+        return fallback;
     }
+    return Math.min(Number(field.max), Math.max(Number(field.min), field.valueAsNumber));
+}
+
+/** The STT section as typed. */
+function readSttForm(): VoiceSettings {
+    const saved = currentSettings?.voice;
+    return {
+        sttUrl: fieldText('voice.sttUrl'),
+        sttModel: fieldText('voice.sttModel'),
+        language: fieldText('voice.language'),
+        vadConfidence: fieldNumber('voice.vadConfidence', saved?.vadConfidence ?? 0.5),
+        vadStopSecs: fieldNumber('voice.vadStopSecs', saved?.vadStopSecs ?? 0.8),
+    };
+}
+
+/** The TTS section as typed. */
+function readTtsForm(): TtsConfig {
+    const provider = fieldText('voiceAgent.tts.provider');
+    return {
+        provider: provider === 'chatterbox' || provider === 'kokoro' ? provider : 'openai',
+        url: fieldText('voiceAgent.tts.url'),
+        model: fieldText('voiceAgent.tts.model'),
+        voice: fieldText('voiceAgent.tts.voice'),
+        speed: fieldNumber('voiceAgent.tts.speed', currentSettings?.tts.speed ?? 1),
+    };
+}
+
+/** The section's form no longer matches what is saved (and in use). */
+function isVoiceDirty(service: VoiceService): boolean {
+    if (!currentSettings) {
+        return false;
+    }
+    const [form, saved]: [object, object] = service === 'stt'
+        ? [readSttForm(), currentSettings.voice]
+        : [readTtsForm(), currentSettings.tts];
+    const savedValues: Record<string, unknown> = Object.fromEntries(Object.entries(saved));
+    return Object.entries(form).some(([key, value]) => savedValues[key] !== value);
+}
+
+/** Test button (text, or a green check / red cross), status line of one section, from its check, draft and test state. */
+function renderVoiceStatus(service: VoiceService): void {
+    const check = currentSettings?.voiceReadiness[service];
+    const testing = voiceTesting[service] || (check?.checking === true && !isVoiceDirty(service));
+    const dirty = !testing && isVoiceDirty(service);
+    const ok = !testing && !dirty && check?.ok === true;
+    const failed = !testing && !dirty && check !== undefined && !check.ok;
+    const button = document.querySelector<HTMLButtonElement>(`[data-voice-test="${service}"]`);
+    if (button) {
+        button.dataset.state = testing ? 'testing' : ok ? 'ok' : failed ? 'failed' : '';
+        button.disabled = voiceTesting[service];
+        const title = testing
+            ? 'Testing the connection…'
+            : ok
+              ? 'Connected. Click to test again.'
+              : failed
+                ? `${check?.reason ?? 'Not connected.'}\nClick to test again.`
+                : 'Save this section and test the connection.';
+        button.title = title;
+        button.setAttribute('aria-label', title);
+    }
+    const status = document.getElementById(`voice-status-${service}`);
+    if (!status) {
+        return;
+    }
+    const [state, text] = testing
+        ? ['testing', 'Saving and checking…']
+        : dirty
+          ? ['dirty', 'Unsaved changes. Test saves them; until then the previous settings stay in use.']
+          : ok
+            ? ['ok', 'Connected.']
+            : [check?.checking ? 'testing' : 'error', check?.reason ?? 'Not checked yet.'];
+    status.dataset.state = state;
+    status.textContent = text;
+}
+
+/** Puts typed-but-unsaved values back after a re-render. */
+function restoreVoiceDrafts(): void {
+    for (const [id, value] of voiceDrafts) {
+        const field = document.getElementById(id);
+        if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement) {
+            field.value = value;
+        }
+    }
+    renderVoiceStatus('stt');
+    renderVoiceStatus('tts');
 }
 
 function scrollToSettingsSection(section: string): void {
@@ -143,11 +284,7 @@ function scrollToSettingsSection(section: string): void {
         switchSettingsTab(tab, false);
     }
     requestAnimationFrame(() => {
-        const id = `section-${section}`;
-        const el = document.getElementById(id)
-            ?? (section === 'stt' || section === 'voice' || section === 'tts'
-                ? document.getElementById('section-stt') || document.getElementById('section-voice')
-                : null);
+        const el = document.getElementById(`section-${section}`);
         if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'start' });
             el.classList.add('section-highlight');
@@ -256,7 +393,7 @@ function render(data: SettingsData): void {
     const panels = el('div', 'settings-tab-panels');
     panels.appendChild(buildGeneralTab(data));
     panels.appendChild(buildAuthTab(data));
-    panels.appendChild(buildSttTab(data));
+    panels.appendChild(buildVoiceTab(data));
     panels.appendChild(data.backend === 'omp' ? buildOmpPluginsTab(data) : buildPackagesTab(data));
     panels.appendChild(buildSkillsTab(data));
     panels.appendChild(buildMcpTab(data));
@@ -266,6 +403,7 @@ function render(data: SettingsData): void {
     app.appendChild(container);
     switchSettingsTab(activeTab, false);
     bindEvents();
+    restoreVoiceDrafts();
     renderSkillsSection();
     window.scrollTo(0, scrollY);
     const refocus = typing && document.getElementById(typing.id);
@@ -309,46 +447,67 @@ function buildGeneralTab(data: SettingsData): HTMLElement {
     );
     return buildTabPanel('general', children);
 }
-function buildSttGuideCard(): HTMLElement {
-    const note = el('p', 'stt-guide-note');
-    note.textContent = 'Dictation transcribes microphone audio into the chat input. Set an OpenAI-compatible transcription URL and use Test connection. The mic appears after an HTTP 200 response; Silero VAD splits speech locally.';
+function buildVoiceGuideCard(): HTMLElement {
+    const note = el('p', 'voice-guide-note');
+    note.textContent = 'Speech-to-text powers the chat mic (dictation) and voice mode; text-to-speech gives voice mode its voice. Edits here are drafts: the Test button next to each URL saves its section, even when the check fails, and then shows a green check or a red cross. Until then the previous settings stay in use. Dry run tries the values as typed without saving them.';
     return note;
 }
 
-function buildSttUrlRow(data: SettingsData): HTMLElement {
+/**
+ * A URL field with the section's "Test" button: it saves the section and checks it, then carries a
+ * green check (connected) or a red cross (not; the tooltip says why). Edited again, the mark goes.
+ */
+function buildServiceUrlRow(service: VoiceService, key: string, label: string, value: string, placeholder: string, description: string): HTMLElement {
     const row = el('div', 'setting-row');
-    row.id = 'row-voice-sttUrl';
-    const isConnected = Boolean(data.voice.sttValid);
     row.innerHTML = `
         <div class="setting-label-row">
-            <label for="setting-voice.sttUrl">Speech-to-text URL</label>
-            <span class="stt-status-badge stt-status-badge--valid" id="stt-status-badge" ${isConnected ? '' : 'hidden'}>
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <path d="M13.5 4.5l-7 7L3 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span>Connected (HTTP 200)</span>
-            </span>
+            <label for="setting-${key}">${escHtml(label)}</label>
         </div>
         <div class="setting-input-wrapper">
-            <input type="text" id="setting-voice.sttUrl" class="setting-input" data-key="voice.sttUrl" value="${escHtml(data.voice.sttUrl)}" placeholder="http://127.0.0.1:8010/v1">
-            <button id="btn-test-stt" class="setting-btn secondary stt-test-btn" type="button">Test connection</button>
-            <span class="stt-url-icon ${isConnected ? 'is-valid' : ''}" id="stt-url-check" title="${isConnected ? 'Connected (HTTP 200)' : 'Not connected'}" ${isConnected ? '' : 'hidden'}>
-                <svg width="22" height="22" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                    <circle cx="10" cy="10" r="9" fill="#73c991" fill-opacity="0.18" stroke="#73c991" stroke-width="1.5"/>
-                    <path d="M14 7l-5.5 6L6 10" stroke="#73c991" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <input type="text" id="setting-${key}" class="setting-input" data-key="${key}" value="${escHtml(value)}" placeholder="${escHtml(placeholder)}">
+            <button type="button" class="setting-btn secondary voice-test-btn" data-voice-test="${service}">
+                <span>Test</span>
+                <svg class="voice-test-ok" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M13.5 4.5l-7 7L3 8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-            </span>
+                <svg class="voice-test-failed" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+                </svg>
+            </button>
         </div>
-        <p class="setting-description">OpenAI-compatible API base URL, such as <code>http://127.0.0.1:8010/v1</code>. Only a successful manual test saves the URL and shows a green check.</p>
+        <p class="setting-description">${escHtml(description)}</p>
     `;
     return row;
 }
 
-function buildSttTab(data: SettingsData): HTMLElement {
-    return buildTabPanel('stt', [
-        buildSttGuideCard(),
-        buildSection('Speech-to-Text (STT)', [
-            buildSttUrlRow(data),
+/** Dry run (tries the typed values unsaved) and the section's status line. */
+function buildVoiceActions(service: VoiceService): HTMLElement {
+    const row = el('div', 'setting-row voice-actions');
+    row.innerHTML = `
+        <div class="voice-actions-buttons">
+            <button type="button" class="setting-btn secondary" data-voice-dry-run="${service}">Dry run…</button>
+        </div>
+        <p class="voice-status" id="voice-status-${service}" role="status"></p>
+        <p class="setting-description">${service === 'stt'
+            ? 'Dry run records one sentence from your microphone and shows what the service transcribed.'
+            : 'Dry run synthesizes a sentence you type and gives you the audio to play.'}</p>
+    `;
+    return row;
+}
+
+/** A section whose fields are drafts until its Test button saves them. */
+function buildDraftSection(service: VoiceService, title: string, children: HTMLElement[]): HTMLElement {
+    const section = buildSection(title, [...children, buildVoiceActions(service)], service);
+    section.dataset.draft = service;
+    return section;
+}
+
+function buildVoiceTab(data: SettingsData): HTMLElement {
+    return buildTabPanel('voice', [
+        buildVoiceGuideCard(),
+        buildDraftSection('stt', 'Speech-to-Text (STT)', [
+            buildServiceUrlRow('stt', 'voice.sttUrl', 'Speech-to-text URL', data.voice.sttUrl, 'http://127.0.0.1:8010/v1',
+                'OpenAI-compatible API base URL; /audio/transcriptions is appended. Checked with GET /models: the chat mic works only when it answers.'),
             buildTextInput('voice.sttModel', 'Model', data.voice.sttModel,
                 'Transcription model id. Empty uses the first model listed at /models.',
                 'first model at /models'),
@@ -359,7 +518,24 @@ function buildSttTab(data: SettingsData): HTMLElement {
                 'Silero VAD speech probability (0.1–0.95). Lower it (e.g. 0.35) if quiet speech is missed; raise it if background noise gets transcribed.'),
             buildNumberInput('voice.vadStopSecs', 'Pause to end an utterance (s)', data.voice.vadStopSecs, 0.2, 3, 0.1,
                 'Each utterance is transcribed as soon as this much silence follows it, so text appears while you keep talking.'),
-        ], 'stt'),
+        ]),
+        buildDraftSection('tts', 'Text-to-Speech (TTS)', [
+            buildSelect('voiceAgent.tts.provider', 'Provider', data.tts.provider, [
+                { value: 'openai', label: 'OpenAI-compatible' },
+                { value: 'chatterbox', label: 'chatterbox-tts' },
+                { value: 'kokoro', label: 'Kokoro-FastAPI' },
+            ], 'Decides how the language is sent: chatterbox gets zh/en per sentence, Kokoro gets Chinese runs as lang_code z, OpenAI-compatible gets none.'),
+            buildServiceUrlRow('tts', 'voiceAgent.tts.url', 'Text-to-speech URL', data.tts.url, 'http://127.0.0.1:8881/v1',
+                'OpenAI-compatible base URL; /audio/speech is appended. Checked with GET /models, which must list the model below. Voice mode needs it.'),
+            buildTextInput('voiceAgent.tts.model', 'Model', data.tts.model,
+                'Empty uses the provider default: chatterbox-multilingual, kokoro, or tts-1.',
+                'provider default'),
+            buildTextInput('voiceAgent.tts.voice', 'Voice', data.tts.voice,
+                'Empty uses the provider default: default (chatterbox), af_sarah (Kokoro), or alloy.',
+                'provider default'),
+            buildNumberInput('voiceAgent.tts.speed', 'Speed', data.tts.speed, 0.5, 2, 0.1,
+                'Speaking speed (0.5–2). Takes effect when voice mode starts.'),
+        ]),
     ]);
 }
 
@@ -1039,17 +1215,6 @@ function buildNumberInput(key: string, label: string, value: number, min: number
     return row;
 }
 
-function buildSttTestRow(): HTMLElement {
-    const row = el('div', 'setting-row');
-    row.innerHTML = `
-        <div class="api-key-actions">
-            <button class="setting-btn secondary" id="btn-test-stt" type="button">Test connection</button>
-        </div>
-        <p class="setting-description">Toggle recording with the mic button in the chat input or <kbd>Ctrl+Alt+M</kbd>. Audio is captured with <code>arecord</code>, <code>parecord</code> or SoX <code>rec</code>; Silero VAD splits it into utterances locally.</p>
-    `;
-    return row;
-}
-
 function buildTextarea(key: string, label: string, value: string, description: string): HTMLElement {
     const row = el('div', 'setting-row');
     row.innerHTML = `
@@ -1221,6 +1386,8 @@ function bindEvents(): void {
     });
 
     document.querySelectorAll('.setting-select[data-key]').forEach((select) => {
+        // Voice sections save only through their Test button.
+        if (select.closest('[data-draft]')) return;
         select.addEventListener('change', () => {
             const key = (select as HTMLSelectElement).dataset.key!;
             vscode.postMessage({ type: 'updateSetting', key, value: (select as HTMLSelectElement).value });
@@ -1229,7 +1396,7 @@ function bindEvents(): void {
 
     // Save text inputs on 'change' (blur / Enter) to prevent re-rendering and flickering while typing
     document.querySelectorAll('.setting-input[data-key]').forEach((input) => {
-        if ((input as HTMLInputElement).dataset.key === 'voice.sttUrl') return;
+        if (input.closest('[data-draft]')) return;
         input.addEventListener('change', () => {
             const field = input as HTMLInputElement;
             const key = field.dataset.key!;
@@ -1246,22 +1413,39 @@ function bindEvents(): void {
         });
     });
 
-    // When typing a new STT URL, hide the previous checkmark until tested
-    const sttUrlField = document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null;
-    sttUrlField?.addEventListener('input', () => {
-        applySttValidity(false);
+    // Voice sections: edits stay drafts (kept across re-renders) until the section's Test saves them.
+    document.querySelectorAll<HTMLElement>('[data-draft] [data-key]').forEach((field) => {
+        const service = voiceServiceOf(field.closest<HTMLElement>('[data-draft]')?.dataset.draft);
+        if (!service || !(field instanceof HTMLInputElement || field instanceof HTMLSelectElement)) return;
+        const keep = () => {
+            voiceDrafts.set(field.id, field.value);
+            renderVoiceStatus(service);
+        };
+        field.addEventListener('input', keep);
+        field.addEventListener('change', keep);
     });
 
-    document.getElementById('btn-test-stt')?.addEventListener('click', () => {
-        if (pendingSttUrl !== null) return;
-        const btn = document.getElementById('btn-test-stt') as HTMLButtonElement | null;
-        const field = document.getElementById('setting-voice.sttUrl') as HTMLInputElement | null;
-        pendingSttUrl = field?.value.trim() ?? '';
-        if (btn) {
-            btn.disabled = true;
-            btn.textContent = 'Testing...';
-        }
-        vscode.postMessage({ type: 'testStt', url: pendingSttUrl });
+    document.querySelectorAll<HTMLButtonElement>('[data-voice-test]').forEach((btn) => {
+        // Keep focus (and the caret) in the field being edited: Ctrl+Z right after a Test still undoes it.
+        btn.addEventListener('mousedown', (e) => e.preventDefault());
+        btn.addEventListener('click', () => {
+            const service = voiceServiceOf(btn.dataset.voiceTest);
+            if (!service || voiceTesting[service]) return;
+            voiceTesting[service] = true;
+            renderVoiceStatus(service);
+            vscode.postMessage(service === 'stt' ? { type: 'testStt', settings: readSttForm() } : { type: 'testTts', settings: readTtsForm() });
+        });
+    });
+
+    document.querySelectorAll<HTMLButtonElement>('[data-voice-dry-run]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const post = (message: SettingsClientMessage) => vscode.postMessage(message);
+            if (btn.dataset.voiceDryRun === 'stt') {
+                openSttDryRun(readSttForm(), post);
+            } else {
+                openTtsDryRun(readTtsForm(), post);
+            }
+        });
     });
 
     document.querySelectorAll('input[type="checkbox"][data-key]').forEach((cb) => {

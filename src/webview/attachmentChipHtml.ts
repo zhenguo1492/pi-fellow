@@ -23,36 +23,26 @@ function fileExtension(name: string): string {
     return name.slice(i + 1).toLowerCase();
 }
 
+/**
+ * Compact composer chip shown beside the editor-context chip. Images preview on click
+ * (see the composer preview panel in main.ts); other files open in the editor.
+ */
 export function renderComposerAttachmentChip(
     a: PendingAttachmentPreview,
+    active: boolean,
     escHtml: (s: string) => string,
     escAttr: (s: string) => string,
 ): string {
-    const ext = fileExtension(a.displayName);
-    let iconHtml: string;
-    if (a.isImage && a.previewDataUrl) {
-        iconHtml = `<img class="attachment-thumb" src="${escAttr(a.previewDataUrl)}" alt="">`;
-    } else if (a.isImage) {
-        iconHtml = `<span class="attachment-chip-icon attachment-chip-icon--image">${CHIP_IMAGE_ICON}</span>`;
-    } else {
-        iconHtml = `<span class="attachment-chip-icon attachment-chip-icon--file">${CHIP_FILE_ICON}</span>`;
-    }
-
-    const extLabel = ext
-        ? `<span class="attachment-ext">${escHtml(ext)}</span>`
-        : `<span class="attachment-ext attachment-ext--muted">file</span>`;
-
-    const pathAttr = a.absolutePath
-        ? ` data-filepath="${escAttr(a.absolutePath)}"`
-        : '';
-    const openable = a.absolutePath ? ' attachment-chip--openable' : '';
-
-    return `<div class="attachment-chip${openable}" data-id="${escAttr(a.id)}"${pathAttr} role="${a.absolutePath ? 'button' : 'group'}" tabindex="${a.absolutePath ? '0' : '-1'}" title="${escAttr(a.absolutePath ? `Open ${a.displayName}` : a.displayName)}">
-        ${iconHtml}
-        <span class="attachment-chip-text">
-            <span class="attachment-name">${escHtml(a.displayName)}</span>
-            ${extLabel}
-        </span>
+    const kind = a.isImage ? 'image' : 'file';
+    const clickable = a.isImage || Boolean(a.absolutePath);
+    const title = a.isImage
+        ? `Click to preview ${a.displayName}`
+        : a.absolutePath
+          ? `Open ${a.displayName}`
+          : a.displayName;
+    return `<div class="attachment-chip${clickable ? ' attachment-chip--openable' : ''}${active ? ' attachment-chip--active' : ''}" data-id="${escAttr(a.id)}" role="${clickable ? 'button' : 'group'}" tabindex="${clickable ? '0' : '-1'}"${a.isImage ? ` aria-pressed="${active}"` : ''} title="${escAttr(title)}">
+        <span class="attachment-chip-glyph attachment-chip-glyph--${kind}">${a.isImage ? CHIP_IMAGE_ICON : CHIP_FILE_ICON}</span>
+        <span class="attachment-name">${escHtml(a.displayName)}</span>
         <button type="button" class="attachment-remove" data-id="${escAttr(a.id)}" title="Remove" aria-label="Remove ${escAttr(a.displayName)}">${CHIP_CLOSE_ICON}</button>
     </div>`;
 }
