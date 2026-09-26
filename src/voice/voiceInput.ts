@@ -82,7 +82,7 @@ export class VoiceInput implements vscode.Disposable {
                 {
                     status: (status) => this.onStatus(session, status),
                     text: (text) => this.post({ type: 'dictationText', text }),
-                    level: (level, bands) => this.post({ type: 'dictationLevel', level, bands }),
+                    level: (level, wave) => this.post({ type: 'dictationLevel', level, wave }),
                     error: (message) => this.fail(message),
                 },
                 // Stop, then transcribe: the mic spins until the text lands.

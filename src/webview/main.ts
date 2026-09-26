@@ -56,7 +56,7 @@ import {
     voicePlaceholder,
     voiceTargetHtml,
 } from './voiceBar';
-import { pushSpectrum } from './voiceWave';
+import { pushWave } from './voiceWave';
 
 import { vscode } from './vscodeApi';
 const iconsBaseUri = document.getElementById('app')?.dataset.iconsUri ?? '';
@@ -231,7 +231,7 @@ function handleMessage(msg: ServerMessage): void {
             updateInputArea();
             break;
         case 'voiceLevel':
-            pushSpectrum(msg.source, msg.bands);
+            pushWave(msg.source, msg.wave);
             break;
         case 'agentEvent':
             handleAgentEvent(msg.event);
@@ -297,7 +297,7 @@ function handleMessage(msg: ServerMessage): void {
             insertDictatedText(msg.text);
             break;
         case 'dictationLevel':
-            pushSpectrum('user', msg.bands);
+            pushWave('user', msg.wave);
             break;
         case 'toast':
             showToast(msg.message, msg.variant === 'error' ? 'error' : 'info');

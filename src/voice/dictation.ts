@@ -21,8 +21,8 @@ import type { SttClient } from './stt';
 export interface DictationEvents {
     status(status: DictationStatus): void;
     text(text: string): void;
-    /** Microphone level 0..1 and its spectrum ({@link spectrumBands}), ~16 times a second while recording. */
-    level(level: number, bands: number[]): void;
+    /** Microphone level 0..1 and its waveform ({@link wavePoints}), ~16 times a second while recording. */
+    level(level: number, wave: number[]): void;
     error(message: string): void;
 }
 
@@ -84,7 +84,7 @@ export class DictationSession {
         private readonly when: TranscribeWhen,
     ) {
         this.segmenter = new SpeechSegmenter(vadParams, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE);
-        this.level = new MicLevelMeter((level, bands) => this.events.level(level, bands), VAD_SAMPLE_RATE);
+        this.level = new MicLevelMeter((level, wave) => this.events.level(level, wave));
     }
 
     get isRecording(): boolean {

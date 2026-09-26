@@ -1914,8 +1914,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._post({ type: 'voiceStatus', status });
     }
 
-    postVoiceLevel(level: number, source: VoiceLevelSource, bands?: number[]): void {
-        this._post({ type: 'voiceLevel', level, source, bands });
+    postVoiceLevel(level: number, source: VoiceLevelSource, wave?: number[]): void {
+        this._post({ type: 'voiceLevel', level, source, wave });
     }
 
     /** Attach local paths (Explorer tree drop or legacy webview path). */

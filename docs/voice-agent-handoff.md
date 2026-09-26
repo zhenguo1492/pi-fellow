@@ -78,7 +78,7 @@
 | `src/pi/piRpcBridge.ts`、`src/pi/rpcTypes.ts` | 新增 `setHostTools`、`onExit`、`RpcHostToolDefinition` |
 | `src/extension.ts` | 注册命令，把会话视图接给语音（`chat: sidebarProvider`） |
 | `src/voice/voiceInput.ts`、`src/webview/dictation.ts`、`src/shared/protocol.ts` | 听写和语音模式互斥：`VoiceInput.setBlocked`；语音模式开着时输入框的麦克风显示语音智能体麦克风的电平、点击静音 |
-| `src/voice/micLevel.ts`（新增）、`src/voice/dictation.ts` | 麦克风电平（dBFS → 0..1、峰值保持）抽成共用的 `MicLevelMeter`，听写和语音模式共用；每次上报还带这 64 ms 的频谱（`spectrumBands`：20 个梅尔频带的能量 0..1，机器人回复的频谱也用它），输入框顶栏的频谱条（`src/webview/voiceWave.ts`）按它逐帧平滑绘制 |
+| `src/voice/micLevel.ts`（新增）、`src/voice/dictation.ts` | 麦克风电平（dBFS → 0..1、峰值保持）抽成共用的 `MicLevelMeter`，听写和语音模式共用；每次上报还带这 64 ms 的真实波形（`wavePoints`：160 个带符号峰值，固定增益，机器人回复的波形也用它），输入框顶栏的示波器线（`src/webview/voiceWave.ts`）照原样绘制，报告之间只做短交叉淡入 |
 | `src/shared/voiceViewProtocol.ts`（新增） | Bot 视图的消息和快照类型，以及会话用的 `VoiceStatus`、`VoiceAgentAction` |
 | `src/webview/voiceBar.ts`（新增） | 输入框上方的机器人状态条，和输入框发给语音智能体还是 omp 的判断（“To worker” 勾选框） |
 | `src/webview/voicePanel.ts`、`src/webview/styles/voice.css`（新增） | Bot 视图的前端：引擎、上下文、token 明细、卡片、对话流；`src/webview/voiceView.ts` 是入口（`out/webview/voiceView.js`，`esbuild.js`） |

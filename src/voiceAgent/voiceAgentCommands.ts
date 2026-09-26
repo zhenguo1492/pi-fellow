@@ -44,8 +44,8 @@ const SESSION_ENTRIES = 300;
 /** The chat's voice controls: the robot status line over the composer and the composer mic. */
 export interface VoiceChatControls {
     setVoiceStatus(status: VoiceStatus): void;
-    /** Voice mode's level 0..1 and spectrum, the microphone's or the bot's: the spectrum in the voice bar. */
-    postVoiceLevel(level: number, source: VoiceLevelSource, bands?: number[]): void;
+    /** Voice mode's level 0..1 and waveform, the microphone's or the bot's: the wave in the voice bar. */
+    postVoiceLevel(level: number, source: VoiceLevelSource, wave?: number[]): void;
     readonly onVoiceAction: vscode.Event<VoiceAgentAction>;
 }
 
@@ -391,8 +391,8 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 transcript: userListener,
                 openExternal: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
                 onPhase: (next) => setPhase(next),
-                onLevel: (level, bands) => chat.postVoiceLevel(level, 'user', bands),
-                onBotLevel: (level, bands) => chat.postVoiceLevel(level, 'bot', bands),
+                onLevel: (level, wave) => chat.postVoiceLevel(level, 'user', wave),
+                onBotLevel: (level, wave) => chat.postVoiceLevel(level, 'bot', wave),
                 onMetrics: (turnId, metrics) => store.metrics(turnId, metrics),
                 onAudio: (event) => store.audio(event),
                 onAnchors: (anchors) => cursor.point(anchors),

@@ -522,8 +522,8 @@ export type ServerMessage =
     | { type: 'dictationStatus'; status: DictationStatus }
     /** Transcribed utterance to insert at the composer caret. */
     | { type: 'dictationText'; text: string }
-    /** Microphone level 0..1 while recording, with its spectrum (as in `voiceLevel`). */
-    | { type: 'dictationLevel'; level: number; bands?: number[] }
+    /** Microphone level 0..1 while recording, with its waveform (as in `voiceLevel`). */
+    | { type: 'dictationLevel'; level: number; wave?: number[] }
     | { type: 'toast'; message: string; variant?: 'info' | 'error' }
     | {
           type: 'workspaceFiles';
@@ -552,10 +552,10 @@ export type ServerMessage =
     | { type: 'voiceStatus'; status: VoiceStatus }
     /**
      * Voice mode, ~16 per second: the microphone's level (0..1) while it listens, the bot's while a
-     * reply plays, with the spectrum of that moment: energy 0..1 per mel band, lowest first
-     * (src/voice/micLevel.ts `spectrumBands`). Absent bands mean silence.
+     * reply plays, with the real waveform of that moment: `WAVE_POINTS` samples -1..1 of the
+     * latest 64 ms, oldest first (src/voice/micLevel.ts `wavePoints`). Absent means silence.
      */
-    | { type: 'voiceLevel'; level: number; source: VoiceLevelSource; bands?: number[] };
+    | { type: 'voiceLevel'; level: number; source: VoiceLevelSource; wave?: number[] };
 
 /** Whose sound a voice level measures: the user's microphone or the bot's reply. */
 export type VoiceLevelSource = 'user' | 'bot';

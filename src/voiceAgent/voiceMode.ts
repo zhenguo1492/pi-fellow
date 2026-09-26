@@ -15,7 +15,7 @@ import { findChrome, launchHiddenChrome, startBrowserAudio, type BrowserAudio, t
 import { TtsClient, type Pcm, type TtsConfig } from './tts';
 import type { ProactiveTurnHooks, VoiceAgent, VoiceTurnListener } from './voiceAgent';
 import { SileroVad, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE } from '../voice/sileroVad';
-import { MicLevelMeter, frameDb, spectrumBands } from '../voice/micLevel';
+import { MicLevelMeter, frameDb, wavePoints } from '../voice/micLevel';
 import { SpeechSegmenter } from '../voice/speechSegmenter';
 import { SttClient, listSttModels, type SttConfig } from '../voice/stt';
 
@@ -40,10 +40,10 @@ export interface VoiceModeOptions {
     /** No Chromium browser found: open the audio page in the default browser instead. */
     openExternal(url: string): void;
     onPhase(phase: Phase): void;
-    /** Microphone level 0..1 and its spectrum (`spectrumBands`), ~16 per second while listening. */
-    onLevel?(level: number, bands?: number[]): void;
-    /** Level 0..1 and spectrum of the reply being played, ~16 per second while a sentence plays; 0 and none when it stops. */
-    onBotLevel?(level: number, bands?: number[]): void;
+    /** Microphone level 0..1 and its waveform (`wavePoints`), ~16 per second while listening. */
+    onLevel?(level: number, wave?: number[]): void;
+    /** Level 0..1 and waveform of the reply being played, ~16 per second while a sentence plays; 0 and none when it stops. */
+    onBotLevel?(level: number, wave?: number[]): void;
     /**
      * Latency of reply `turnId`, user or proactive, once its audio is over or it is cut off (then
      * before its `cut` audio event).
@@ -151,11 +151,11 @@ export class VoiceMode {
     ) {
         this._state = initialState(_options.active);
         this._stt = new SttClient(_options.stt);
-        this._speaker = new Speaker(new TtsClient(_options.tts), _audio, (ev) => this._dispatch(ev), _options.log, (level, bands) =>
-            _options.onBotLevel?.(level, bands),
+        this._speaker = new Speaker(new TtsClient(_options.tts), _audio, (ev) => this._dispatch(ev), _options.log, (level, wave) =>
+            _options.onBotLevel?.(level, wave),
         );
         this._segmenter = this._newSegmenter();
-        this._level = new MicLevelMeter((level, bands) => _options.onLevel?.(level, bands), VAD_SAMPLE_RATE);
+        this._level = new MicLevelMeter((level, wave) => _options.onLevel?.(level, wave));
     }
 
     /** Checks STT, loads the VAD, opens the audio page and waits until it is connected. */
@@ -614,20 +614,20 @@ function concatFrames(frames: Int16Array[]): Int16Array {
     return pcm;
 }
 
-/** Level (0..1) and spectrum of each {@link BOT_LEVEL_MS} of a clip: what the voice bar shows as it plays. */
-function speechLevels(pcm: Pcm): { level: number; bands: number[] }[] {
+/** Level (0..1) and waveform of each {@link BOT_LEVEL_MS} of a clip: what the voice bar shows as it plays. */
+function speechLevels(pcm: Pcm): { level: number; wave: number[] }[] {
     const window = Math.max(1, Math.round((pcm.rate * BOT_LEVEL_MS) / 1000));
     const samples = new Int16Array(pcm.data.length >> 1);
     for (let i = 0; i < samples.length; i++) {
         samples[i] = pcm.data.readInt16LE(i * 2);
     }
-    const out: { level: number; bands: number[] }[] = [];
+    const out: { level: number; wave: number[] }[] = [];
     for (let start = 0; start < samples.length; start += window) {
         const end = Math.min(samples.length, start + window);
         const db = frameDb(samples.subarray(start, end));
         out.push({
             level: Math.min(1, Math.max(0, (db - BOT_FLOOR_DB) / (BOT_CEIL_DB - BOT_FLOOR_DB))),
-            bands: spectrumBands(samples, start, end, pcm.rate, BOT_CEIL_DB),
+            wave: wavePoints(samples, start, end, BOT_CEIL_DB),
         });
     }
     return out;
@@ -666,7 +666,7 @@ class Speaker {
         private readonly _audio: BrowserAudio,
         private readonly _dispatch: (ev: ConvEvent) => void,
         private readonly _log: (line: string) => void,
-        private readonly _onLevel: (level: number, bands?: number[]) => void,
+        private readonly _onLevel: (level: number, wave?: number[]) => void,
     ) {}
 
     enqueue(signal: AbortSignal, turnId: number, text: string, onPlaying?: () => void): void {
@@ -767,8 +767,8 @@ class Speaker {
                 this._meterStop();
                 return;
             }
-            const { level, bands } = windows[Math.max(0, i)];
-            this._onLevel(level, bands);
+            const { level, wave } = windows[Math.max(0, i)];
+            this._onLevel(level, wave);
         }, BOT_LEVEL_MS);
         this._meter = { clipId, timer };
     }
