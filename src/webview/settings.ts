@@ -6,7 +6,6 @@ import type {
     PiAgentConfigData,
     McpSettingsSnapshot,
     McpServerSummary,
-    McpScopeId,
     AgentBackend,
     VoiceSettings,
 } from '../shared/protocol';
@@ -902,7 +901,7 @@ function renderMcpSection(): void {
             list.appendChild(buildMcpServerCard(server));
         }
     }
-    bindMcpHandlers();
+    bindMcpServerCards();
 }
 
 function buildExtensionOnlySections(data: SettingsData): HTMLElement {
@@ -1561,15 +1560,15 @@ function bindEvents(): void {
         vscode.postMessage({ type: 'openExternalUrl', url: 'https://pi.dev/packages' });
     });
 
-    bindMcpHandlers();
-    bindApiKeyHandlers();
-}
-
-function bindMcpHandlers(): void {
     document.getElementById('btn-test-all-mcp')?.addEventListener('click', () => {
         vscode.postMessage({ type: 'testAllMcpServers' });
     });
+    bindMcpServerCards();
+    bindApiKeyHandlers();
+}
 
+/** The server cards' controls; renderMcpSection rebuilds only the cards, so it binds only these again. */
+function bindMcpServerCards(): void {
     document.querySelectorAll('[data-mcp-test]').forEach((btn) => {
         btn.addEventListener('click', () => {
             const name = (btn as HTMLButtonElement).dataset.mcpTest!;
@@ -1581,7 +1580,7 @@ function bindMcpHandlers(): void {
         input.addEventListener('change', (e) => {
             const el = e.target as HTMLInputElement;
             const serverName = el.dataset.mcpToggle!;
-            const scope = el.dataset.mcpScope as McpScopeId;
+            const scope = el.dataset.mcpScope as McpServerSummary['scope'];
             if (scope === 'import') {
                 showToast('Imported servers must be edited in the source MCP file', 'error');
                 el.checked = !el.checked;

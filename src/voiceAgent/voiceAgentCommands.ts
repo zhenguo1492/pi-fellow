@@ -96,6 +96,8 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     let agent: VoiceAgent | undefined;
     let voiceMode: VoiceMode | undefined;
     let starting = false;
+    /** Bumped by every start and stop: a start that finishes after a stop must not turn voice mode on. */
+    let startGeneration = 0;
     let phase: Phase | undefined;
     // Shared by every window with voice mode on: only the one focused last listens and speaks.
     const activeWindow = new ActiveVoiceWindow(path.join(context.globalStorageUri.fsPath, 'voice-windows'));
@@ -359,6 +361,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         const stoppingAgent = agent;
         voiceMode = undefined;
         agent = undefined;
+        startGeneration++;
         activeWindow.leave();
         setPhase(undefined);
         store.endRun();
@@ -381,6 +384,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             return;
         }
         starting = true;
+        const generation = ++startGeneration;
         setPhase(undefined);
         try {
             const voiceAgent = getAgent();
@@ -388,7 +392,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             activeWindow.join();
             const voice = readVoiceSettings();
             const config = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent');
-            voiceMode = await VoiceMode.start({
+            const mode = await VoiceMode.start({
                 agent: voiceAgent,
                 vad: {
                     modelPath: vscode.Uri.joinPath(context.extensionUri, 'media', 'vad', 'silero_vad.onnx').fsPath,
@@ -402,7 +406,11 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 active: activeWindow.active,
                 transcript: userListener,
                 openExternal: (url) => void vscode.env.openExternal(vscode.Uri.parse(url)),
-                onPhase: (next) => setPhase(next),
+                onPhase: (next) => {
+                    if (generation === startGeneration) {
+                        setPhase(next);
+                    }
+                },
                 onLevel: (level, wave) => chat.postVoiceLevel(level, 'user', wave),
                 onBotLevel: (level, wave) => chat.postVoiceLevel(level, 'bot', wave),
                 onMetrics: (turnId, metrics) => store.metrics(turnId, metrics),
@@ -410,6 +418,13 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 onAnchors: (anchors) => cursor.point(anchors),
                 log,
             });
+            if (generation !== startGeneration) {
+                // Stopped while starting (Stop, or the window closing): its agent is already stopped.
+                await mode.stop();
+                log('Voice mode was stopped while it started.');
+                return;
+            }
+            voiceMode = mode;
             // Focus may have moved to another voice window while this one was starting.
             voiceMode.setActive(activeWindow.active);
             log('Voice mode on: talk any time; speaking over a reply cuts it off.');

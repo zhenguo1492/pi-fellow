@@ -45,6 +45,14 @@ export function initExtensionUiHost(): void {
             respond({ id: activeRequest.id, value });
         }
     });
+    // The chat was rebuilt (first render, tab switch) with an empty host. The question still waiting
+    // must show again: its keyboard shortcuts stay live, and every later request queues behind it.
+    if (activeRequest) {
+        host.style.display = 'block';
+        host.innerHTML = renderRequest(activeRequest);
+    } else {
+        drainExtensionUiQueue();
+    }
 }
 
 export function showExtensionUiRequest(request: ExtensionUiRequestPayload): void {
@@ -64,15 +72,12 @@ export function dismissExtensionUi(id: string): void {
 }
 
 function drainExtensionUiQueue(): void {
-    if (activeRequest || pendingQueue.length === 0) {
+    const host = document.getElementById('extension-ui-host');
+    // No chat drawn yet: the request waits in the queue for initExtensionUiHost.
+    if (activeRequest || pendingQueue.length === 0 || !host) {
         return;
     }
     activeRequest = pendingQueue.shift()!;
-    const host = document.getElementById('extension-ui-host');
-    if (!host) {
-        activeRequest = null;
-        return;
-    }
     host.style.display = 'block';
     host.innerHTML = renderRequest(activeRequest);
     bindExtensionUiKeyboard(activeRequest);
