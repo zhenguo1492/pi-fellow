@@ -89,6 +89,7 @@ import {
 } from '../shared/voiceViewProtocol';
 import { routeComposerSend } from './composerRoute';
 import { SessionListCache, type SessionListScope } from './sidebarSessionListCache';
+import { TabTuis } from './sidebarTui';
 import { VoiceOriginTracker } from './voiceOrigin';
 
 interface MessageMeta {
@@ -296,15 +297,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private _modelStatus?: ModelStatusTracker;
     /** All tabs show the CLI's TUI (one pseudo-terminal per tab) instead of the chat UI. */
     private _tuiMode = false;
-    private readonly _tuiProcesses = new Map<string, TuiProcess>();
-    private readonly _tuiStarting = new Set<string>();
-    /** PTY output coalesced per tab so streaming does not post one message per tiny chunk. */
-    private readonly _tuiOutput = new Map<string, string>();
-    private _tuiFlushTimer: NodeJS.Timeout | undefined;
-    /** Exit codes of TUIs that ended and were not restarted (re-sent when a hidden view returns). */
-    private readonly _tuiExitCodes = new Map<string, number>();
-    /** Keys to type into a tab's TUI once it starts (the banner's /login or /logout). */
-    private readonly _pendingTuiInput = new Map<string, string>();
+    private readonly _tuis = new TabTuis({
+        start: (options) => TuiProcess.start(options),
+        post: (message) => this._post(message),
+        log: (line) => this._outputChannel.appendLine(line),
+        wanted: (tabId) => this._tuiMode && this._tabs.has(tabId),
+    });
     /** omp /login or /logout waiting on the chat banner that switches to the TUI to run it. */
     private _tuiAuthPrompt: TuiAuthCommand | undefined;
     /** Include the active editor's file/selection with each prompt (composer chip toggle). */
@@ -591,7 +589,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     }
 
     private async _discardTab(tab: TabState): Promise<void> {
-        await this._stopTui(tab.id);
+        await this._tuis.stop(tab.id);
         this._unsubscribeTab(tab.id);
         tab.diffManager.dispose();
         tab.checkpointManager.dispose();
@@ -689,8 +687,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             if (!webviewView.visible) return;
             this._view = webviewView;
             this._refreshVisibleWebview();
-            // Hidden (retained) webviews drop every message: repaint terminals from the mirrors.
-            this._resyncTuiViews();
+            if (this._tuiMode) {
+                // Hidden (retained) webviews drop every message: repaint terminals from the mirrors.
+                this._tuis.resync();
+            }
         });
 
         webviewView.onDidDispose(() => {
@@ -1545,7 +1545,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
      * backend (resume can move it to another project/CLI without touching the idle RPC session).
      */
     private sessionListTarget(tab: TabState): SessionListTarget {
-        const tui = this._tuiMode ? this._tuiProcesses.get(tab.id) : undefined;
+        const tui = this._tuiMode ? this._tuis.get(tab.id) : undefined;
         if (tui) {
             return {
                 cwd: resolvePiWorkspaceCwd(tui.cwd),
@@ -1680,10 +1680,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._currentBackend = targetBackend;
 
         if (this._tuiMode) {
-            await this._stopTui(tab.id);
+            await this._tuis.stop(tab.id);
             tab.name = sessionInfo ? getSessionDisplayTitle(sessionInfo) : DEFAULT_CONVERSATION_TITLE;
             this._updateTabName(tab);
-            await this._startTui(tab.id, 80, 24, sessionPath, targetCwd, targetBackend);
+            await this._startTui(tab.id, 80, 24, { sessionFile: sessionPath, cwd: targetCwd, backend: targetBackend });
             await this.pushStateSync();
             const label = sessionInfo ? getSessionDisplayTitle(sessionInfo) : 'session';
             vscode.window.showInformationMessage(`Resumed session: ${label}`);
@@ -2487,10 +2487,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     await this._startTui(msg.tabId, msg.cols, msg.rows);
                     break;
                 case 'tuiInput':
-                    this._tuiProcesses.get(msg.tabId)?.write(msg.data);
+                    this._tuis.get(msg.tabId)?.write(msg.data);
                     break;
                 case 'tuiResize':
-                    this._tuiProcesses.get(msg.tabId)?.resize(msg.cols, msg.rows);
+                    this._tuis.get(msg.tabId)?.resize(msg.cols, msg.rows);
                     break;
                 case 'openSessionTree':
                     void this.openSessionTree();
@@ -2906,10 +2906,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return;
         }
         // Chat mode has no TUI processes; the toggle below starts this tab's, which types it.
-        this._pendingTuiInput.set(tab.id, `/${command}\r`);
+        this._tuis.typeOnStart(tab.id, `/${command}\r`);
         await this._toggleTuiMode();
         if (!this._tuiMode) {
-            this._pendingTuiInput.delete(tab.id); // refused: a response is streaming
+            this._tuis.cancelTypeOnStart(tab.id); // refused: a response is streaming
         }
     }
 
@@ -2926,8 +2926,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         void this._workspaceState.update(TUI_MODE_STATE_KEY, this._tuiMode);
         void vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.tuiMode', this._tuiMode);
         if (!this._tuiMode) {
-            const tabIds = [...this._tuiProcesses.keys()];
-            await Promise.all(tabIds.map((id) => this._stopTui(id)));
+            const tabIds = await this._tuis.stopAll();
             // The TUIs appended to the tabs' session files; the idle RPC processes hold stale state.
             for (const id of tabIds) {
                 const tab = this._tabs.get(id);
@@ -2945,120 +2944,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this.sendStateSync();
     }
 
-    /** Start (or re-attach to) the tab's TUI once the webview has a sized terminal for it. */
+    /** Start (or re-attach to) the tab's TUI; `resume` replaces a running one with that session's. */
     private async _startTui(
         tabId: string,
         cols: number,
         rows: number,
-        overrideSessionFile?: string,
-        overrideCwd?: string,
-        overrideBackend?: AgentBackend,
+        resume?: { sessionFile: string; cwd: string | undefined; backend: AgentBackend },
     ): Promise<void> {
         const tab = this._tabs.get(tabId);
-        if (!this._tuiMode || !tab || this._tuiStarting.has(tabId)) return;
-        const sessionFile = overrideSessionFile ?? tab.session.session?.sessionFile;
-        const cwd =
-            overrideCwd ??
-            tab.session.session?.cwd ??
-            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-            process.cwd();
-        const backend = overrideBackend ?? tab.session.backend;
-
-        const existing = this._tuiProcesses.get(tabId);
-        if (existing && !existing.exited && !overrideSessionFile) {
-            // New terminal view (webview re-created): size it and replay the full screen.
-            existing.resize(cols, rows);
-            await this._sendTuiSnapshot(tabId);
-            return;
-        }
-        if (existing) {
-            await this._stopTui(tabId);
-        }
-        this._tuiExitCodes.delete(tabId);
-        this._tuiStarting.add(tabId);
-        try {
-            const proc = await TuiProcess.start({
-                cwd,
-                sessionFile,
-                backend,
-                cols,
-                rows,
-                onData: (data) => this._queueTuiOutput(tabId, data),
-                onExit: (exitCode) => {
-                    this._flushTuiOutput();
-                    // Stopped on purpose (mode off, tab closed) → already unregistered, nothing to report.
-                    if (this._tuiProcesses.get(tabId) !== proc) return;
-                    this._tuiProcesses.delete(tabId);
-                    this._tuiExitCodes.set(tabId, exitCode);
-                    this._post({ type: 'tuiExit', tabId, exitCode });
-                },
-            });
-            if (!this._tuiMode || !this._tabs.has(tabId)) {
-                await proc.dispose();
-                return;
-            }
-            this._tuiProcesses.set(tabId, proc);
-            const pending = this._pendingTuiInput.get(tabId);
-            if (pending) {
-                this._pendingTuiInput.delete(tabId);
-                void proc.typeWhenReady(pending);
-            }
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            this._outputChannel.appendLine(`TUI start failed: ${message}`);
-            this._post({ type: 'tuiData', tabId, data: `\r\n\x1b[31mTUI start failed: ${message}\x1b[0m\r\n` });
-        } finally {
-            this._tuiStarting.delete(tabId);
-        }
-    }
-
-    private async _stopTui(tabId: string): Promise<void> {
-        this._tuiExitCodes.delete(tabId);
-        const proc = this._tuiProcesses.get(tabId);
-        if (!proc) return;
-        this._tuiProcesses.delete(tabId);
-        await proc.dispose();
-    }
-
-    /** Replace the tab's terminal view with the TUI's full current screen + scrollback. */
-    private async _sendTuiSnapshot(tabId: string): Promise<void> {
-        const proc = this._tuiProcesses.get(tabId);
-        if (!proc || proc.exited) return;
-        // Queued live output is already in the mirror, so the snapshot supersedes it.
-        this._tuiOutput.delete(tabId);
-        const data = await proc.snapshot();
-        this._post({ type: 'tuiSnapshot', tabId, data });
-    }
-
-    private _resyncTuiViews(): void {
-        if (!this._tuiMode) return;
-        for (const tabId of this._tuiProcesses.keys()) {
-            void this._sendTuiSnapshot(tabId);
-        }
-        for (const [tabId, exitCode] of this._tuiExitCodes) {
-            this._post({ type: 'tuiExit', tabId, exitCode });
-        }
+        if (!this._tuiMode || !tab) return;
+        await this._tuis.start(tabId, {
+            cwd:
+                resume?.cwd ??
+                tab.session.session?.cwd ??
+                vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+                process.cwd(),
+            sessionFile: resume?.sessionFile ?? tab.session.session?.sessionFile,
+            backend: resume?.backend ?? tab.session.backend,
+            cols,
+            rows,
+            replace: resume !== undefined,
+        });
     }
 
     /** Stop every TUI (extension shutdown). */
     async disposeTui(): Promise<void> {
-        await Promise.all([...this._tuiProcesses.keys()].map((id) => this._stopTui(id)));
-    }
-
-    private _queueTuiOutput(tabId: string, data: string): void {
-        this._tuiOutput.set(tabId, (this._tuiOutput.get(tabId) ?? '') + data);
-        this._tuiFlushTimer ??= setTimeout(() => this._flushTuiOutput(), 4);
-    }
-
-    private _flushTuiOutput(): void {
-        if (this._tuiFlushTimer) {
-            clearTimeout(this._tuiFlushTimer);
-            this._tuiFlushTimer = undefined;
-        }
-        for (const [tabId, data] of this._tuiOutput) {
-            this._post({ type: 'tuiData', tabId, data });
-        }
-        this._tuiOutput.clear();
+        await this._tuis.stopAll();
     }
 
     private _findCutoffIndex(messages: any[], rollbackPoint: number): number {
