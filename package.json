@@ -443,6 +443,7 @@
   "scripts": {
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit -p . && tsc -p src/webview",
     "vscode:prepublish": "npm run compile",
     "package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links --allow-missing-repository",
     "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons'",

@@ -66,7 +66,7 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-/** The line's node; `render()` in main.ts wipes #app on tab switches and re-inserts it. */
+/** The line's node; `render()` in chat/layout.ts wipes #app on tab switches and re-inserts it. */
 export const modelStatusEl: HTMLElement = root;
 
 /** Last markup per element, so frequent identical updates do not re-parse (and reset hover/selection). */

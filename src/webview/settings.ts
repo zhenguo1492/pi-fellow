@@ -313,7 +313,7 @@ function buildTabNav(backend: AgentBackend = 'pi'): HTMLElement {
     nav.setAttribute('role', 'tablist');
     nav.setAttribute('aria-label', 'Settings sections');
     for (const tab of SETTINGS_TABS) {
-        const btn = el('button', 'settings-tab-btn');
+        const btn = el('button', 'settings-tab-btn') as HTMLButtonElement;
         btn.type = 'button';
         btn.dataset.tab = tab.id;
         btn.setAttribute('role', 'tab');
@@ -712,12 +712,6 @@ function shortPath(p: string): string {
     return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : p;
 }
 
-function buildOutdatedVersionBanner(version: string): HTMLElement {
-    const row = el('div', 'setting-row pi-config-error');
-    row.innerHTML = `<p class="setting-description"><strong>Old build (v${escHtml(version)}).</strong> Packages UI needs v0.1.6+. Reinstall from <code>npm run package</code> in the extension folder, not an older 0.1.5 VSIX.</p>`;
-    return row;
-}
-
 function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElement {
     const snap = mcpSnapshot ?? data.mcpSnapshot;
     const children: HTMLElement[] = [];
@@ -902,38 +896,6 @@ function renderMcpSection(): void {
         }
     }
     bindMcpServerCards();
-}
-
-function buildExtensionOnlySections(data: SettingsData): HTMLElement {
-    const wrap = el('div', 'extension-only-sections');
-    wrap.appendChild(buildSection('Authentication', [
-        buildAuthActionsRow(),
-        buildAuthIndicator(data.authMethod),
-        buildReadOnlyRow('Credentials file', `${data.piAgentDir}/auth.json`),
-    ]));
-    wrap.appendChild(buildSection('API Connection', [
-        buildSelect('apiProvider', 'Provider', data.apiProvider, [
-            { value: '', label: 'Auto-detect' },
-            { value: 'anthropic', label: 'Anthropic' },
-            { value: 'openai', label: 'OpenAI' },
-            { value: 'google', label: 'Google Gemini' },
-            { value: 'deepseek', label: 'DeepSeek' },
-        ], 'Select which AI provider to use.'),
-        buildApiKeyField(data),
-        buildTextInput('apiBaseUrl', 'API Base URL', data.apiBaseUrl, 'Custom endpoint URL. Leave empty for default.'),
-        buildAuthIndicator(data.authMethod),
-    ]));
-    wrap.appendChild(buildSection('Default Model & Thinking', [
-        buildTextInput('defaultModel', 'Default Model', data.defaultModel, 'Model ID for new sessions.'),
-        buildSelect('thinkingLevel', 'Default Thinking Level', data.thinkingLevel, [
-            { value: 'off', label: 'Off' },
-            { value: 'minimal', label: 'Minimal' },
-            { value: 'low', label: 'Low' },
-            { value: 'medium', label: 'Medium' },
-            { value: 'high', label: 'High' },
-        ], 'Chain-of-thought verbosity.'),
-    ]));
-    return wrap;
 }
 
 function buildFileButtons(backend: AgentBackend = 'pi'): HTMLElement {
@@ -1212,18 +1174,6 @@ function buildNumberInput(key: string, label: string, value: number, min: number
     return row;
 }
 
-function buildTextarea(key: string, label: string, value: string, description: string): HTMLElement {
-    const row = el('div', 'setting-row');
-    row.innerHTML = `
-        <div class="setting-label-row">
-            <label for="setting-${key}">${escHtml(label)}</label>
-        </div>
-        <input type="text" id="setting-${key}" class="setting-input" data-key="${key}" value="${escHtml(value)}" placeholder="e.g. read, grep, bash">
-        <p class="setting-description">${escHtml(description)}</p>
-    `;
-    return row;
-}
-
 function buildToggle(key: string, label: string, value: boolean, description: string): HTMLElement {
     const row = el('div', 'setting-row');
     row.innerHTML = `
@@ -1269,34 +1219,6 @@ function buildReadOnlyRow(label: string, value: string): HTMLElement {
         <div class="setting-label-row"><label>${escHtml(label)}</label></div>
         <p class="setting-readonly"><code>${escHtml(value)}</code></p>
     `;
-    return row;
-}
-
-function buildApiKeyField(data: SettingsData): HTMLElement {
-    const row = el('div', 'setting-row');
-    if (data.apiKeySet) {
-        row.innerHTML = `
-            <div class="setting-label-row">
-                <label>API Key</label>
-                <span class="key-status set">Key stored</span>
-            </div>
-            <div class="api-key-actions">
-                <button class="setting-btn secondary" id="btn-change-key">Change</button>
-                <button class="setting-btn danger" id="btn-clear-key">Remove</button>
-            </div>
-        `;
-    } else {
-        row.innerHTML = `
-            <div class="setting-label-row">
-                <label for="api-key-input">API Key</label>
-                <span class="key-status unset">No key stored</span>
-            </div>
-            <div class="api-key-input-row">
-                <input type="password" id="api-key-input" class="setting-input" placeholder="Enter your API key">
-                <button class="setting-btn primary" id="btn-save-key">Save</button>
-            </div>
-        `;
-    }
     return row;
 }
 
@@ -1692,20 +1614,6 @@ function escHtml(s: string): string {
     const div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
-}
-
-/** Compare dotted versions (0.1.10 > 0.1.6). String compare breaks on patch ≥10. */
-function semverLt(a: string, b: string): boolean {
-    const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
-    const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
-    const len = Math.max(pa.length, pb.length);
-    for (let i = 0; i < len; i++) {
-        const da = pa[i] ?? 0;
-        const db = pb[i] ?? 0;
-        if (da < db) return true;
-        if (da > db) return false;
-    }
-    return false;
 }
 
 vscode.postMessage({ type: 'getSettings' });

@@ -25,7 +25,7 @@ function fileExtension(name: string): string {
 
 /**
  * Compact composer chip shown beside the editor-context chip. Images preview on click
- * (see the composer preview panel in main.ts); other files open in the editor.
+ * (see the composer preview panel in chat/composerChips.ts); other files open in the editor.
  */
 export function renderComposerAttachmentChip(
     a: PendingAttachmentPreview,

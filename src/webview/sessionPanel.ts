@@ -63,7 +63,7 @@ function wirePanel(panel: HTMLElement): void {
         scheduleLoad();
     });
 
-    const listEl = panel.querySelector('#session-panel-list');
+    const listEl = panel.querySelector<HTMLElement>('#session-panel-list');
     listEl?.addEventListener('click', (e) => {
         e.stopPropagation();
         const target = e.target as HTMLElement;
@@ -175,7 +175,7 @@ function wirePanel(panel: HTMLElement): void {
         }
         if (e.key === 'Enter') {
             e.preventDefault();
-            const row = input.closest('.session-panel-item');
+            const row = input.closest<HTMLElement>('.session-panel-item');
             const sessionPath = row?.dataset.sessionPath;
             if (sessionPath) {
                 renamingPath = null;
@@ -292,8 +292,8 @@ function renderList(data: SessionListPayload): void {
         cwdEl.textContent = data.workspaceCwd ? shortenCwd(data.workspaceCwd) : 'No workspace folder';
     }
 
-    const statusEl = panel.querySelector('#session-panel-status');
-    const listEl = panel.querySelector('#session-panel-list');
+    const statusEl = panel.querySelector<HTMLElement>('#session-panel-status');
+    const listEl = panel.querySelector<HTMLElement>('#session-panel-list');
     if (!statusEl || !listEl) {
         return;
     }
@@ -491,7 +491,7 @@ document.addEventListener('keydown', (e) => {
     if (renamingPath || confirmingDeletePath) {
         e.preventDefault();
         cancelPendingActions();
-        const listEl = panelEl?.querySelector('#session-panel-list');
+        const listEl = panelEl?.querySelector<HTMLElement>('#session-panel-list');
         const lastData = listEl?.dataset.lastPayload;
         if (lastData) {
             try {

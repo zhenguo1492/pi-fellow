@@ -58,7 +58,7 @@ function hideDropHint(): void {
 
 /** Drop on the message box only — bind once; reset highlight on dragend. */
 export function bindChatFileDrop(): void {
-    const container = document.querySelector('.input-container');
+    const container = document.querySelector<HTMLElement>('.input-container');
     if (!container || container.hasAttribute(BOUND_ATTR)) {
         return;
     }
