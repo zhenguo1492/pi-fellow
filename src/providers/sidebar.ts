@@ -1,12 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { PiRpcSessionManager } from '../pi/rpcSession';
+import type { PiRpcSessionManager } from '../pi/rpcSession';
 import type { PiChatSession } from '../pi/slashCommands';
 import type {
     AgentBackend,
     ClientMessage,
-    ConnectionStatus,
     ServerMessage,
     SessionInfo,
     TabInfo,
@@ -23,18 +22,15 @@ import {
     resolvePiWorkspaceCwd,
 } from '../pi/piCliPaths';
 import { readFavoriteModels } from '../pi/favoriteModels';
-import type { AgentLayout } from '../pi/agentBackend';
 import { updatePiDefaults } from '../pi/piAgentConfig';
 import { applyPiCliDefaultModel } from '../pi/piCliSync';
 import {
     buildSessionInfoFromFile,
     buildSessionListRows,
     canonicalizeSessionPath,
-    clearSessionInfoCache,
     getSessionDirForCwd,
     getSessionDisplayTitle,
     invalidateSessionInfoPath,
-    listPiSessionsForCwdAsync,
     withVoiceSessions,
     type VoiceSessionSummary,
 } from '../pi/sessionCatalog';
@@ -43,10 +39,6 @@ import { DiffManager } from './diff';
 import { CheckpointManager } from './checkpoint';
 import type { ModelStatusTracker } from './model-status';
 import { openPlanDocument, type PlanDocumentProvider } from './plan-document';
-import { enrichPlanModeFromExtensionChrome } from '../pi/planModeState';
-import { mergePlanWithRpivTodos } from '../pi/planDocumentMerge';
-import { extractRpivTodoTasks, rpivTasksToPlanTodos } from '../pi/rpivTodoSync';
-import { ExtensionUiBridge } from '../pi/extensionUiBridge';
 import {
     composePrompt,
     processFilePaths,
@@ -61,7 +53,6 @@ import {
 } from '../shared/conversationTitle';
 import {
     type PendingAttachment,
-    type QueuedPrompt,
     toPendingAttachment,
     toPendingTextFileAttachment,
     toPreviewList,
@@ -92,16 +83,21 @@ import {
     type VoiceViewHostMessage,
 } from '../shared/voiceViewProtocol';
 import { routeComposerSend } from './composerRoute';
-import { VoiceOriginTracker } from './voiceOrigin';
-
-interface MessageMeta {
-    thinkingDurationSec: number;
-    messageEndTime: number;
-}
-
-interface PendingApproval {
-    resolve: (approved: boolean) => void;
-}
+import { SessionListCache, type SessionListScope } from './sidebarSessionListCache';
+import {
+    applyAgentEvent,
+    claimPlanEditorOpen,
+    idleConnection,
+    makeTabState,
+    nextTabId,
+    resetStreamingMessage,
+    resetTabUiState,
+    startTurn,
+    tabPlanMode,
+    turnCutoffIndex,
+    type TabState,
+} from './sidebarTabState';
+import { TabTuis } from './sidebarTui';
 
 interface PersistedOpenTabs {
     version: 1;
@@ -114,132 +110,8 @@ const TUI_MODE_STATE_KEY = 'oh-my-pi-chater.tuiMode';
 const EDITOR_CONTEXT_STATE_KEY = 'oh-my-pi-chater.includeEditorContext';
 
 /** Session store + folder the resume panel lists for a tab. */
-interface SessionListTarget {
-    cwd: string;
-    layout: AgentLayout;
+interface SessionListTarget extends SessionListScope {
     currentSessionPath: string | undefined;
-}
-
-interface TabState {
-    id: string;
-    name: string;
-    session: PiChatSession;
-    diffManager: DiffManager;
-    checkpointManager: CheckpointManager;
-    turnCounter: number;
-    suspendedMessages: any[];
-    streamingText: string;
-    streamingThinking: string;
-    isThinking: boolean;
-    thinkingStartTime: number;
-    streamingThinkingDuration: number;
-    agentStartTime: number;
-    messageMeta: Map<number, MessageMeta>;
-    voiceOrigins: VoiceOriginTracker;
-    hasNotification: boolean;
-    /** The tab shows the Bot view (the voice agent's conversation) instead of its chat. */
-    botView: boolean;
-    pendingApprovals: Map<string, PendingApproval>;
-    queuedMessages: QueuedPrompt[];
-    steeringMessages: string[];
-    followUpMessages: string[];
-    pendingAttachments: PendingAttachment[];
-    isStreaming: boolean;
-    queueDrainInFlight: boolean;
-    lastPlanEditorHash: string;
-    connectionStatus: ConnectionStatus;
-    planModeOverride?: 'agent' | 'plan';
-    /** Ignore streaming deltas until Pi confirms agent_end (Stop clicked). */
-    abortInFlight: boolean;
-    /** Skip auto-draining the queue (e.g. while interrupt-and-send is in flight). */
-    suppressQueueDrain: boolean;
-}
-
-let tabIdCounter = 0;
-function nextTabId(): string {
-    return `tab-${++tabIdCounter}`;
-}
-
-function hashPlanMarkdown(markdown: string): string {
-    let h = 0;
-    for (let i = 0; i < markdown.length; i++) {
-        h = (h * 31 + markdown.charCodeAt(i)) | 0;
-    }
-    return `${markdown.length}:${h}`;
-}
-
-function makeTabState(
-    id: string,
-    session: PiChatSession,
-    diffManager: DiffManager,
-    checkpointManager: CheckpointManager,
-): TabState {
-    return {
-        id,
-        name: DEFAULT_CONVERSATION_TITLE,
-        session,
-        diffManager,
-        checkpointManager,
-        turnCounter: 0,
-        suspendedMessages: [],
-        streamingText: '',
-        streamingThinking: '',
-        isThinking: false,
-        thinkingStartTime: 0,
-        streamingThinkingDuration: 0,
-        agentStartTime: 0,
-        messageMeta: new Map(),
-        voiceOrigins: new VoiceOriginTracker(),
-        hasNotification: false,
-        botView: false,
-        pendingApprovals: new Map(),
-        queuedMessages: [],
-        steeringMessages: [],
-        followUpMessages: [],
-        pendingAttachments: [],
-        isStreaming: false,
-        queueDrainInFlight: false,
-        lastPlanEditorHash: '',
-        connectionStatus: { phase: 'idle' },
-        abortInFlight: false,
-        suppressQueueDrain: false,
-    };
-}
-
-/** Live thinking/text belong to the assistant message being streamed, not the whole run. */
-function resetStreamingMessage(tab: TabState): void {
-    tab.streamingText = '';
-    tab.streamingThinking = '';
-    tab.isThinking = false;
-    tab.thinkingStartTime = 0;
-    tab.streamingThinkingDuration = 0;
-}
-
-function idleConnection(): ConnectionStatus {
-    return { phase: 'idle' };
-}
-
-function lastAssistantFromMessages(messages: any[] | undefined): any | undefined {
-    if (!messages?.length) {
-        return undefined;
-    }
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i]?.role === 'assistant') {
-            return messages[i];
-        }
-    }
-    return undefined;
-}
-
-function failedStatusFromAssistant(msg: any | undefined): ConnectionStatus | undefined {
-    if (!msg || msg.stopReason !== 'error') {
-        return undefined;
-    }
-    const message =
-        typeof msg.errorMessage === 'string' && msg.errorMessage.trim()
-            ? msg.errorMessage.trim()
-            : 'Request failed';
-    return { phase: 'failed', message };
 }
 
 interface BackendWorkspace {
@@ -285,7 +157,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     private _tabSubscriptions = new Map<string, (() => void)[]>();
     private _planDocument: PlanDocumentProvider;
-    private readonly _extensionUi = new ExtensionUiBridge();
     private readonly _workspaceState: vscode.Memento;
     private _persistTabsTimer: ReturnType<typeof setTimeout> | undefined;
     private _restoringTabs = false;
@@ -295,26 +166,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private readonly _pastedStorageDir: string;
     private _sessionPanelOpen = false;
     private _sessionTreeOpen = false;
-    /** Last listing per `sessionListCacheKey`; shown instantly, then revalidated from disk. */
-    private _sessionListCache = new Map<string, SessionInfo[]>();
-    private readonly _sessionListInFlight = new Map<string, Promise<SessionInfo[]>>();
-    /** Bumped on invalidation so in-flight listings started earlier do not repopulate the cache. */
-    private _sessionListEpoch = 0;
+    private readonly _sessionLists = new SessionListCache();
     private _sessionListGeneration = 0;
     private _sessionPanelQuery = '';
     private _currentBackend: AgentBackend = 'pi';
     private _modelStatus?: ModelStatusTracker;
     /** All tabs show the CLI's TUI (one pseudo-terminal per tab) instead of the chat UI. */
     private _tuiMode = false;
-    private readonly _tuiProcesses = new Map<string, TuiProcess>();
-    private readonly _tuiStarting = new Set<string>();
-    /** PTY output coalesced per tab so streaming does not post one message per tiny chunk. */
-    private readonly _tuiOutput = new Map<string, string>();
-    private _tuiFlushTimer: NodeJS.Timeout | undefined;
-    /** Exit codes of TUIs that ended and were not restarted (re-sent when a hidden view returns). */
-    private readonly _tuiExitCodes = new Map<string, number>();
-    /** Keys to type into a tab's TUI once it starts (the banner's /login or /logout). */
-    private readonly _pendingTuiInput = new Map<string, string>();
+    private readonly _tuis = new TabTuis({
+        start: (options) => TuiProcess.start(options),
+        post: (message) => this._post(message),
+        log: (line) => this._outputChannel.appendLine(line),
+        wanted: (tabId) => this._tuiMode && this._tabs.has(tabId),
+    });
     /** omp /login or /logout waiting on the chat banner that switches to the TUI to run it. */
     private _tuiAuthPrompt: TuiAuthCommand | undefined;
     /** Include the active editor's file/selection with each prompt (composer chip toggle). */
@@ -384,7 +248,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._tabs.set(id, tab);
         this._activeTabId = id;
         this._subscribeTab(tab);
-        tab.session.setExtensionUiBridge(this._extensionUi);
         this._schedulePrewarmSession(1500);
     }
 
@@ -491,7 +354,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         const checkpoint = new CheckpointManager();
         const diff = new DiffManager(session, checkpoint);
         const tab = makeTabState(nextTabId(), session, diff, checkpoint);
-        session.setExtensionUiBridge(this._extensionUi);
         this._wireRpcSessionUi(session);
         this._tabs.set(tab.id, tab);
         this._subscribeTab(tab);
@@ -520,24 +382,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
 
         return tab;
-    }
-
-    private _resetTabUiState(tab: TabState): void {
-        tab.diffManager.clearAll();
-        tab.checkpointManager.clearAll();
-        tab.turnCounter = 0;
-        tab.suspendedMessages = [];
-        tab.isStreaming = false;
-        resetStreamingMessage(tab);
-        tab.agentStartTime = 0;
-        tab.messageMeta.clear();
-        tab.voiceOrigins.resetSession();
-        tab.queuedMessages = [];
-        tab.steeringMessages = [];
-        tab.followUpMessages = [];
-        tab.pendingAttachments = [];
-        tab.lastPlanEditorHash = '';
-        tab.connectionStatus = idleConnection();
     }
 
     /** Restore the conversations that were open in this workspace when VS Code exited. */
@@ -570,7 +414,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                         if (!usesInitialTab) await this._discardTab(tab);
                         continue;
                     }
-                    this._resetTabUiState(tab);
+                    resetTabUiState(tab);
                     await this._adoptVoiceTitle(tab);
                     // Only talked to the voice agent: open on that conversation; any worker message keeps the worker's.
                     tab.botView = tab.session.messages.length === 0 && this._voiceSessionFor(sessionPath) !== undefined;
@@ -603,7 +447,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     }
 
     private async _discardTab(tab: TabState): Promise<void> {
-        await this._stopTui(tab.id);
+        await this._tuis.stop(tab.id);
         this._unsubscribeTab(tab.id);
         tab.diffManager.dispose();
         tab.checkpointManager.dispose();
@@ -666,7 +510,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         };
 
         webviewView.webview.html = this._getHtml(webviewView.webview);
-        this._extensionUi.setPost((m) => this._post(m));
         this._wireRpcSessionUi(this._activeTab.session);
         for (const tab of this._tabs.values()) {
             if (!this._tabSubscriptions.has(tab.id)) {
@@ -702,8 +545,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             if (!webviewView.visible) return;
             this._view = webviewView;
             this._refreshVisibleWebview();
-            // Hidden (retained) webviews drop every message: repaint terminals from the mirrors.
-            this._resyncTuiViews();
+            if (this._tuiMode) {
+                // Hidden (retained) webviews drop every message: repaint terminals from the mirrors.
+                this._tuis.resync();
+            }
         });
 
         webviewView.onDidDispose(() => {
@@ -733,9 +578,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     }
 
     private _wireRpcSessionUi(session: PiChatSession): void {
-        if (!(session instanceof PiRpcSessionManager)) {
-            return;
-        }
         const post = (m: ServerMessage) => this._post(m);
         session.rpcExtensionUi.setPost(post);
         session.setPostChatError((message) => post({ type: 'error', message }));
@@ -787,176 +629,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     private _handleTabEvent(tab: TabState, event: any): void {
         const isActive = tab.id === this._activeTabId;
-
-        if (event.type === 'agent_start') {
-            tab.abortInFlight = false;
-            tab.connectionStatus = idleConnection();
-            tab.isStreaming = true;
-            resetStreamingMessage(tab);
-            tab.agentStartTime = Date.now();
-            if (isActive) {
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-            }
-        }
-
-        if (event.type === 'agent_end') {
-            // Before the agent_end stateSync below, so throwaway files the agent deleted never linger in the bar.
-            tab.diffManager.pruneSettledChanges();
-        }
-
-        if (event.type === 'auto_retry_start') {
-            tab.connectionStatus = {
-                phase: 'retrying',
-                message: event.errorMessage ?? 'Connection error',
-                attempt: event.attempt,
-                maxAttempts: event.maxAttempts,
-            };
-            tab.isStreaming = true;
-            if (isActive) {
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-            }
-        }
-
-        if (event.type === 'auto_retry_end') {
-            if (event.success) {
-                tab.connectionStatus = idleConnection();
-            } else {
-                tab.connectionStatus = {
-                    phase: 'failed',
-                    message:
-                        event.finalError ??
-                        'Could not reach the model after multiple attempts.',
-                    attempt: event.attempt,
-                };
-            }
-        }
-
-        if (event.type === 'compaction_end' && event.errorMessage && !event.willRetry) {
-            tab.connectionStatus = {
-                phase: 'failed',
-                message: event.errorMessage,
-            };
-        }
-
-        if (event.type === 'queue_update') {
-            tab.steeringMessages = Array.isArray(event.steering)
-                ? event.steering.map(String)
-                : [];
-            tab.followUpMessages = Array.isArray(event.followUp)
-                ? event.followUp.map(String)
-                : [];
-        }
-
-        if (event.type === 'message_start' && event.message?.role === 'user') {
-            // The ordinal only keys messages without a timestamp; count like the assistant ordinal below.
-            const started = event.message;
-            let ordinal = 0;
-            for (const m of tab.session.getMessages()) {
-                if (m.role === 'user' && (started.timestamp === undefined || m.timestamp !== started.timestamp)) {
-                    ordinal++;
-                }
-            }
-            if (tab.voiceOrigins.claim(started, ordinal)) {
-                started._fromVoice = true;
-            }
-        }
-
-        // omp never emits queue_update: a delivered steer arrives as a user message marked
-        // `steering`, which is the only signal that it left the queue.
-        if (event.type === 'message_start' && event.message?.role === 'user' && event.message.steering === true) {
-            const content = event.message.content;
-            const text = typeof content === 'string'
-                ? content
-                : Array.isArray(content)
-                  ? content.filter((c: { type?: string }) => c.type === 'text').map((c: { text?: string }) => c.text ?? '').join('')
-                  : '';
-            const idx = tab.steeringMessages.indexOf(text);
-            tab.steeringMessages = tab.steeringMessages.filter((_, i) => i !== (idx >= 0 ? idx : 0));
-        }
-
-        if (event.type === 'message_start' && event.message?.role === 'assistant') {
-            resetStreamingMessage(tab);
-        }
-
-        if (event.type === 'message_end' && event.message?.role === 'assistant') {
-            // The message list refreshes asynchronously after message_end, so it may not hold the
-            // ended message yet: its ordinal is the count of the other assistant messages.
-            const ended = event.message;
-            let ordinal = 0;
-            for (const m of tab.session.getMessages()) {
-                if (m.role === 'assistant' && (ended.timestamp === undefined || m.timestamp !== ended.timestamp)) {
-                    ordinal++;
-                }
-            }
-            if (tab.thinkingStartTime > 0 && !tab.streamingThinkingDuration) {
-                tab.streamingThinkingDuration = Math.round((Date.now() - tab.thinkingStartTime) / 1000);
-            }
-            tab.messageMeta.set(ordinal, {
-                thinkingDurationSec: tab.streamingThinkingDuration,
-                messageEndTime: Date.now(),
-            });
-            resetStreamingMessage(tab);
-        }
-
-        if (event.type === 'agent_end') {
-            tab.abortInFlight = false;
-            const willRetry = event.willRetry === true;
-            if (willRetry) {
-                const lastAssistant = lastAssistantFromMessages(event.messages);
-                tab.connectionStatus = {
-                    phase: 'retrying',
-                    message:
-                        (typeof lastAssistant?.errorMessage === 'string'
-                            ? lastAssistant.errorMessage
-                            : undefined) ?? 'Connection lost — retrying…',
-                    attempt: tab.session.session?.retryAttempt,
-                    maxAttempts: undefined,
-                };
-                tab.isStreaming = true;
-            } else {
-                const failed = failedStatusFromAssistant(
-                    lastAssistantFromMessages(event.messages),
-                );
-                tab.connectionStatus = failed ?? idleConnection();
-                tab.isStreaming = false;
-                resetStreamingMessage(tab);
-                tab.agentStartTime = 0;
-                if (isActive) {
-                    vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', false);
-                } else {
-                    tab.hasNotification = true;
-                }
-            }
-        }
-
-        if (event.type === 'message_update' && event.assistantMessageEvent && !tab.abortInFlight) {
-            const ae = event.assistantMessageEvent;
-            switch (ae.type) {
-                case 'thinking_start':
-                    tab.isThinking = true;
-                    if (tab.streamingThinking.trim().length > 0) {
-                        tab.streamingThinking += '\n\n';
-                    } else {
-                        tab.streamingThinking = '';
-                    }
-                    tab.thinkingStartTime = Date.now();
-                    tab.streamingThinkingDuration = 0;
-                    break;
-                case 'thinking_delta':
-                    tab.streamingThinking += ae.delta ?? '';
-                    break;
-                case 'thinking_end':
-                    tab.isThinking = false;
-                    if (tab.thinkingStartTime > 0) {
-                        tab.streamingThinkingDuration = Math.round(
-                            (Date.now() - tab.thinkingStartTime) / 1000
-                        );
-                    }
-                    break;
-                case 'text_delta':
-                    tab.streamingText += ae.delta ?? '';
-                    break;
-            }
+        const streaming = applyAgentEvent(tab, event, isActive);
+        if (streaming !== undefined && isActive) {
+            vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', streaming);
         }
 
         this._updateTabName(tab);
@@ -1228,7 +903,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         attachments: PendingAttachment[],
         fromVoice = false,
     ): Promise<void> {
-        this._startTurn(tab);
+        startTurn(tab);
         tab.isStreaming = true;
         if (tab.id === this._activeTabId) {
             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -1242,18 +917,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             throw err;
         }
         void this.pushStateSync();
-    }
-
-    private _startTurn(tab: TabState): void {
-        if (tab.checkpointManager.rollbackPoint !== null) {
-            tab.checkpointManager.discardSuspended();
-            tab.diffManager.discardSuspended();
-            tab.suspendedMessages = [];
-        }
-        tab.turnCounter++;
-        const turnIdx = tab.turnCounter;
-        tab.checkpointManager.startTurn(turnIdx);
-        tab.diffManager.setCurrentTurn(turnIdx);
     }
 
     private async _tryHandleSlashOnlyPrompt(
@@ -1361,7 +1024,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
 
         this._updateTabName(tab, item.text || text);
-        this._startTurn(tab);
+        startTurn(tab);
         tab.isStreaming = true;
         if (isActive) {
             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -1395,11 +1058,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private async _abortActiveTab(tab: TabState): Promise<void> {
         tab.abortInFlight = true;
         tab.isStreaming = false;
-        tab.streamingText = '';
-        tab.streamingThinking = '';
-        tab.isThinking = false;
-        tab.thinkingStartTime = 0;
-        tab.streamingThinkingDuration = 0;
+        resetStreamingMessage(tab);
         tab.agentStartTime = 0;
         tab.connectionStatus = idleConnection();
         if (tab.session.session) {
@@ -1443,13 +1102,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         if (!tab) {
             return;
         }
-        if (tab.session instanceof PiRpcSessionManager) {
-            try {
-                await tab.session.syncFromRpc();
-            } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : String(err);
-                this._outputChannel.appendLine(`RPC sync before state push: ${msg}`);
-            }
+        try {
+            await tab.session.syncFromRpc();
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this._outputChannel.appendLine(`RPC sync before state push: ${msg}`);
         }
         this._updateTabName(tab);
         this.sendStateSync();
@@ -1512,7 +1169,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     async loadSessionTree(): Promise<void> {
         const tab = this._activeTab;
-        if (!tab || !(tab.session instanceof PiRpcSessionManager)) {
+        if (!tab) {
             return;
         }
         try {
@@ -1535,7 +1192,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     async forkSessionTree(entryId: string, summarize?: boolean, customInstructions?: string): Promise<void> {
         const tab = this._activeTab;
-        if (!tab || !(tab.session instanceof PiRpcSessionManager)) {
+        if (!tab) {
             return;
         }
         try {
@@ -1563,7 +1220,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
      * backend (resume can move it to another project/CLI without touching the idle RPC session).
      */
     private sessionListTarget(tab: TabState): SessionListTarget {
-        const tui = this._tuiMode ? this._tuiProcesses.get(tab.id) : undefined;
+        const tui = this._tuiMode ? this._tuis.get(tab.id) : undefined;
         if (tui) {
             return {
                 cwd: resolvePiWorkspaceCwd(tui.cwd),
@@ -1571,50 +1228,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 currentSessionPath: tui.sessionFile,
             };
         }
-        const backend = tab.session instanceof PiRpcSessionManager ? tab.session.backend : this._currentBackend;
         return {
             cwd: resolvePiWorkspaceCwd(tab.session.session?.cwd),
-            layout: getAgentLayout(backend),
+            layout: getAgentLayout(tab.session.backend),
             currentSessionPath: tab.session.session?.sessionFile,
         };
-    }
-
-    private sessionListCacheKey(target: SessionListTarget): string {
-        return `${target.layout.agentDir}\0${target.cwd}`;
-    }
-
-    private invalidateSessionListCache(): void {
-        this._sessionListEpoch++;
-        this._sessionListCache.clear();
-        this._sessionListInFlight.clear();
-        clearSessionInfoCache();
-    }
-
-    /** List from disk (per-file metadata is mtime-cached, so repeat listings are cheap); dedupes concurrent reads. */
-    private fetchSessionList(
-        target: SessionListTarget,
-        onProgress?: (loaded: number, total: number) => void,
-    ): Promise<SessionInfo[]> {
-        const key = this.sessionListCacheKey(target);
-        const inFlight = this._sessionListInFlight.get(key);
-        if (inFlight) {
-            return inFlight;
-        }
-        const epoch = this._sessionListEpoch;
-        const pending = listPiSessionsForCwdAsync(target.cwd, target.layout, onProgress)
-            .then((sessions) => {
-                if (epoch === this._sessionListEpoch) {
-                    this._sessionListCache.set(key, sessions);
-                }
-                return sessions;
-            })
-            .finally(() => {
-                if (this._sessionListInFlight.get(key) === pending) {
-                    this._sessionListInFlight.delete(key);
-                }
-            });
-        this._sessionListInFlight.set(key, pending);
-        return pending;
     }
 
     /** Preload current-folder session list so the resume panel opens instantly. */
@@ -1624,10 +1242,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return Promise.resolve();
         }
         const target = this.sessionListTarget(tab);
-        if (this._sessionListCache.has(this.sessionListCacheKey(target))) {
+        if (this._sessionLists.cached(target)) {
             return Promise.resolve();
         }
-        return this.fetchSessionList(target).then(
+        return this._sessionLists.fetch(target).then(
             () => undefined,
             () => undefined, // warm is best-effort
         );
@@ -1674,11 +1292,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         const target = this.sessionListTarget(tab);
 
         // Stale-while-revalidate: sessions are created/extended outside this panel (TUI, other windows).
-        const cached = this._sessionListCache.get(this.sessionListCacheKey(target));
+        const cached = this._sessionLists.cached(target);
         this.postSessionListPayload(target, cached ?? [], query, !cached);
 
         try {
-            const sessions = await this.fetchSessionList(
+            const sessions = await this._sessionLists.fetch(
                 target,
                 cached
                     ? undefined
@@ -1737,10 +1355,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._currentBackend = targetBackend;
 
         if (this._tuiMode) {
-            await this._stopTui(tab.id);
+            await this._tuis.stop(tab.id);
             tab.name = sessionInfo ? getSessionDisplayTitle(sessionInfo) : DEFAULT_CONVERSATION_TITLE;
             this._updateTabName(tab);
-            await this._startTui(tab.id, 80, 24, sessionPath, targetCwd, targetBackend);
+            await this._startTui(tab.id, 80, 24, { sessionFile: sessionPath, cwd: targetCwd, backend: targetBackend });
             await this.pushStateSync();
             const label = sessionInfo ? getSessionDisplayTitle(sessionInfo) : 'session';
             vscode.window.showInformationMessage(`Resumed session: ${label}`);
@@ -1749,7 +1367,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
         const currentCwd = tab.session.session?.cwd;
         const needsRecreate =
-            (tab.session instanceof PiRpcSessionManager && tab.session.backend !== targetBackend) ||
+            tab.session.backend !== targetBackend ||
             (targetCwd && currentCwd && targetCwd !== currentCwd);
 
         if (needsRecreate) {
@@ -1759,7 +1377,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 this._unsubscribeTab(tab.id);
                 await tab.session.dispose?.();
                 tab.session = newSession;
-                tab.session.setExtensionUiBridge(this._extensionUi);
                 this._wireRpcSessionUi(newSession);
                 this._subscribeTab(tab);
             } catch (err: unknown) {
@@ -1777,7 +1394,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     this._unsubscribeTab(tab.id);
                     await tab.session.dispose?.();
                     tab.session = newSession;
-                    tab.session.setExtensionUiBridge(this._extensionUi);
                     this._wireRpcSessionUi(newSession);
                     this._subscribeTab(tab);
                     resumed = await tab.session.loadSession(sessionPath);
@@ -1794,7 +1410,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             }
 
             await this._adoptVoiceTitle(tab);
-            this.invalidateSessionListCache();
+            this._sessionLists.invalidate();
             void this.warmSessionListCache();
             tab.diffManager.clearAll();
             tab.checkpointManager.clearAll();
@@ -1804,11 +1420,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 : DEFAULT_CONVERSATION_TITLE;
             tab.suspendedMessages = [];
             tab.isStreaming = false;
-            tab.streamingText = '';
-            tab.streamingThinking = '';
-            tab.isThinking = false;
-            tab.thinkingStartTime = 0;
-            tab.streamingThinkingDuration = 0;
+            resetStreamingMessage(tab);
             tab.agentStartTime = 0;
             tab.messageMeta.clear();
             tab.voiceOrigins.resetSession();
@@ -1826,17 +1438,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             this._outputChannel.appendLine(`Resume session failed: ${message}`);
             this._post({ type: 'toast', message: `Failed to resume session: ${message}`, variant: 'error' });
         }
-    }
-
-    private removeSessionFromListCache(sessionPath: string): void {
-        const canon = canonicalizeSessionPath(sessionPath);
-        for (const [key, list] of this._sessionListCache) {
-            this._sessionListCache.set(
-                key,
-                list.filter((s) => canonicalizeSessionPath(s.path) !== canon),
-            );
-        }
-        invalidateSessionInfoPath(sessionPath);
     }
 
     private async deleteSessionFromPanel(sessionPath: string): Promise<void> {
@@ -1868,7 +1469,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return;
         }
 
-        this.removeSessionFromListCache(sessionPath);
+        this._sessionLists.removeSession(sessionPath);
         const voice = this._voiceSessionFor(sessionPath);
         if (voice) {
             this._voiceHistory?.forgetTask(voice.sessionFile);
@@ -1912,7 +1513,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 this._voiceHistory?.nameTask(voice.sessionFile, trimmed, 'user');
             }
             invalidateSessionInfoPath(sessionPath);
-            this.invalidateSessionListCache();
+            this._sessionLists.invalidate();
             void this.warmSessionListCache();
             this._post({ type: 'toast', message: 'Session renamed', variant: 'info' });
             await this.loadSessionListForPanel(this._sessionPanelQuery);
@@ -1955,50 +1556,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         state.followUpMessages = [...tab.followUpMessages];
         state.pendingAttachments = toPreviewList(tab.pendingAttachments);
 
-        const planModeBase = tab.session.getPlanModeInfo();
-        const chrome =
-            tab.session instanceof PiRpcSessionManager
-                ? tab.session.extensionChrome.getSnapshot()
-                : undefined;
-        let planMode = enrichPlanModeFromExtensionChrome(planModeBase, chrome);
-        if (tab.planModeOverride !== undefined) {
-            const override = tab.planModeOverride;
-            planMode = {
-                ...planMode,
-                enabled: override === 'plan',
-                statusLabel:
-                    override === 'plan'
-                        ? planMode.hasPlan
-                            ? 'ready'
-                            : 'planning'
-                        : 'off',
-            };
-        }
-        const session = tab.session.session;
-        const rpivTasks = extractRpivTodoTasks(session);
-        const mergedPlan = mergePlanWithRpivTodos(planMode.planMarkdown, rpivTasks);
-        state.planMode = {
-            ...planMode,
-            planMarkdown: mergedPlan,
-            todos: rpivTasks.length > 0 ? rpivTasksToPlanTodos(rpivTasks) : planMode.todos,
-        };
+        const { planMode, chrome } = tabPlanMode(tab);
+        state.planMode = planMode;
         state.piExtensionChrome = chrome;
         state.connectionStatus = tab.connectionStatus;
-        const sessionId = session?.sessionId ?? 'default';
-        this._planDocument.setPlanContent(sessionId, mergedPlan);
-        const planBody = mergedPlan.trim();
-        // Pop the editor only while pi-plan-mode is drafting. After the plan is implemented the
-        // todo Progress section keeps changing the body and would reopen it on every update.
-        const planModeActive =
-            tab.session instanceof PiRpcSessionManager && tab.session.backend === 'pi' && planMode.enabled;
-        if (planModeActive && planMode.hasPlan && planBody) {
-            const hash = hashPlanMarkdown(planBody);
-            if (tab.lastPlanEditorHash !== hash) {
-                tab.lastPlanEditorHash = hash;
-                void openPlanDocument(this._planDocument, sessionId);
-            }
-        } else if (!planMode.hasPlan) {
-            tab.lastPlanEditorHash = '';
+        const sessionId = tab.session.session?.sessionId ?? 'default';
+        this._planDocument.setPlanContent(sessionId, planMode.planMarkdown);
+        if (claimPlanEditorOpen(tab, planMode)) {
+            void openPlanDocument(this._planDocument, sessionId);
         }
 
         let assistantOrdinal = 0;
@@ -2185,7 +1750,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     }
 
     private async pickAttachmentsDialog(): Promise<void> {
-        const tab = this._activeTab;
         const uris = await vscode.window.showOpenDialog({
             canSelectMany: true,
             openLabel: 'Attach',
@@ -2381,7 +1945,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     }
                     attachments.push(...this._editorContextAttachments());
                     if (!this._uiIsStreaming(tab)) {
-                        this._startTurn(tab);
+                        startTurn(tab);
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
                             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -2443,7 +2007,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                         if (this._uiIsStreaming(tab)) {
                             await this._abortActiveTab(tab);
                         }
-                        this._startTurn(tab);
+                        startTurn(tab);
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
                             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -2501,8 +2065,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 case 'setModel': {
                     await tab.session.setModel(msg.provider, msg.modelId);
                     // Persist as the pi/omp CLI default so new conversations start on this model.
-                    const backend =
-                        tab.session instanceof PiRpcSessionManager ? tab.session.backend : this._currentBackend;
+                    const backend = tab.session.backend;
                     try {
                         await updatePiDefaults({ provider: msg.provider, model: msg.modelId }, undefined, backend);
                     } catch (err: unknown) {
@@ -2524,11 +2087,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     tab.suspendedMessages = [];
                     tab.name = DEFAULT_CONVERSATION_TITLE;
                     tab.isStreaming = false;
-                    tab.streamingText = '';
-                    tab.streamingThinking = '';
-                    tab.isThinking = false;
-                    tab.thinkingStartTime = 0;
-                    tab.streamingThinkingDuration = 0;
+                    resetStreamingMessage(tab);
                     tab.agentStartTime = 0;
                     tab.messageMeta.clear();
                     tab.voiceOrigins.resetSession();
@@ -2562,10 +2121,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     await this._startTui(msg.tabId, msg.cols, msg.rows);
                     break;
                 case 'tuiInput':
-                    this._tuiProcesses.get(msg.tabId)?.write(msg.data);
+                    this._tuis.get(msg.tabId)?.write(msg.data);
                     break;
                 case 'tuiResize':
-                    this._tuiProcesses.get(msg.tabId)?.resize(msg.cols, msg.rows);
+                    this._tuis.get(msg.tabId)?.resize(msg.cols, msg.rows);
                     break;
                 case 'openSessionTree':
                     void this.openSessionTree();
@@ -2592,13 +2151,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     this.sendStateSync();
                     break;
                 case 'getSlashCommands': {
-                    let commands;
-                    if (tab.session instanceof PiRpcSessionManager) {
-                        commands = await tab.session.listSlashCommands();
-                    } else {
-                        const { listSlashCommandsForUi } = await import('../pi/slashCommands');
-                        commands = await listSlashCommandsForUi(tab.session.session);
-                    }
+                    const commands = await tab.session.listSlashCommands();
                     this._post({ type: 'slashCommands', commands });
                     break;
                 }
@@ -2639,7 +2192,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 case 'readImageFile': {
                     const { readFile } = await import('node:fs/promises');
-                    const path = await import('node:path');
                     try {
                         const ext = path.extname(msg.filePath).toLowerCase();
                         const mimeMap: Record<string, string> = {
@@ -2689,7 +2241,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     tab.diffManager.suspendChangesAfter(msg.messageIndex);
 
                     const allMsgs = tab.session.getMessages();
-                    const cutoff = this._findCutoffIndex(allMsgs, msg.messageIndex);
+                    const cutoff = turnCutoffIndex(allMsgs, msg.messageIndex);
                     if (cutoff >= 0 && cutoff < allMsgs.length) {
                         tab.suspendedMessages = allMsgs.slice(cutoff);
                         tab.session.setMessages(allMsgs.slice(0, cutoff));
@@ -2722,9 +2274,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'resendUserMessage': {
-                    if (!(tab.session instanceof PiRpcSessionManager)) {
-                        break;
-                    }
                     try {
                         await tab.session.resendUserMessage(
                             msg.messageIndex,
@@ -2733,7 +2282,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                             msg.entryId,
                         );
                         if (!this._uiIsStreaming(tab)) {
-                            this._startTurn(tab);
+                            startTurn(tab);
                         }
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
@@ -2748,13 +2297,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'regenerateAssistant': {
-                    if (!(tab.session instanceof PiRpcSessionManager)) {
-                        break;
-                    }
                     try {
                         await tab.session.regenerateAssistant(msg.assistantMessageIndex, msg.mode);
                         if (!this._uiIsStreaming(tab)) {
-                            this._startTurn(tab);
+                            startTurn(tab);
                         }
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
@@ -2822,15 +2368,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'implementPlan': {
-                    if (tab.checkpointManager.rollbackPoint !== null) {
-                        tab.checkpointManager.discardSuspended();
-                        tab.diffManager.discardSuspended();
-                        tab.suspendedMessages = [];
-                    }
-                    tab.turnCounter++;
-                    const turnIdx = tab.turnCounter;
-                    tab.checkpointManager.startTurn(turnIdx);
-                    tab.diffManager.setCurrentTurn(turnIdx);
+                    startTurn(tab);
                     tab.isStreaming = true;
                     tab.streamingText = '';
                     tab.streamingThinking = '';
@@ -2860,21 +2398,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     );
                     break;
                 case 'extensionUiResponse':
-                    if (tab.session instanceof PiRpcSessionManager) {
-                        tab.session.rpcExtensionUi.respond({
-                            id: msg.id,
-                            cancelled: msg.cancelled,
-                            value: msg.value,
-                            confirmed: msg.confirmed,
-                        });
-                    } else {
-                        this._extensionUi.handleResponse({
-                            id: msg.id,
-                            cancelled: msg.cancelled,
-                            value: msg.value,
-                            confirmed: msg.confirmed,
-                        });
-                    }
+                    tab.session.rpcExtensionUi.respond({
+                        id: msg.id,
+                        cancelled: msg.cancelled,
+                        value: msg.value,
+                        confirmed: msg.confirmed,
+                    });
                     break;
             }
         } catch (err: any) {
@@ -2919,7 +2448,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
         this._schedulePrewarmSession(500);
 
-        this.invalidateSessionListCache();
+        this._sessionLists.invalidate();
 
         // If target backend has no tabs, restore its persisted tabs or create a fresh one
         if (this._tabs.size === 0) {
@@ -3002,10 +2531,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return;
         }
         // Chat mode has no TUI processes; the toggle below starts this tab's, which types it.
-        this._pendingTuiInput.set(tab.id, `/${command}\r`);
+        this._tuis.typeOnStart(tab.id, `/${command}\r`);
         await this._toggleTuiMode();
         if (!this._tuiMode) {
-            this._pendingTuiInput.delete(tab.id); // refused: a response is streaming
+            this._tuis.cancelTypeOnStart(tab.id); // refused: a response is streaming
         }
     }
 
@@ -3022,15 +2551,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         void this._workspaceState.update(TUI_MODE_STATE_KEY, this._tuiMode);
         void vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.tuiMode', this._tuiMode);
         if (!this._tuiMode) {
-            const tabIds = [...this._tuiProcesses.keys()];
-            await Promise.all(tabIds.map((id) => this._stopTui(id)));
+            const tabIds = await this._tuis.stopAll();
             // The TUIs appended to the tabs' session files; the idle RPC processes hold stale state.
             for (const id of tabIds) {
                 const tab = this._tabs.get(id);
                 if (!tab) continue;
                 try {
                     await tab.session.reloadSessionFromDisk();
-                    this._resetTabUiState(tab);
+                    resetTabUiState(tab);
                     this._updateTabName(tab);
                 } catch (err: unknown) {
                     const message = err instanceof Error ? err.message : String(err);
@@ -3041,136 +2569,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this.sendStateSync();
     }
 
-    /** Start (or re-attach to) the tab's TUI once the webview has a sized terminal for it. */
+    /** Start (or re-attach to) the tab's TUI; `resume` replaces a running one with that session's. */
     private async _startTui(
         tabId: string,
         cols: number,
         rows: number,
-        overrideSessionFile?: string,
-        overrideCwd?: string,
-        overrideBackend?: AgentBackend,
+        resume?: { sessionFile: string; cwd: string | undefined; backend: AgentBackend },
     ): Promise<void> {
         const tab = this._tabs.get(tabId);
-        if (!this._tuiMode || !tab || this._tuiStarting.has(tabId)) return;
-        const sessionFile = overrideSessionFile ?? tab.session.session?.sessionFile;
-        const cwd =
-            overrideCwd ??
-            tab.session.session?.cwd ??
-            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-            process.cwd();
-        const backend =
-            overrideBackend ??
-            (tab.session instanceof PiRpcSessionManager ? tab.session.backend : undefined) ??
-            this._currentBackend;
-
-        const existing = this._tuiProcesses.get(tabId);
-        if (existing && !existing.exited && !overrideSessionFile) {
-            // New terminal view (webview re-created): size it and replay the full screen.
-            existing.resize(cols, rows);
-            await this._sendTuiSnapshot(tabId);
-            return;
-        }
-        if (existing) {
-            await this._stopTui(tabId);
-        }
-        this._tuiExitCodes.delete(tabId);
-        this._tuiStarting.add(tabId);
-        try {
-            const proc = await TuiProcess.start({
-                cwd,
-                sessionFile,
-                backend,
-                cols,
-                rows,
-                onData: (data) => this._queueTuiOutput(tabId, data),
-                onExit: (exitCode) => {
-                    this._flushTuiOutput();
-                    // Stopped on purpose (mode off, tab closed) → already unregistered, nothing to report.
-                    if (this._tuiProcesses.get(tabId) !== proc) return;
-                    this._tuiProcesses.delete(tabId);
-                    this._tuiExitCodes.set(tabId, exitCode);
-                    this._post({ type: 'tuiExit', tabId, exitCode });
-                },
-            });
-            if (!this._tuiMode || !this._tabs.has(tabId)) {
-                await proc.dispose();
-                return;
-            }
-            this._tuiProcesses.set(tabId, proc);
-            const pending = this._pendingTuiInput.get(tabId);
-            if (pending) {
-                this._pendingTuiInput.delete(tabId);
-                void proc.typeWhenReady(pending);
-            }
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            this._outputChannel.appendLine(`TUI start failed: ${message}`);
-            this._post({ type: 'tuiData', tabId, data: `\r\n\x1b[31mTUI start failed: ${message}\x1b[0m\r\n` });
-        } finally {
-            this._tuiStarting.delete(tabId);
-        }
-    }
-
-    private async _stopTui(tabId: string): Promise<void> {
-        this._tuiExitCodes.delete(tabId);
-        const proc = this._tuiProcesses.get(tabId);
-        if (!proc) return;
-        this._tuiProcesses.delete(tabId);
-        await proc.dispose();
-    }
-
-    /** Replace the tab's terminal view with the TUI's full current screen + scrollback. */
-    private async _sendTuiSnapshot(tabId: string): Promise<void> {
-        const proc = this._tuiProcesses.get(tabId);
-        if (!proc || proc.exited) return;
-        // Queued live output is already in the mirror, so the snapshot supersedes it.
-        this._tuiOutput.delete(tabId);
-        const data = await proc.snapshot();
-        this._post({ type: 'tuiSnapshot', tabId, data });
-    }
-
-    private _resyncTuiViews(): void {
-        if (!this._tuiMode) return;
-        for (const tabId of this._tuiProcesses.keys()) {
-            void this._sendTuiSnapshot(tabId);
-        }
-        for (const [tabId, exitCode] of this._tuiExitCodes) {
-            this._post({ type: 'tuiExit', tabId, exitCode });
-        }
+        if (!this._tuiMode || !tab) return;
+        await this._tuis.start(tabId, {
+            cwd:
+                resume?.cwd ??
+                tab.session.session?.cwd ??
+                vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+                process.cwd(),
+            sessionFile: resume?.sessionFile ?? tab.session.session?.sessionFile,
+            backend: resume?.backend ?? tab.session.backend,
+            cols,
+            rows,
+            replace: resume !== undefined,
+        });
     }
 
     /** Stop every TUI (extension shutdown). */
     async disposeTui(): Promise<void> {
-        await Promise.all([...this._tuiProcesses.keys()].map((id) => this._stopTui(id)));
-    }
-
-    private _queueTuiOutput(tabId: string, data: string): void {
-        this._tuiOutput.set(tabId, (this._tuiOutput.get(tabId) ?? '') + data);
-        this._tuiFlushTimer ??= setTimeout(() => this._flushTuiOutput(), 4);
-    }
-
-    private _flushTuiOutput(): void {
-        if (this._tuiFlushTimer) {
-            clearTimeout(this._tuiFlushTimer);
-            this._tuiFlushTimer = undefined;
-        }
-        for (const [tabId, data] of this._tuiOutput) {
-            this._post({ type: 'tuiData', tabId, data });
-        }
-        this._tuiOutput.clear();
-    }
-
-    private _findCutoffIndex(messages: any[], rollbackPoint: number): number {
-        let userMsgCount = 0;
-        for (let i = 0; i < messages.length; i++) {
-            if (messages[i].role === 'user') {
-                userMsgCount++;
-                if (userMsgCount > rollbackPoint) {
-                    return i;
-                }
-            }
-        }
-        return -1;
+        await this._tuis.stopAll();
     }
 
     private _getHtml(webview: vscode.Webview): string {
