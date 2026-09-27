@@ -1750,7 +1750,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     }
 
     private async pickAttachmentsDialog(): Promise<void> {
-        const tab = this._activeTab;
         const uris = await vscode.window.showOpenDialog({
             canSelectMany: true,
             openLabel: 'Attach',
@@ -2193,7 +2192,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 case 'readImageFile': {
                     const { readFile } = await import('node:fs/promises');
-                    const path = await import('node:path');
                     try {
                         const ext = path.extname(msg.filePath).toLowerCase();
                         const mimeMap: Record<string, string> = {
