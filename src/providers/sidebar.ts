@@ -6,7 +6,6 @@ import type { PiChatSession } from '../pi/slashCommands';
 import type {
     AgentBackend,
     ClientMessage,
-    ConnectionStatus,
     ServerMessage,
     SessionInfo,
     TabInfo,
@@ -40,9 +39,6 @@ import { DiffManager } from './diff';
 import { CheckpointManager } from './checkpoint';
 import type { ModelStatusTracker } from './model-status';
 import { openPlanDocument, type PlanDocumentProvider } from './plan-document';
-import { enrichPlanModeFromExtensionChrome } from '../pi/planModeState';
-import { mergePlanWithRpivTodos } from '../pi/planDocumentMerge';
-import { extractRpivTodoTasks, rpivTasksToPlanTodos } from '../pi/rpivTodoSync';
 import {
     composePrompt,
     processFilePaths,
@@ -57,7 +53,6 @@ import {
 } from '../shared/conversationTitle';
 import {
     type PendingAttachment,
-    type QueuedPrompt,
     toPendingAttachment,
     toPendingTextFileAttachment,
     toPreviewList,
@@ -89,17 +84,20 @@ import {
 } from '../shared/voiceViewProtocol';
 import { routeComposerSend } from './composerRoute';
 import { SessionListCache, type SessionListScope } from './sidebarSessionListCache';
+import {
+    applyAgentEvent,
+    claimPlanEditorOpen,
+    idleConnection,
+    makeTabState,
+    nextTabId,
+    resetStreamingMessage,
+    resetTabUiState,
+    startTurn,
+    tabPlanMode,
+    turnCutoffIndex,
+    type TabState,
+} from './sidebarTabState';
 import { TabTuis } from './sidebarTui';
-import { VoiceOriginTracker } from './voiceOrigin';
-
-interface MessageMeta {
-    thinkingDurationSec: number;
-    messageEndTime: number;
-}
-
-interface PendingApproval {
-    resolve: (approved: boolean) => void;
-}
 
 interface PersistedOpenTabs {
     version: 1;
@@ -114,128 +112,6 @@ const EDITOR_CONTEXT_STATE_KEY = 'oh-my-pi-chater.includeEditorContext';
 /** Session store + folder the resume panel lists for a tab. */
 interface SessionListTarget extends SessionListScope {
     currentSessionPath: string | undefined;
-}
-
-interface TabState {
-    id: string;
-    name: string;
-    session: PiChatSession;
-    diffManager: DiffManager;
-    checkpointManager: CheckpointManager;
-    turnCounter: number;
-    suspendedMessages: any[];
-    streamingText: string;
-    streamingThinking: string;
-    isThinking: boolean;
-    thinkingStartTime: number;
-    streamingThinkingDuration: number;
-    agentStartTime: number;
-    messageMeta: Map<number, MessageMeta>;
-    voiceOrigins: VoiceOriginTracker;
-    hasNotification: boolean;
-    /** The tab shows the Bot view (the voice agent's conversation) instead of its chat. */
-    botView: boolean;
-    pendingApprovals: Map<string, PendingApproval>;
-    queuedMessages: QueuedPrompt[];
-    steeringMessages: string[];
-    followUpMessages: string[];
-    pendingAttachments: PendingAttachment[];
-    isStreaming: boolean;
-    queueDrainInFlight: boolean;
-    lastPlanEditorHash: string;
-    connectionStatus: ConnectionStatus;
-    planModeOverride?: 'agent' | 'plan';
-    /** Ignore streaming deltas until Pi confirms agent_end (Stop clicked). */
-    abortInFlight: boolean;
-    /** Skip auto-draining the queue (e.g. while interrupt-and-send is in flight). */
-    suppressQueueDrain: boolean;
-}
-
-let tabIdCounter = 0;
-function nextTabId(): string {
-    return `tab-${++tabIdCounter}`;
-}
-
-function hashPlanMarkdown(markdown: string): string {
-    let h = 0;
-    for (let i = 0; i < markdown.length; i++) {
-        h = (h * 31 + markdown.charCodeAt(i)) | 0;
-    }
-    return `${markdown.length}:${h}`;
-}
-
-function makeTabState(
-    id: string,
-    session: PiChatSession,
-    diffManager: DiffManager,
-    checkpointManager: CheckpointManager,
-): TabState {
-    return {
-        id,
-        name: DEFAULT_CONVERSATION_TITLE,
-        session,
-        diffManager,
-        checkpointManager,
-        turnCounter: 0,
-        suspendedMessages: [],
-        streamingText: '',
-        streamingThinking: '',
-        isThinking: false,
-        thinkingStartTime: 0,
-        streamingThinkingDuration: 0,
-        agentStartTime: 0,
-        messageMeta: new Map(),
-        voiceOrigins: new VoiceOriginTracker(),
-        hasNotification: false,
-        botView: false,
-        pendingApprovals: new Map(),
-        queuedMessages: [],
-        steeringMessages: [],
-        followUpMessages: [],
-        pendingAttachments: [],
-        isStreaming: false,
-        queueDrainInFlight: false,
-        lastPlanEditorHash: '',
-        connectionStatus: { phase: 'idle' },
-        abortInFlight: false,
-        suppressQueueDrain: false,
-    };
-}
-
-/** Live thinking/text belong to the assistant message being streamed, not the whole run. */
-function resetStreamingMessage(tab: TabState): void {
-    tab.streamingText = '';
-    tab.streamingThinking = '';
-    tab.isThinking = false;
-    tab.thinkingStartTime = 0;
-    tab.streamingThinkingDuration = 0;
-}
-
-function idleConnection(): ConnectionStatus {
-    return { phase: 'idle' };
-}
-
-function lastAssistantFromMessages(messages: any[] | undefined): any | undefined {
-    if (!messages?.length) {
-        return undefined;
-    }
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i]?.role === 'assistant') {
-            return messages[i];
-        }
-    }
-    return undefined;
-}
-
-function failedStatusFromAssistant(msg: any | undefined): ConnectionStatus | undefined {
-    if (!msg || msg.stopReason !== 'error') {
-        return undefined;
-    }
-    const message =
-        typeof msg.errorMessage === 'string' && msg.errorMessage.trim()
-            ? msg.errorMessage.trim()
-            : 'Request failed';
-    return { phase: 'failed', message };
 }
 
 interface BackendWorkspace {
@@ -508,24 +384,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         return tab;
     }
 
-    private _resetTabUiState(tab: TabState): void {
-        tab.diffManager.clearAll();
-        tab.checkpointManager.clearAll();
-        tab.turnCounter = 0;
-        tab.suspendedMessages = [];
-        tab.isStreaming = false;
-        resetStreamingMessage(tab);
-        tab.agentStartTime = 0;
-        tab.messageMeta.clear();
-        tab.voiceOrigins.resetSession();
-        tab.queuedMessages = [];
-        tab.steeringMessages = [];
-        tab.followUpMessages = [];
-        tab.pendingAttachments = [];
-        tab.lastPlanEditorHash = '';
-        tab.connectionStatus = idleConnection();
-    }
-
     /** Restore the conversations that were open in this workspace when VS Code exited. */
     async restorePersistedTabs(backend?: AgentBackend): Promise<void> {
         const targetBackend = backend ?? this._currentBackend;
@@ -556,7 +414,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                         if (!usesInitialTab) await this._discardTab(tab);
                         continue;
                     }
-                    this._resetTabUiState(tab);
+                    resetTabUiState(tab);
                     await this._adoptVoiceTitle(tab);
                     // Only talked to the voice agent: open on that conversation; any worker message keeps the worker's.
                     tab.botView = tab.session.messages.length === 0 && this._voiceSessionFor(sessionPath) !== undefined;
@@ -771,176 +629,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     private _handleTabEvent(tab: TabState, event: any): void {
         const isActive = tab.id === this._activeTabId;
-
-        if (event.type === 'agent_start') {
-            tab.abortInFlight = false;
-            tab.connectionStatus = idleConnection();
-            tab.isStreaming = true;
-            resetStreamingMessage(tab);
-            tab.agentStartTime = Date.now();
-            if (isActive) {
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-            }
-        }
-
-        if (event.type === 'agent_end') {
-            // Before the agent_end stateSync below, so throwaway files the agent deleted never linger in the bar.
-            tab.diffManager.pruneSettledChanges();
-        }
-
-        if (event.type === 'auto_retry_start') {
-            tab.connectionStatus = {
-                phase: 'retrying',
-                message: event.errorMessage ?? 'Connection error',
-                attempt: event.attempt,
-                maxAttempts: event.maxAttempts,
-            };
-            tab.isStreaming = true;
-            if (isActive) {
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-            }
-        }
-
-        if (event.type === 'auto_retry_end') {
-            if (event.success) {
-                tab.connectionStatus = idleConnection();
-            } else {
-                tab.connectionStatus = {
-                    phase: 'failed',
-                    message:
-                        event.finalError ??
-                        'Could not reach the model after multiple attempts.',
-                    attempt: event.attempt,
-                };
-            }
-        }
-
-        if (event.type === 'compaction_end' && event.errorMessage && !event.willRetry) {
-            tab.connectionStatus = {
-                phase: 'failed',
-                message: event.errorMessage,
-            };
-        }
-
-        if (event.type === 'queue_update') {
-            tab.steeringMessages = Array.isArray(event.steering)
-                ? event.steering.map(String)
-                : [];
-            tab.followUpMessages = Array.isArray(event.followUp)
-                ? event.followUp.map(String)
-                : [];
-        }
-
-        if (event.type === 'message_start' && event.message?.role === 'user') {
-            // The ordinal only keys messages without a timestamp; count like the assistant ordinal below.
-            const started = event.message;
-            let ordinal = 0;
-            for (const m of tab.session.getMessages()) {
-                if (m.role === 'user' && (started.timestamp === undefined || m.timestamp !== started.timestamp)) {
-                    ordinal++;
-                }
-            }
-            if (tab.voiceOrigins.claim(started, ordinal)) {
-                started._fromVoice = true;
-            }
-        }
-
-        // omp never emits queue_update: a delivered steer arrives as a user message marked
-        // `steering`, which is the only signal that it left the queue.
-        if (event.type === 'message_start' && event.message?.role === 'user' && event.message.steering === true) {
-            const content = event.message.content;
-            const text = typeof content === 'string'
-                ? content
-                : Array.isArray(content)
-                  ? content.filter((c: { type?: string }) => c.type === 'text').map((c: { text?: string }) => c.text ?? '').join('')
-                  : '';
-            const idx = tab.steeringMessages.indexOf(text);
-            tab.steeringMessages = tab.steeringMessages.filter((_, i) => i !== (idx >= 0 ? idx : 0));
-        }
-
-        if (event.type === 'message_start' && event.message?.role === 'assistant') {
-            resetStreamingMessage(tab);
-        }
-
-        if (event.type === 'message_end' && event.message?.role === 'assistant') {
-            // The message list refreshes asynchronously after message_end, so it may not hold the
-            // ended message yet: its ordinal is the count of the other assistant messages.
-            const ended = event.message;
-            let ordinal = 0;
-            for (const m of tab.session.getMessages()) {
-                if (m.role === 'assistant' && (ended.timestamp === undefined || m.timestamp !== ended.timestamp)) {
-                    ordinal++;
-                }
-            }
-            if (tab.thinkingStartTime > 0 && !tab.streamingThinkingDuration) {
-                tab.streamingThinkingDuration = Math.round((Date.now() - tab.thinkingStartTime) / 1000);
-            }
-            tab.messageMeta.set(ordinal, {
-                thinkingDurationSec: tab.streamingThinkingDuration,
-                messageEndTime: Date.now(),
-            });
-            resetStreamingMessage(tab);
-        }
-
-        if (event.type === 'agent_end') {
-            tab.abortInFlight = false;
-            const willRetry = event.willRetry === true;
-            if (willRetry) {
-                const lastAssistant = lastAssistantFromMessages(event.messages);
-                tab.connectionStatus = {
-                    phase: 'retrying',
-                    message:
-                        (typeof lastAssistant?.errorMessage === 'string'
-                            ? lastAssistant.errorMessage
-                            : undefined) ?? 'Connection lost — retrying…',
-                    attempt: tab.session.session?.retryAttempt,
-                    maxAttempts: undefined,
-                };
-                tab.isStreaming = true;
-            } else {
-                const failed = failedStatusFromAssistant(
-                    lastAssistantFromMessages(event.messages),
-                );
-                tab.connectionStatus = failed ?? idleConnection();
-                tab.isStreaming = false;
-                resetStreamingMessage(tab);
-                tab.agentStartTime = 0;
-                if (isActive) {
-                    vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', false);
-                } else {
-                    tab.hasNotification = true;
-                }
-            }
-        }
-
-        if (event.type === 'message_update' && event.assistantMessageEvent && !tab.abortInFlight) {
-            const ae = event.assistantMessageEvent;
-            switch (ae.type) {
-                case 'thinking_start':
-                    tab.isThinking = true;
-                    if (tab.streamingThinking.trim().length > 0) {
-                        tab.streamingThinking += '\n\n';
-                    } else {
-                        tab.streamingThinking = '';
-                    }
-                    tab.thinkingStartTime = Date.now();
-                    tab.streamingThinkingDuration = 0;
-                    break;
-                case 'thinking_delta':
-                    tab.streamingThinking += ae.delta ?? '';
-                    break;
-                case 'thinking_end':
-                    tab.isThinking = false;
-                    if (tab.thinkingStartTime > 0) {
-                        tab.streamingThinkingDuration = Math.round(
-                            (Date.now() - tab.thinkingStartTime) / 1000
-                        );
-                    }
-                    break;
-                case 'text_delta':
-                    tab.streamingText += ae.delta ?? '';
-                    break;
-            }
+        const streaming = applyAgentEvent(tab, event, isActive);
+        if (streaming !== undefined && isActive) {
+            vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', streaming);
         }
 
         this._updateTabName(tab);
@@ -1212,7 +903,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         attachments: PendingAttachment[],
         fromVoice = false,
     ): Promise<void> {
-        this._startTurn(tab);
+        startTurn(tab);
         tab.isStreaming = true;
         if (tab.id === this._activeTabId) {
             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -1226,18 +917,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             throw err;
         }
         void this.pushStateSync();
-    }
-
-    private _startTurn(tab: TabState): void {
-        if (tab.checkpointManager.rollbackPoint !== null) {
-            tab.checkpointManager.discardSuspended();
-            tab.diffManager.discardSuspended();
-            tab.suspendedMessages = [];
-        }
-        tab.turnCounter++;
-        const turnIdx = tab.turnCounter;
-        tab.checkpointManager.startTurn(turnIdx);
-        tab.diffManager.setCurrentTurn(turnIdx);
     }
 
     private async _tryHandleSlashOnlyPrompt(
@@ -1345,7 +1024,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
 
         this._updateTabName(tab, item.text || text);
-        this._startTurn(tab);
+        startTurn(tab);
         tab.isStreaming = true;
         if (isActive) {
             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -1379,11 +1058,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private async _abortActiveTab(tab: TabState): Promise<void> {
         tab.abortInFlight = true;
         tab.isStreaming = false;
-        tab.streamingText = '';
-        tab.streamingThinking = '';
-        tab.isThinking = false;
-        tab.thinkingStartTime = 0;
-        tab.streamingThinkingDuration = 0;
+        resetStreamingMessage(tab);
         tab.agentStartTime = 0;
         tab.connectionStatus = idleConnection();
         if (tab.session.session) {
@@ -1745,11 +1420,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 : DEFAULT_CONVERSATION_TITLE;
             tab.suspendedMessages = [];
             tab.isStreaming = false;
-            tab.streamingText = '';
-            tab.streamingThinking = '';
-            tab.isThinking = false;
-            tab.thinkingStartTime = 0;
-            tab.streamingThinkingDuration = 0;
+            resetStreamingMessage(tab);
             tab.agentStartTime = 0;
             tab.messageMeta.clear();
             tab.voiceOrigins.resetSession();
@@ -1885,46 +1556,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         state.followUpMessages = [...tab.followUpMessages];
         state.pendingAttachments = toPreviewList(tab.pendingAttachments);
 
-        const planModeBase = tab.session.getPlanModeInfo();
-        const chrome = tab.session.extensionChrome.getSnapshot();
-        let planMode = enrichPlanModeFromExtensionChrome(planModeBase, chrome);
-        if (tab.planModeOverride !== undefined) {
-            const override = tab.planModeOverride;
-            planMode = {
-                ...planMode,
-                enabled: override === 'plan',
-                statusLabel:
-                    override === 'plan'
-                        ? planMode.hasPlan
-                            ? 'ready'
-                            : 'planning'
-                        : 'off',
-            };
-        }
-        const session = tab.session.session;
-        const rpivTasks = extractRpivTodoTasks(tab.session);
-        const mergedPlan = mergePlanWithRpivTodos(planMode.planMarkdown, rpivTasks);
-        state.planMode = {
-            ...planMode,
-            planMarkdown: mergedPlan,
-            todos: rpivTasks.length > 0 ? rpivTasksToPlanTodos(rpivTasks) : planMode.todos,
-        };
+        const { planMode, chrome } = tabPlanMode(tab);
+        state.planMode = planMode;
         state.piExtensionChrome = chrome;
         state.connectionStatus = tab.connectionStatus;
-        const sessionId = session?.sessionId ?? 'default';
-        this._planDocument.setPlanContent(sessionId, mergedPlan);
-        const planBody = mergedPlan.trim();
-        // Pop the editor only while pi-plan-mode is drafting. After the plan is implemented the
-        // todo Progress section keeps changing the body and would reopen it on every update.
-        const planModeActive = tab.session.backend === 'pi' && planMode.enabled;
-        if (planModeActive && planMode.hasPlan && planBody) {
-            const hash = hashPlanMarkdown(planBody);
-            if (tab.lastPlanEditorHash !== hash) {
-                tab.lastPlanEditorHash = hash;
-                void openPlanDocument(this._planDocument, sessionId);
-            }
-        } else if (!planMode.hasPlan) {
-            tab.lastPlanEditorHash = '';
+        const sessionId = tab.session.session?.sessionId ?? 'default';
+        this._planDocument.setPlanContent(sessionId, planMode.planMarkdown);
+        if (claimPlanEditorOpen(tab, planMode)) {
+            void openPlanDocument(this._planDocument, sessionId);
         }
 
         let assistantOrdinal = 0;
@@ -2307,7 +1946,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     }
                     attachments.push(...this._editorContextAttachments());
                     if (!this._uiIsStreaming(tab)) {
-                        this._startTurn(tab);
+                        startTurn(tab);
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
                             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -2369,7 +2008,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                         if (this._uiIsStreaming(tab)) {
                             await this._abortActiveTab(tab);
                         }
-                        this._startTurn(tab);
+                        startTurn(tab);
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
                             vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
@@ -2449,11 +2088,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     tab.suspendedMessages = [];
                     tab.name = DEFAULT_CONVERSATION_TITLE;
                     tab.isStreaming = false;
-                    tab.streamingText = '';
-                    tab.streamingThinking = '';
-                    tab.isThinking = false;
-                    tab.thinkingStartTime = 0;
-                    tab.streamingThinkingDuration = 0;
+                    resetStreamingMessage(tab);
                     tab.agentStartTime = 0;
                     tab.messageMeta.clear();
                     tab.voiceOrigins.resetSession();
@@ -2608,7 +2243,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     tab.diffManager.suspendChangesAfter(msg.messageIndex);
 
                     const allMsgs = tab.session.getMessages();
-                    const cutoff = this._findCutoffIndex(allMsgs, msg.messageIndex);
+                    const cutoff = turnCutoffIndex(allMsgs, msg.messageIndex);
                     if (cutoff >= 0 && cutoff < allMsgs.length) {
                         tab.suspendedMessages = allMsgs.slice(cutoff);
                         tab.session.setMessages(allMsgs.slice(0, cutoff));
@@ -2649,7 +2284,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                             msg.entryId,
                         );
                         if (!this._uiIsStreaming(tab)) {
-                            this._startTurn(tab);
+                            startTurn(tab);
                         }
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
@@ -2667,7 +2302,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     try {
                         await tab.session.regenerateAssistant(msg.assistantMessageIndex, msg.mode);
                         if (!this._uiIsStreaming(tab)) {
-                            this._startTurn(tab);
+                            startTurn(tab);
                         }
                         tab.isStreaming = true;
                         if (tab.id === this._activeTabId) {
@@ -2735,15 +2370,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'implementPlan': {
-                    if (tab.checkpointManager.rollbackPoint !== null) {
-                        tab.checkpointManager.discardSuspended();
-                        tab.diffManager.discardSuspended();
-                        tab.suspendedMessages = [];
-                    }
-                    tab.turnCounter++;
-                    const turnIdx = tab.turnCounter;
-                    tab.checkpointManager.startTurn(turnIdx);
-                    tab.diffManager.setCurrentTurn(turnIdx);
+                    startTurn(tab);
                     tab.isStreaming = true;
                     tab.streamingText = '';
                     tab.streamingThinking = '';
@@ -2933,7 +2560,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 if (!tab) continue;
                 try {
                     await tab.session.reloadSessionFromDisk();
-                    this._resetTabUiState(tab);
+                    resetTabUiState(tab);
                     this._updateTabName(tab);
                 } catch (err: unknown) {
                     const message = err instanceof Error ? err.message : String(err);
@@ -2970,19 +2597,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     /** Stop every TUI (extension shutdown). */
     async disposeTui(): Promise<void> {
         await this._tuis.stopAll();
-    }
-
-    private _findCutoffIndex(messages: any[], rollbackPoint: number): number {
-        let userMsgCount = 0;
-        for (let i = 0; i < messages.length; i++) {
-            if (messages[i].role === 'user') {
-                userMsgCount++;
-                if (userMsgCount > rollbackPoint) {
-                    return i;
-                }
-            }
-        }
-        return -1;
     }
 
     private _getHtml(webview: vscode.Webview): string {
