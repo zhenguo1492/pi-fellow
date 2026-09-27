@@ -13,6 +13,8 @@ export class VoiceInput implements vscode.Disposable {
     private readonly live = new Map<DictationSession, DictationStatus>();
     private vad: Promise<SileroVad> | undefined;
     private starting = false;
+    /** Toggled off, or disposed, while `starting` still waits on the VAD model: that start never records. */
+    private startCancelled = false;
     /** Voice mode owns the microphone; dictation stays off until it ends. */
     private blocked = false;
 
@@ -31,6 +33,11 @@ export class VoiceInput implements vscode.Disposable {
             await this.current.stop();
             return;
         }
+        if (this.starting) {
+            // The second press of the mic while the model loads: the user no longer wants to record.
+            this.startCancelled = true;
+            return;
+        }
         await this.start();
     }
 
@@ -43,6 +50,7 @@ export class VoiceInput implements vscode.Disposable {
     }
 
     dispose(): void {
+        this.startCancelled = true;
         void this.current?.stop();
     }
 
@@ -62,6 +70,7 @@ export class VoiceInput implements vscode.Disposable {
             return;
         }
         this.starting = true;
+        this.startCancelled = false;
         try {
             this.vad ??= SileroVad.load(
                 vscode.Uri.joinPath(this.extensionUri, 'media', 'vad', 'silero_vad.onnx').fsPath,
@@ -71,8 +80,8 @@ export class VoiceInput implements vscode.Disposable {
                 throw err;
             });
             const vad = await this.vad;
-            // Voice mode may have started while the VAD model was loading.
-            if (this.blocked) {
+            // Voice mode may have started, or the user changed their mind, while the VAD model was loading.
+            if (this.blocked || this.startCancelled) {
                 return;
             }
             const session: DictationSession = new DictationSession(

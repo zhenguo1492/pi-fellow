@@ -15,6 +15,8 @@ const TTS_TIMEOUT_MS = 60_000;
 export class VoiceDryRun implements vscode.Disposable {
     private _session: DictationSession | undefined;
     private _vad: Promise<SileroVad> | undefined;
+    /** Bumped by every start, stop and dispose: a start that is no longer the latest never records. */
+    private _generation = 0;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -23,7 +25,9 @@ export class VoiceDryRun implements vscode.Disposable {
 
     /** Records until the first sentence is transcribed (or `stopStt`); events carry `run`. */
     async startStt(run: number, s: VoiceSettings): Promise<void> {
-        await this.stopStt();
+        // Messages are not serialized: a stop may arrive while this still waits on the VAD model.
+        const generation = ++this._generation;
+        await this._session?.stop();
         const emit = (event: SttDryRunEvent) => this._post({ type: 'sttDryRun', run, event });
         try {
             if (!s.sttUrl.trim()) {
@@ -37,6 +41,11 @@ export class VoiceDryRun implements vscode.Disposable {
                 throw err;
             });
             const vad = await this._vad;
+            if (generation !== this._generation) {
+                // Stopped, closed or started again while the model loaded: this run never records.
+                emit({ kind: 'ended' });
+                return;
+            }
             const session: DictationSession = new DictationSession(
                 vad,
                 new SttClient({ url: s.sttUrl.trim(), model: s.sttModel.trim(), language: s.language.trim() }),
@@ -60,16 +69,16 @@ export class VoiceDryRun implements vscode.Disposable {
                 // Transcribe each sentence as it ends: the first one ends the run.
                 'asSpoken',
             );
-            this._session = session;
             session.start();
+            this._session = session;
         } catch (err: unknown) {
-            this._session = undefined;
             emit({ kind: 'error', message: describeError(err) });
             emit({ kind: 'ended' });
         }
     }
 
     async stopStt(): Promise<void> {
+        this._generation++;
         await this._session?.stop();
     }
 
@@ -101,6 +110,7 @@ export class VoiceDryRun implements vscode.Disposable {
     }
 
     dispose(): void {
+        this._generation++;
         void this._session?.stop();
     }
 }
