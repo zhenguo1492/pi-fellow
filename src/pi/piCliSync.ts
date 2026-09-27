@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getPiAgentDir, readPiCliSettingsSummary } from './piSettingsJson';
+import { readPiCliSettingsSummary } from './piSettingsJson';
 import { getAgentLayout } from './piCliPaths';
 import { readOmpConfigSummary } from './ompAgentConfig';
 import type { AgentBackend } from './agentBackend';

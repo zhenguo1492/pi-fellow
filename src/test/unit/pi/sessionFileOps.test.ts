@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { appendSessionDisplayName } from '../../../pi/sessionFileOps';
+import { appendSessionDisplayName, deleteSessionFile } from '../../../pi/sessionFileOps';
 import { readSessionJsonlEntries } from '../../../pi/sessionJsonl';
 
 describe('sessionFileOps', () => {
@@ -48,5 +48,16 @@ describe('sessionFileOps', () => {
 
     it('appendSessionDisplayName rejects empty name', () => {
         expect(() => appendSessionDisplayName(sessionFile, '   ')).toThrow(/empty/i);
+    });
+
+    it('deleteSessionFile unlinks the file when no trash CLI is available', async () => {
+        const originalPath = process.env.PATH;
+        process.env.PATH = tmpDir;
+        try {
+            await expect(deleteSessionFile(sessionFile)).resolves.toEqual({ ok: true, method: 'unlink' });
+        } finally {
+            process.env.PATH = originalPath;
+        }
+        expect(fs.existsSync(sessionFile)).toBe(false);
     });
 });

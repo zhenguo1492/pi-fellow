@@ -323,7 +323,7 @@ export interface SlashCommandListItem {
     invocation: string;
     name: string;
     description?: string;
-    source: 'builtin' | 'extension' | 'skill';
+    source: 'builtin' | 'extension' | 'prompt' | 'skill';
 }
 
 export interface SessionInfo {

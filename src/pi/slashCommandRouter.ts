@@ -31,7 +31,7 @@ export type SettingsFocusSection =
     | 'voice';
 
 /** Slash commands that need a VS Code panel instead of Pi TUI (RPC has no terminal UI). */
-const GUI_SLASH: Record<string, SettingsFocusSection | 'settings' | 'sessions' | 'fork'> = {
+const GUI_SLASH: Record<string, SettingsFocusSection | 'settings' | 'fork'> = {
     mcp: 'mcp',
     config: 'packages',
     packages: 'packages',

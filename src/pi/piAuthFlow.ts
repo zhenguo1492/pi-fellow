@@ -1,9 +1,8 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import type { OAuthLoginCallbacks } from '@earendil-works/pi-ai';
 import { createVscodeOAuthCallbacks } from './oauthCallbacks';
 import { getPiAgentDir, resolveCliTarget } from './piCliPaths';
-import { loadPiCodingAgent, loadPiInteractiveHelpers } from './loadPiCodingAgent';
+import { loadPiCodingAgent, loadPiInteractiveHelpers, type PiOAuthLoginCallbacks } from './loadPiCodingAgent';
 import type { PiRpcSessionManager } from './rpcSession';
 import type { TuiAuthCommand } from '../shared/protocol';
 import type { PiChatSession } from './slashCommands';
@@ -72,7 +71,7 @@ async function getLogoutProviderOptions(): Promise<ProviderOption[]> {
     return options.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function createOAuthLoginCallbacks(usesCallbackServer: boolean): OAuthLoginCallbacks {
+function createOAuthLoginCallbacks(usesCallbackServer: boolean): PiOAuthLoginCallbacks {
     const base = createVscodeOAuthCallbacks();
     if (!usesCallbackServer) {
         return base;
@@ -88,7 +87,7 @@ function createOAuthLoginCallbacks(usesCallbackServer: boolean): OAuthLoginCallb
     return {
         ...base,
         onAuth: (info) => {
-            base.onAuth?.(info);
+            base.onAuth(info);
             void vscode.window
                 .showInputBox({
                     title: 'Pi login',

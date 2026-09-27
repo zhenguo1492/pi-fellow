@@ -20,7 +20,14 @@ vi.mock('vscode', () => ({
     },
 }));
 
-import { getAgentLayout, initWindowBackend, onDidChangeWindowBackend, setWindowBackend } from '../../../pi/piCliPaths';
+import { resolveAgentDir } from '../../../pi/agentBackend';
+import {
+    getAgentLayout,
+    getPiAgentDir,
+    initWindowBackend,
+    onDidChangeWindowBackend,
+    setWindowBackend,
+} from '../../../pi/piCliPaths';
 
 function memento(): vscode.Memento {
     const values = new Map<string, unknown>();
@@ -79,5 +86,13 @@ describe('per-window backend', () => {
         expect(getAgentLayout().backend).toBe('omp');
         expect(seen).toEqual(['omp']);
         sub.dispose();
+    });
+
+    it('resolves the agent dir of an explicitly requested backend, not the window one', () => {
+        initWindowBackend(memento());
+        setWindowBackend('omp');
+
+        expect(getPiAgentDir('pi')).toBe(resolveAgentDir('pi'));
+        expect(getPiAgentDir()).toBe(resolveAgentDir('omp'));
     });
 });

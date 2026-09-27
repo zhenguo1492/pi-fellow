@@ -89,7 +89,7 @@ export async function showPiPackageCatalogPicker(
         debounceTimer = setTimeout(() => void runSearch(value), 250);
     });
 
-    quickPick.onDidTriggerItemButton(async (item, button) => {
+    quickPick.onDidTriggerItemButton(async ({ item, button }) => {
         if (button.tooltip === 'Open homepage' && item.entry.homepage) {
             await vscode.env.openExternal(vscode.Uri.parse(item.entry.homepage));
         }

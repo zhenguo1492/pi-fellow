@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, unlink } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { readSessionJsonlEntries } from './sessionJsonl';
 import { serializeJsonLine } from './jsonl';

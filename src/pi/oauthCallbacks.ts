@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import type { OAuthLoginCallbacks } from '@earendil-works/pi-ai';
+import type { PiOAuthLoginCallbacks } from './loadPiCodingAgent';
 
 /** OAuth / login flows using VS Code UI instead of Pi TUI. */
-export function createVscodeOAuthCallbacks(): OAuthLoginCallbacks {
+export function createVscodeOAuthCallbacks(): PiOAuthLoginCallbacks {
     return {
         onAuth: (info) => {
             void vscode.env.openExternal(vscode.Uri.parse(info.url));
