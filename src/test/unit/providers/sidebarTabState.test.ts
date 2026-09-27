@@ -197,4 +197,17 @@ describe('turnCutoffIndex', () => {
         expect(turnCutoffIndex(messages, 1)).toBe(3);
         expect(turnCutoffIndex(messages, 2)).toBe(-1);
     });
+
+    it('counts turns like the webview: a steer delivered mid-run stays in its turn', () => {
+        const steered = [
+            { role: 'user' },
+            { role: 'assistant' },
+            { role: 'user', steering: true },
+            { role: 'assistant' },
+            { role: 'user' },
+            { role: 'assistant' },
+        ];
+        expect(turnCutoffIndex(steered, 1)).toBe(4);
+        expect(turnCutoffIndex(steered, 2)).toBe(-1);
+    });
 });

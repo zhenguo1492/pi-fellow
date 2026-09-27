@@ -424,11 +424,14 @@ export function claimPlanEditorOpen(tab: TabState, planMode: PlanModeInfo): bool
     return false;
 }
 
-/** Index of the first message after the first `keptTurns` user turns, or -1 when there is none. */
-export function turnCutoffIndex(messages: readonly { role?: unknown }[], keptTurns: number): number {
+/**
+ * Index of the first message after the first `keptTurns` user turns, or -1 when there is none. Turns are
+ * numbered like the webview and the checkpoints: a steer delivered mid-run belongs to the turn it steered.
+ */
+export function turnCutoffIndex(messages: readonly { role?: unknown; steering?: unknown }[], keptTurns: number): number {
     let userMsgCount = 0;
     for (let i = 0; i < messages.length; i++) {
-        if (messages[i].role === 'user') {
+        if (messages[i].role === 'user' && messages[i].steering !== true) {
             userMsgCount++;
             if (userMsgCount > keptTurns) {
                 return i;
