@@ -238,9 +238,9 @@ export function getAgentLayout(preferredBackend?: AgentBackend): AgentLayout {
     return { backend, agentDir: resolveAgentDir(backend) };
 }
 
-/** Agent state dir of the active backend (`~/.omp/agent` or `~/.pi/agent`, env overrides honoured). */
-export function getPiAgentDir(): string {
-    return getAgentLayout().agentDir;
+/** Agent state dir (`~/.omp/agent` or `~/.pi/agent`, env overrides honoured) of `preferredBackend`, else the active one. */
+export function getPiAgentDir(preferredBackend?: AgentBackend): string {
+    return getAgentLayout(preferredBackend).agentDir;
 }
 
 /** Workspace folder for Pi session scope (realpath when possible, matches CLI resolvePath). */
