@@ -1,6 +1,5 @@
 import { vscode } from '../vscodeApi';
 import { el } from './helpers';
-import { iconsBaseUri } from './icons';
 import { getAssistantPlainForCopy, getUserMessagePlainForCopy } from './messageContent';
 import { state } from './state';
 import { copyPlainText, showToast } from './toast';
@@ -22,6 +21,12 @@ function postRegenerateAssistant(assistantMessageIndex: number, mode: 'new' | 'f
     vscode.postMessage({ type: 'regenerateAssistant', assistantMessageIndex, mode });
 }
 
+/** Inline SVGs drawn in `currentColor`; an `<img>` SVG cannot inherit the text colour and renders black. */
+const COPY_ICON =
+    '<svg class="msg-action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg>';
+const EDIT_ICON =
+    '<svg class="msg-action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="M13 7l4 4"/></svg>';
+
 export function buildMessageActions(role: 'user' | 'assistant', index: number, msg: any): HTMLElement {
     const bar = el('div', 'message-actions');
     bar.dataset.msgIndex = String(index);
@@ -31,17 +36,17 @@ export function buildMessageActions(role: 'user' | 'assistant', index: number, m
     copyBtn.type = 'button';
     copyBtn.dataset.action = 'copy';
     copyBtn.title = 'Copy';
-    copyBtn.textContent = '⎘';
+    copyBtn.innerHTML = COPY_ICON;
     copyBtn.classList.add('msg-action--icon');
 
     bar.appendChild(copyBtn);
 
     if (role === 'user') {
-        const editBtn = el('button', 'msg-action');
+        const editBtn = el('button', 'msg-action msg-action--icon');
         editBtn.type = 'button';
         editBtn.dataset.action = 'edit';
         editBtn.title = 'Edit in composer';
-        editBtn.innerHTML = `<img class="msg-action-icon" src="${iconsBaseUri()}/pencil.svg" alt="">`;
+        editBtn.innerHTML = EDIT_ICON;
         bar.appendChild(editBtn);
 
         const resendNew = el('button', 'msg-action');

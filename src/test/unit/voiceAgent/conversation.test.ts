@@ -37,6 +37,19 @@ describe('conversation: user turns', () => {
         expect(effects).toEqual([]);
         expect(floorFree(state)).toBe(true);
     });
+
+    it('keeps a typed message’s attachments until the words still transcribing join it', () => {
+        const image = { type: 'image' as const, mimeType: 'image/png', data: 'AAAA' };
+        const attachments = { names: ['pasted-image-1.png'], images: [image], files: '<file name="/p/pasted-image-1.png"></file>\n' };
+        const waiting = run([
+            { type: 'userSpeechStart', at },
+            { type: 'userSpeechEnd', at, silenceAt: at },
+            { type: 'typed', text: '', attachments, at },
+        ]);
+        expect(waiting.effects).toEqual([]);
+        const done = run([{ type: 'transcript', text: '这张图里是什么', at }], waiting.state);
+        expect(done.effects).toEqual([{ type: 'prompt', turnId: 1, text: '这张图里是什么', source: 'stt', attachments }]);
+    });
 });
 
 describe('conversation: replies', () => {

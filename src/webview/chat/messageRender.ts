@@ -48,17 +48,22 @@ export function renderMessage(
     }
     if (role === 'user') {
         const group = el('div', 'message-group-user');
+        if (turnNumber !== undefined) {
+            // Absolute (1-based): queued steers find their prompt even when earlier turns are not rendered.
+            group.dataset.turn = String(turnNumber);
+        }
         const card = el('div', 'user-prompt-card');
-        card.appendChild(buildMessageActions('user', index, msg));
-
-        const wrapper = el('div', `message message-${role}`);
+        const actions = buildMessageActions('user', index, msg);
         if (turnNumber !== undefined && !state.isStreaming) {
-            const checkpointBtn = el('button', 'checkpoint-btn');
+            const checkpointBtn = el('button', 'checkpoint-btn msg-action msg-action--icon');
+            checkpointBtn.type = 'button';
             checkpointBtn.title = 'Restore to this checkpoint';
             checkpointBtn.dataset.turn = String(turnNumber);
             checkpointBtn.innerHTML = '&#8634;';
-            wrapper.appendChild(checkpointBtn);
+            actions.prepend(checkpointBtn);
         }
+
+        const wrapper = el('div', `message message-${role}`);
         if (msg._fromVoice) {
             wrapper.insertAdjacentHTML('beforeend', FROM_VOICE_TAG);
         }
@@ -120,6 +125,10 @@ export function renderMessage(
             wrapper.appendChild(buildMessageAttachmentChips(fileAttachments));
         }
         card.appendChild(wrapper);
+        // Below the text, so the hover actions never cover it; the clamp toggle joins it on the left.
+        const bar = el('div', 'user-prompt-bar');
+        bar.appendChild(actions);
+        card.appendChild(bar);
         group.appendChild(card);
 
         const footer = buildMessageFooter(msg, index);

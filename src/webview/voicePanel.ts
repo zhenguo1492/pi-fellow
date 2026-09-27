@@ -20,6 +20,7 @@ import {
     type VoiceViewHostMessage,
     type VoiceViewState,
 } from '../shared/voiceViewProtocol';
+import { copyPlainText } from './chat/toast';
 import { formatTokenCount } from './tokenStatsBar';
 import { ICON_ROBOT } from './voiceBar';
 import { vscode } from './vscodeApi';
@@ -249,10 +250,17 @@ interface TurnView {
     gutterTime: HTMLElement;
     attach: HTMLElement;
     pre: HTMLElement;
+    /** Holds `pre`, `body` and `post`; clamped to three lines for long user / setting texts. */
+    line: HTMLElement;
     body: HTMLElement;
     post: HTMLElement;
     error: HTMLElement;
     chips: HTMLElement;
+    /** Show more / Copy under a clamped `line`; hidden unless the text overflows three lines. */
+    clamp: HTMLElement;
+    more: HTMLButtonElement;
+    /** The full text of a user / setting turn (clampable); undefined for the bot's replies. */
+    clampText?: string;
     /** Stopwatch button after the header's time, shown on hover; toggles `timingBody` (the turn's latency breakdown). */
     timing: HTMLButtonElement;
     timingBody: HTMLElement;
@@ -263,6 +271,8 @@ interface TurnView {
 const turns = new Map<string, TurnView>();
 /** Keys of expanded chips (`<entry id>:<chip>`), kept across re-renders and snapshots. */
 const openChips = new Set<string>();
+/** Entry ids of long user / setting turns the user expanded. */
+const expandedTurns = new Set<string>();
 let sessionId: string | undefined;
 
 function createTurn(): TurnView {
@@ -270,7 +280,7 @@ function createTurn(): TurnView {
     el.innerHTML =
         '<div class="vp-av" aria-hidden="true"></div><time class="vp-gtime"></time><div class="vp-who"><span class="vp-name"></span><time class="vp-time"></time><button type="button" class="vp-timing" aria-expanded="false" hidden>' +
         TIMING_ICON +
-        '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-err" hidden></div><div class="vp-chips"></div><div class="vp-chip-body vp-timing-body" hidden></div></div>';
+        '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-clamp" hidden><button type="button" class="vp-more"></button><button type="button" class="vp-copy" title="Copy message">Copy</button></div><div class="vp-err" hidden></div><div class="vp-chips"></div><div class="vp-chip-body vp-timing-body" hidden></div></div>';
     const part = <T extends HTMLElement = HTMLElement>(sel: string) => el.querySelector<T>(sel)!;
     return {
         el,
@@ -280,10 +290,13 @@ function createTurn(): TurnView {
         gutterTime: part('.vp-gtime'),
         attach: part('.vp-attach'),
         pre: part('.vp-pre'),
+        line: part('.vp-line'),
         body: part('.vp-body'),
         post: part('.vp-post'),
         error: part('.vp-err'),
         chips: part('.vp-chips'),
+        clamp: part('.vp-clamp'),
+        more: part<HTMLButtonElement>('.vp-more'),
         timing: part<HTMLButtonElement>('.vp-timing'),
         timingBody: part('.vp-timing-body'),
     };
@@ -299,6 +312,7 @@ function renderStream(s: VoiceViewState): void {
         sessionId = s.session.id;
         turns.clear();
         openChips.clear();
+        expandedTurns.clear();
         stream.replaceChildren(emptyEl);
     }
     const follow = isFollowing();
@@ -348,6 +362,7 @@ function renderStream(s: VoiceViewState): void {
 }
 
 function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
+    view.el.dataset.id = entry.id;
     if (!view.time.textContent) {
         // An entry's time never changes: set once, not on every snapshot.
         const when = new Date(entry.at).toLocaleString();
@@ -369,6 +384,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         setHtml(view.attach, '');
         setHtml(view.pre, entry.bargeIn ? '<span class="vp-barge">Barged in</span>' : '');
         setText(view, entry.text);
+        setClampText(view, entry.text);
         setHtml(view.post, '');
         setError(view, undefined);
         setHtml(view.chips, '');
@@ -392,6 +408,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         setHtml(view.attach, '');
         setHtml(view.pre, '');
         setText(view, entry.text);
+        setClampText(view, entry.text);
         setHtml(view.post, '');
         setError(view, undefined);
         setHtml(view.chips, '');
@@ -401,6 +418,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
 
     const kind = entry.proactive ? 'narr' : 'bot';
     view.el.className = `vp-turn ${kind}${entry.silent ? ' silent' : ''}`;
+    setClampText(view, undefined);
     setHtml(view.avatar, AVATAR[kind]);
     setHtml(view.who, `${entry.proactive ? 'Update' : 'Bot'}<span class="vp-badge">AI</span>`);
     setHtml(view.attach, debug && entry.input ? escapeHtml(entry.input) : '');
@@ -483,6 +501,75 @@ function setText(view: TurnView, text: string): void {
     }
     view.mode = 'text';
 }
+
+/** Lines a long user / setting turn shows until expanded. */
+const TURN_LINE_CLAMP = 3;
+let clampFrame = 0;
+
+/** Measures the clamps on the next frame: after the snapshot's DOM writes, before paint. */
+function scheduleClamps(): void {
+    if (!clampFrame) {
+        clampFrame = requestAnimationFrame(() => {
+            clampFrame = 0;
+            measureClamps();
+        });
+    }
+}
+
+function setClampText(view: TurnView, text: string | undefined): void {
+    if (view.clampText === text) {
+        return;
+    }
+    view.clampText = text;
+    if (text === undefined) {
+        view.line.classList.remove('vp-clamped');
+        view.clamp.hidden = true;
+    } else {
+        scheduleClamps();
+    }
+}
+
+/**
+ * Clamps long user / setting turns to three lines behind Show more, and offers More on a task card
+ * whose one line is cut off. All class writes come before all reads: one layout for the transcript.
+ * A hidden view measures as zero and keeps its last state; the resize observer retries it once shown.
+ */
+function measureClamps(): void {
+    const views = [...turns].filter(([, view]) => view.clampText !== undefined);
+    for (const [id, view] of views) {
+        view.line.classList.toggle('vp-clamped', !expandedTurns.has(id));
+    }
+    const lineHeight = views.length > 0 ? parseFloat(getComputedStyle(views[0][1].line).lineHeight) : NaN;
+    const maxHeight = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight * TURN_LINE_CLAMP : 60;
+    const overflows = views.map(([id, view]) => {
+        const shown = view.line.clientHeight;
+        if (shown === 0) {
+            return undefined;
+        }
+        return expandedTurns.has(id) ? shown > maxHeight + 4 : view.line.scrollHeight > shown + 1;
+    });
+    const cards = [...cardsEl.querySelectorAll<HTMLElement>('.vp-ask:not(.open)')];
+    const cut = cards.map((card) => {
+        const text = card.querySelector<HTMLElement>('.vp-q')!;
+        return text.clientWidth === 0 ? undefined : text.scrollWidth > text.clientWidth;
+    });
+    views.forEach(([id, view], i) => {
+        const overflow = overflows[i];
+        if (overflow === undefined) {
+            return;
+        }
+        view.clamp.hidden = !overflow;
+        const expanded = expandedTurns.has(id);
+        view.more.textContent = expanded ? 'Show less' : 'Show more';
+        view.more.setAttribute('aria-expanded', String(expanded));
+    });
+    cards.forEach((card, i) => {
+        if (cut[i] !== undefined) {
+            card.querySelector<HTMLButtonElement>('.vp-more')!.hidden = !cut[i];
+        }
+    });
+}
+new ResizeObserver(scheduleClamps).observe(stream);
 
 function setError(view: TurnView, error: string | undefined): void {
     view.error.hidden = !error;
@@ -656,6 +743,18 @@ stream.addEventListener(
 );
 
 stream.addEventListener('click', (e) => {
+    const clampButton = (e.target as Element).closest<HTMLButtonElement>('.vp-more, .vp-copy');
+    const id = clampButton?.closest<HTMLElement>('.vp-turn')?.dataset.id;
+    const view = id ? turns.get(id) : undefined;
+    if (id && view?.clampText !== undefined) {
+        if (clampButton!.classList.contains('vp-copy')) {
+            copyPlainText(view.clampText);
+        } else if (!expandedTurns.delete(id)) {
+            expandedTurns.add(id);
+        }
+        scheduleClamps();
+        return;
+    }
     const button = (e.target as Element).closest<HTMLButtonElement>('.vp-timing');
     const key = button?.dataset.key;
     if (!button || !key) {
@@ -674,12 +773,22 @@ stream.addEventListener('click', (e) => {
 // The worker and its requests are not repeated here: the chat around the panel shows them.
 
 const cardEls = new Map<string, Element>();
+/** Ids of task cards the user expanded to read the whole task. */
+const openProposals = new Set<string>();
+/** The snapshot the cards were last drawn from, redrawn when a card is expanded or folded. */
+let lastState: VoiceViewState | undefined;
 
 function renderCards(s: VoiceViewState): void {
+    lastState = s;
     const cards: Array<{ key: string; html: string }> = [];
+    for (const id of openProposals) {
+        if (!s.proposals.some((p) => p.id === id)) {
+            openProposals.delete(id);
+        }
+    }
     if (!s.session.readonly) {
         for (const p of s.proposals) {
-            cards.push({ key: `prop:${p.id}`, html: proposalCardHtml(p) });
+            cards.push({ key: `prop:${p.id}`, html: proposalCardHtml(p, openProposals.has(p.id)) });
         }
         if (s.research.length > 0) {
             cards.push({ key: 'research', html: researchCardHtml(s.research) });
@@ -702,6 +811,7 @@ function renderCards(s: VoiceViewState): void {
             }
             el = next;
             cardEls.set(card.key, el);
+            scheduleClamps();
         }
         const expected: Element | null = prev ? prev.nextElementSibling : cardsEl.firstElementChild;
         if (expected !== el) {
@@ -718,11 +828,14 @@ function renderCards(s: VoiceViewState): void {
     tick();
 }
 
-function proposalCardHtml(p: VoiceProposalCard): string {
-    return `<div class="vp-card vp-ask" title="It changes files, so it needs your go-ahead. Say “go ahead” or “cancel”.">
+/** A task to confirm: one cut-off line with More when it does not fit, the whole task when `open`. */
+function proposalCardHtml(p: VoiceProposalCard, open: boolean): string {
+    const id = escapeHtml(p.id);
+    const text = escapeHtml(p.message);
+    return `<div class="vp-card vp-ask${open ? ' open' : ''}" title="It changes files, so it needs your go-ahead. Say “go ahead” or “cancel”.">
         <span class="vp-card-h">Confirm task</span>
-        <span class="vp-q" title="${escapeHtml(p.message)}">${escapeHtml(p.message)}</span>
-        <span class="vp-card-btns"><button type="button" class="vp-pbtn" data-act="proposal" data-action="confirm" data-id="${escapeHtml(p.id)}">Confirm</button><button type="button" class="vp-pbtn sec" data-act="proposal" data-action="cancel" data-id="${escapeHtml(p.id)}">Cancel</button></span>
+        <span class="vp-q"${open ? '' : ` title="${text}"`}>${text}</span>
+        <span class="vp-card-btns"><button type="button" class="vp-more" data-act="proposal-more" data-id="${id}" aria-expanded="${open}"${open ? '' : ' hidden'}>${open ? 'Less' : 'More'}</button><button type="button" class="vp-copy" data-act="proposal-copy" data-id="${id}" title="Copy the task">Copy</button><button type="button" class="vp-pbtn" data-act="proposal" data-action="confirm" data-id="${id}">Confirm</button><button type="button" class="vp-pbtn sec" data-act="proposal" data-action="cancel" data-id="${id}">Cancel</button></span>
     </div>`;
 }
 
@@ -754,9 +867,30 @@ function tick(): void {
 setInterval(tick, 1000);
 
 cardsEl.addEventListener('click', (e) => {
-    const target = (e.target as HTMLElement).closest<HTMLElement>('[data-act="proposal"]');
-    if (target) {
-        post({ type: 'proposal', id: target.dataset.id!, action: target.dataset.action === 'confirm' ? 'confirm' : 'cancel' });
+    const target = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+    const id = target?.dataset.id;
+    if (!target || !id) {
+        return;
+    }
+    switch (target.dataset.act) {
+        case 'proposal':
+            post({ type: 'proposal', id, action: target.dataset.action === 'confirm' ? 'confirm' : 'cancel' });
+            return;
+        case 'proposal-copy': {
+            const proposal = lastState?.proposals.find((p) => p.id === id);
+            if (proposal) {
+                copyPlainText(proposal.message);
+            }
+            return;
+        }
+        case 'proposal-more':
+            if (!openProposals.delete(id)) {
+                openProposals.add(id);
+            }
+            if (lastState) {
+                renderCards(lastState);
+            }
+            return;
     }
 });
 

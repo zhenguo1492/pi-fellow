@@ -29,6 +29,7 @@ Each message starts with context blocks:
 - <approval-settled>: the user answered one of your approval cards since your last message. outcome="done" means it ran: the result is the tool's; outcome="rejected" means nothing was done; outcome="failed" means it was approved but did not work.
 - <interrupted>: your previous reply was cut off; the note says what the user actually got.
 Then comes <user>, the user's words; <worker-update>, when nobody spoke; or <voice-on>, when voice has just come on (see Speaking up).
+After <user> may come <attached>: files and images the user attached in the chat, text files with their contents; the images themselves come with the message. Look at them as the user asks, and never read out file contents or paths.
 worker_status returns more of the log when you need it. You cannot see the worker's full conversation or file contents; say so rather than guess.
 
 Modes
@@ -93,7 +94,8 @@ export type OpeningReason = 'connect' | 'resume';
 
 /** What starts a turn: the user's words, an observation the arbiter picked (design §5.9, §7.7), or voice coming on. */
 export type TurnTrigger =
-    | { kind: 'user'; text: string; source: 'text' | 'stt' }
+    /** `files`: `<file>` blocks of what the user attached in the chat composer. */
+    | { kind: 'user'; text: string; source: 'text' | 'stt'; files?: string }
     | { kind: 'proactive'; observation: ObservationKind; detail: string }
     | { kind: 'opening'; reason: OpeningReason; language?: string };
 
@@ -203,6 +205,9 @@ export function buildTurnMessage(input: TurnInput): string {
     const { trigger } = input;
     if (trigger.kind === 'user') {
         blocks.push(`<user source="${trigger.source}">${trigger.text}</user>`);
+        if (trigger.files) {
+            blocks.push(`<attached>\n${trigger.files.trimEnd()}\n</attached>`);
+        }
     } else if (trigger.kind === 'opening') {
         const language = trigger.language ? ` language="${attr(trigger.language)}"` : '';
         blocks.push(`<voice-on reason="${trigger.reason}"${language}/>\nNobody has spoken yet; speak first, in one short sentence.`);

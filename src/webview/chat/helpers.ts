@@ -4,11 +4,13 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: st
     return e;
 }
 
+/** One formatter for every footer: `toLocaleTimeString` builds a new one per call, which dominates long rebuilds. */
+const TIME_FORMAT = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
 /** Local wall-clock time for an RPC timestamp given in seconds or milliseconds; `''` when absent. */
 export function formatTimestamp(ts: number): string {
     if (!ts) return '';
-    const d = new Date(ts < 1e12 ? ts * 1000 : ts);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return TIME_FORMAT.format(ts < 1e12 ? ts * 1000 : ts);
 }
 
 export function truncate(s: string, maxLen: number): string {

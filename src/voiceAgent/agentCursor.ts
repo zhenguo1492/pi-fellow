@@ -46,14 +46,18 @@ const STYLE: Record<FocusKind, { color: string; background: string; label: strin
 /**
  * Pi's focus in the editor (docs/voice-pair-agent-cursor.md): the code the voice agent talks about,
  * and what it or the worker reads or writes. Highlighted wherever the file is visible, labelled Pi,
- * and shown in the status bar. While the user follows Pi, the editor opens and scrolls to it; the
- * user's cursor, selection and keyboard focus never move. Typing in the editor stops following.
+ * and shown in the status bar. While the user follows Pi (the follow button next to Voice agent above
+ * the chat input), the editor opens and scrolls to it; the user's cursor, selection and keyboard focus
+ * never move. Typing in the editor stops following.
  */
 export class AgentCursor implements vscode.Disposable {
     private readonly _styles: Record<FocusKind, Decorations>;
     private readonly _status = vscode.window.createStatusBarItem('oh-my-pi-chater.piFocus', vscode.StatusBarAlignment.Right, 99.98);
     private _focus: Focus | undefined;
     private _following: boolean;
+    private readonly _followingChanged = new vscode.EventEmitter<boolean>();
+    /** Following was turned on or off: by the follow button, or by the user typing. */
+    readonly onDidChangeFollowing = this._followingChanged.event;
     /** Pi's own edits in flight (pair mode): their document changes are not the user typing. */
     private _selfEdits = 0;
     /** Until then tool activity is deferred (`_deferred`), so the current focus stays put. */
@@ -79,9 +83,9 @@ export class AgentCursor implements vscode.Disposable {
             writing: decorations(STYLE.writing),
         };
         this._status.name = 'Pi focus';
-        this._status.command = 'oh-my-pi-chater.voiceAgent.toggleFollowPi';
         this._subscriptions = [
             this._status,
+            this._followingChanged,
             ...Object.values(this._styles).flatMap((s) => Object.values(s)),
             // Decorations belong to a TextEditor; switching tabs makes a new one without them.
             vscode.window.onDidChangeVisibleTextEditors(() => this._paint()),
@@ -109,8 +113,12 @@ export class AgentCursor implements vscode.Disposable {
 
     /** Following again goes straight to where Pi is. */
     setFollowing(following: boolean): void {
+        if (following === this._following) {
+            return;
+        }
         this._following = following;
         this._showState();
+        this._followingChanged.fire(following);
         const focus = this._focus;
         if (following && focus) {
             this._enqueue(async () => void (await this._reveal(focus)));
@@ -385,8 +393,6 @@ export class AgentCursor implements vscode.Disposable {
     }
 
     private _showState(): void {
-        void vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.piFocus', this._focus !== undefined);
-        void vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.piFollowing', this._following);
         const focus = this.current();
         if (!focus) {
             this._status.hide();
@@ -396,7 +402,7 @@ export class AgentCursor implements vscode.Disposable {
         const where = `${focus.path}${lines}${focus.name ? ` · ${focus.name}` : ''}`;
         const doing = focus.kind === 'pointing' ? '' : `${focus.kind} `;
         this._status.text = `$(${this._following ? 'eye' : 'eye-closed'}) Pi: ${doing}${where}`;
-        this._status.tooltip = `Pi ${STYLE[focus.kind].verb} ${where}.\n${this._following ? 'Following Pi: click to stop.' : 'Click to follow Pi and go there.'}`;
+        this._status.tooltip = `Pi ${STYLE[focus.kind].verb} ${where}.\n${this._following ? 'Following Pi.' : 'Not following Pi.'} The follow button next to Voice agent above the chat input switches it.`;
         this._status.show();
     }
 }

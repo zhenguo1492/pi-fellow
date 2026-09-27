@@ -8,6 +8,7 @@
  * timer and the page's audio queue all stop on `cancelTurn`, and nothing of that turn reaches the
  * reducer afterwards. What plays, and when, comes from the audio page's reports, not estimates.
  */
+import { voiceUserText, type VoiceAttachments } from '../shared/voiceViewProtocol';
 import type { CodeAnchor } from './codeAnchors';
 import { echoSource, floorFree, initialState, phaseOf, reduce, type ConvEvent, type ConvState, type Effect, type Metrics, type Phase } from './conversation';
 import { classifyBargeIn, isHallucination, type BargeInVerdict } from './echoFilter';
@@ -271,8 +272,8 @@ export class VoiceMode {
     }
 
     /** A message typed while voice mode is on: cuts the reply off and goes out like speech. */
-    type(text: string): void {
-        this._dispatch({ type: 'typed', text, at: Date.now() });
+    type(text: string, attachments?: VoiceAttachments): void {
+        this._dispatch({ type: 'typed', text, attachments, at: Date.now() });
     }
 
     async stop(): Promise<void> {
@@ -322,9 +323,14 @@ export class VoiceMode {
             case 'prompt': {
                 const turn = { id: effect.turnId, ctl: new AbortController() };
                 this._turn = turn;
-                const listener = this._replyListener(turn, this._options.transcript(effect.text, effect.source, turn.id, this._state.metrics));
+                const shown = voiceUserText(effect.text, effect.attachments);
+                const listener = this._replyListener(turn, this._options.transcript(shown, effect.source, turn.id, this._state.metrics));
                 // A turn that cannot run ends through the listener with its error (VoiceAgent.say never rejects).
-                void this._options.agent.say(effect.text, effect.source, listener, { signal: turn.ctl.signal, interrupted: effect.interrupted });
+                void this._options.agent.say(effect.text, effect.source, listener, {
+                    signal: turn.ctl.signal,
+                    interrupted: effect.interrupted,
+                    attachments: effect.attachments,
+                });
                 return;
             }
             case 'adopt':

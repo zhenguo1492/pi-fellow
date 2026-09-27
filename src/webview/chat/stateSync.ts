@@ -12,15 +12,17 @@ import { updateMessages } from './transcript';
 import { setStreamPhase, updateStreamingUI } from './streaming';
 import { updateQueuedMessageBanner } from './queuedBanner';
 import { updateAttachmentsStrip } from './composerChips';
-import { clearComposerEdit, getComposerEdit, updateInputArea } from './composer';
+import { clearComposerEdit, getComposerEdit, restoreComposerDraft, stashComposerDraft, updateInputArea } from './composer';
 import { updateTabs } from './tabs';
 import { updateModeSwitch, updatePlanPanel } from './plan';
-import { updatePermissionControl } from './permission';
+import { updateEffortControl, updatePermissionControl } from './permission';
 import { syncToolApprovalCards } from './toolApproval';
 import { isSkeletonBuilt, render, updateTuiToggle } from './layout';
 
 export function applyStateSync(s: SerializedAgentState): void {
     const prevTab = state.activeTabId;
+    const tabSwitched = prevTab !== (s.activeTabId ?? '');
+    if (tabSwitched) stashComposerDraft(prevTab);
     const prevStreamingText = state.streamingText;
     const prevStreamingThinking = state.streamingThinking;
     const prevIsThinking = state.isThinking;
@@ -37,7 +39,6 @@ export function applyStateSync(s: SerializedAgentState): void {
     state.rollbackPoint = s.rollbackPoint ?? null;
     state.tabs = s.tabs ?? [];
     state.activeTabId = s.activeTabId ?? '';
-    const tabSwitched = prevTab !== state.activeTabId;
     state.streamingText = s.streamingText ?? '';
     state.streamingThinking = s.streamingThinking ?? '';
     state.isThinking = s.isThinking ?? false;
@@ -76,16 +77,13 @@ export function applyStateSync(s: SerializedAgentState): void {
     }
     applyVoiceMicStatus(s.voice);
     applyVoiceBarStatus(s.voice);
-    // Before the composer updates below: it talks to what the tab shows, and is locked in the Bot
-    // view while the voice agent is off. An edit of a worker message ends there.
+    // The composer talks to what the tab shows and is locked in the Bot view while voice is off.
     const botView = !state.tuiMode && state.tabs.some((t) => t.isActive && t.botView);
     setBotViewShown(botView);
-    if (botView && getComposerEdit()) {
-        clearComposerEdit();
-    }
 
     if (tabSwitched || !isSkeletonBuilt()) {
         render();
+        if (tabSwitched) restoreComposerDraft(state.activeTabId);
         resetUserScroll();
         scrollToBottom(true);
         updateScrollButton();
@@ -105,6 +103,10 @@ export function applyStateSync(s: SerializedAgentState): void {
         updatePlanPanel();
         updateScrollButton();
     }
+    // Clear only the incoming tab's edit context, after restoring its draft.
+    if (botView && getComposerEdit()) {
+        clearComposerEdit();
+    }
     if (state.isStreaming) {
         if (state.isThinking) {
             setStreamPhase('thinking');
@@ -118,6 +120,7 @@ export function applyStateSync(s: SerializedAgentState): void {
     }
     updateTuiAuthBanner();
     setPickerCurrentModel(state.model);
+    updateEffortControl();
     updateTuiToggle();
     syncTuiView(state.tabs.filter((t) => t.tuiMode).map((t) => t.id), state.activeTabId);
     document.getElementById('app')?.classList.toggle('bot-mode', botView);

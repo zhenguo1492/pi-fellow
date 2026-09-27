@@ -49,7 +49,7 @@ export function clearStreamingToolArtifacts(): void {
     }
     container
         .querySelectorAll(
-            'omp-tool-view, .tool-card-wrapper, .diff-card, .tool-approval-card',
+            '.tv-card, .tool-card-wrapper, .diff-card, .tool-approval-card',
         )
         .forEach((node) => node.remove());
 }

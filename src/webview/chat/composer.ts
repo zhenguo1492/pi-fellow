@@ -25,6 +25,53 @@ export function getComposerEdit(): Readonly<ComposerEditState> | null {
     return composerEdit;
 }
 
+/** Unsent composer text of the tabs not shown: a tab switch rebuilds the composer. */
+const drafts = new Map<string, {
+    text: string;
+    height: string;
+    selectionStart: number;
+    selectionEnd: number;
+    edit: ComposerEditState | null;
+    backend: typeof state.activeBackend;
+}>();
+
+/** Keeps the composer's unsent text for `tabId`; call before a tab switch rebuilds the composer. */
+export function stashComposerDraft(tabId: string): void {
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    if (input && tabId && (input.value || composerEdit)) {
+        drafts.set(tabId, {
+            text: input.value,
+            height: input.style.height,
+            selectionStart: input.selectionStart,
+            selectionEnd: input.selectionEnd,
+            edit: composerEdit,
+            backend: state.activeBackend,
+        });
+    } else {
+        drafts.delete(tabId);
+    }
+    composerEdit = null;
+}
+
+/** Puts `tabId`'s stashed text back into the rebuilt composer. */
+export function restoreComposerDraft(tabId: string): void {
+    // Only the active backend's tabs are included in stateSync.
+    for (const [id, draft] of drafts) {
+        if (draft.backend === state.activeBackend && !state.tabs.some((tab) => tab.id === id)) {
+            drafts.delete(id);
+        }
+    }
+    const draft = drafts.get(tabId);
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    if (!draft || !input) return;
+    drafts.delete(tabId);
+    input.value = draft.text;
+    input.style.height = draft.height;
+    input.setSelectionRange(draft.selectionStart, draft.selectionEnd);
+    composerEdit = draft.edit;
+    updateInputArea();
+}
+
 export function hasSendableInput(text: string): boolean {
     return Boolean(text.trim()) || state.pendingAttachments.length > 0;
 }
@@ -33,9 +80,9 @@ export function updateComposerToolbar(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
     const locked = composerLocked();
-    // The Bot view's text goes to the voice agent: text only, and it neither steers nor interrupts omp.
+    // The Bot view's text and attachments go to the voice agent; it neither steers nor interrupts omp.
     const toVoice = composerTarget() === 'voice';
-    const canSend = toVoice ? !!text && !locked : hasSendableInput(text);
+    const canSend = hasSendableInput(text) && !locked;
 
     const steerBtn = document.getElementById('btn-steer');
     const sendBtn = document.getElementById('btn-send') as HTMLButtonElement | null;
@@ -45,7 +92,7 @@ export function updateComposerToolbar(): void {
     }
     const attachBtn = document.getElementById('btn-attach') as HTMLButtonElement | null;
     if (attachBtn) {
-        attachBtn.disabled = toVoice;
+        attachBtn.disabled = locked;
     }
     if (sendBtn) {
         // Nothing to send (or locked): a running worker can still be stopped.
@@ -86,16 +133,19 @@ export function updateComposerToolbar(): void {
     }
 }
 
-/** The Bot view: sends the composer's text to the voice agent and clears the box. False when there is nothing to send or nobody online. */
+/** The Bot view: sends the composer's text and attachments to the voice agent and clears them. False when there is nothing to send or nobody online. */
 export function sendComposerToVoice(): boolean {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
-    if (!input || !text || composerLocked()) {
+    if (!input || !hasSendableInput(text) || composerLocked()) {
         return false;
     }
+    // The host sends the tab's pending attachments along and clears them there.
     sendToVoice(text);
     input.value = '';
     input.style.height = 'auto';
+    state.pendingAttachments = [];
+    updateAttachmentsStrip();
     updateComposerToolbar();
     return true;
 }

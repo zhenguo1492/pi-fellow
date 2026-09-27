@@ -2,6 +2,7 @@
  * The voice agent's place in the composer (docs/voice-agent-design.md §11): a robot status line
  * over the input box, and where typed text goes. The robot and its label are one button. Voice agent
  * off: it starts it. On: the label says what it is doing (listening, thinking, …) and a click stops it.
+ * The follow button next to it sets whether the editor follows Pi's focus (docs/voice-pair-agent-cursor.md).
  * The composer talks to what the tab shows: its conversation → the omp worker, the Bot view → the
  * voice agent (offline: nobody, the composer is locked).
  */
@@ -28,6 +29,11 @@ const ICON_DELEGATE =
 /** Handshake (Lucide, ISC), padded and thinner to match the delegate icon's size and weight: pair mode, the voice agent works beside the user. */
 const ICON_HANDSHAKE =
     '<svg viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11 17 2 2a1 1 0 1 0 3-3"/><path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.88-3.88a3 3 0 0 0-4.24 0l-.88.88a1 1 0 1 1-3-3l2.81-2.81a5.79 5.79 0 0 1 7.06-.87l.47.28a2 2 0 0 0 1.42.25L21 4"/><path d="m21 3 1 11h-2"/><path d="M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3"/><path d="M3 4h8"/></svg>';
+/** Crosshair, like a map's "follow my location": filled centre while the editor follows Pi, hollow otherwise. */
+const ICON_FOLLOW_ON =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="4.75"/><path d="M8 1v2.25M8 12.75V15M1 8h2.25M12.75 8H15"/><circle cx="8" cy="8" r="2" fill="currentColor" stroke="none"/></svg>';
+const ICON_FOLLOW_OFF =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="4.75"/><path d="M8 1v2.25M8 12.75V15M1 8h2.25M12.75 8H15"/></svg>';
 
 /** Muted is shown as a tag next to the phase, not as a phase of its own. */
 type ShownPhase = Exclude<VoicePhase, 'muted'>;
@@ -79,6 +85,7 @@ export const voiceBarHtml = `<div id="${BAR_ID}" class="voice-bar" data-state="o
         <span class="voice-bar-dot" aria-hidden="true"></span>
         <span class="voice-bar-label" role="status" aria-live="polite"></span>
     </button>
+    <button type="button" class="voice-bar-btn" data-act="follow" hidden></button>
     <span class="voice-bar-muted" title="The microphone is muted: it hears nothing. Click the mic in the input box to unmute." hidden>Muted</span>
     <span class="voice-bar-spacer">${voiceWaveHtml}</span>
     <button type="button" class="voice-bar-btn" data-act="mode"></button>
@@ -107,6 +114,11 @@ export function bindVoiceBar(): void {
                     return;
                 }
                 post({ type: voiceIsOn(status) ? 'stop' : 'start' });
+                return;
+            case 'follow':
+                if (status) {
+                    post({ type: 'follow', following: !status.following });
+                }
                 return;
             case 'mode':
                 post({ type: 'mode', mode: status?.mode === 'omp' ? 'pair' : 'omp' });
@@ -192,6 +204,18 @@ function render(): void {
     toggle.setAttribute('aria-pressed', String(on));
     toggle.setAttribute('aria-disabled', String(blockedBy !== undefined || status?.starting === true));
     bar.querySelector('.voice-bar-robot')!.classList.toggle('is-unavailable', blockedBy !== undefined);
+    const follow = bar.querySelector<HTMLButtonElement>('[data-act="follow"]')!;
+    follow.hidden = status === undefined;
+    const following = status?.following === true;
+    if (follow.dataset.following !== String(following)) {
+        follow.dataset.following = String(following);
+        follow.innerHTML = following ? ICON_FOLLOW_ON : ICON_FOLLOW_OFF;
+        follow.title = following
+            ? 'Following Pi: the editor opens and scrolls to what Pi points at, reads or writes. Typing in the editor stops following. Click to stop.'
+            : "Follow Pi: open and scroll the editor to what Pi points at, reads or writes. Not following, Pi's code is only highlighted where it is already on screen.";
+        follow.setAttribute('aria-label', following ? 'Stop following Pi' : 'Follow Pi');
+        follow.setAttribute('aria-pressed', String(following));
+    }
     const mode = bar.querySelector<HTMLButtonElement>('[data-act="mode"]')!;
     const pair = status?.mode !== 'omp';
     mode.hidden = !on || status?.starting === true;

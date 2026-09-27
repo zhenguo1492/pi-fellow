@@ -32,7 +32,7 @@ export function routeComposerSend(msg: ClientMessage, botView: boolean, voiceOn:
     if (voiceText !== undefined) {
         return { deliver: msg };
     }
-    if (msg.type === 'prompt' && msg.text.trim()) {
+    if (msg.type === 'prompt' && (msg.text.trim() || msg.attachments?.length)) {
         return { deliver: { type: 'voiceAgent', action: { type: 'send', text: msg.text.trim() } } };
     }
     return { refuse: 'The Bot view talks to the voice agent: go back to the worker conversation to send this.' };

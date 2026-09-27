@@ -144,7 +144,12 @@ body.vscode-high-contrast-light .vp {
 .vp-m { flex-shrink: 0; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); color: var(--muted); }
 .vp-ask { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 6%, var(--card-bg)); }
 .vp-ask .vp-card-h { color: color-mix(in srgb, var(--warn) 80%, var(--fg)); }
-.vp-card-btns { flex-shrink: 0; display: flex; gap: 4px; }
+.vp-card-btns { flex-shrink: 0; display: flex; align-items: center; gap: 4px; }
+.vp-card-btns .vp-copy { margin-right: 4px; }
+/* An expanded task card: header and buttons on the first row, the whole task below. */
+.vp-ask.open { flex-wrap: wrap; }
+.vp-ask.open .vp-card-h { margin-right: auto; }
+.vp-ask.open .vp-q { order: 1; flex-basis: 100%; max-height: 40vh; overflow: auto; padding: 2px 4px 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
 .vp-pbtn { height: 22px; padding: 0 8px; border: 0; border-radius: 4px; font: inherit; font-size: var(--vp-small); cursor: pointer; background: var(--btn-bg); color: var(--btn-fg); }
 .vp-pbtn:hover { background: var(--btn-hover); }
 .vp-pbtn.sec { background: var(--btn2-bg); color: var(--btn2-fg); }
@@ -220,6 +225,14 @@ body.vscode-high-contrast-light .vp {
 .vp-txt { grid-area: txt; min-width: 0; overflow-wrap: anywhere; color: var(--fg); }
 .vp-turn.sys .vp-txt { color: var(--muted); }
 .vp-line { white-space: pre-wrap; }
+/* A long user / setting turn, three lines until Show more. */
+.vp-line.vp-clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.vp-clamp { display: flex; gap: 12px; margin-top: 2px; }
+.vp-clamp[hidden], .vp-more[hidden] { display: none; }
+.vp-more, .vp-copy { padding: 0; border: 0; background: transparent; font: inherit; font-size: calc(var(--vp-small) - .5px); font-weight: 500; line-height: inherit; cursor: pointer; color: var(--link); }
+.vp-copy { color: var(--muted); }
+.vp-more:hover { color: color-mix(in srgb, var(--link) 80%, var(--fg)); }
+.vp-copy:hover { color: var(--fg); }
 
 /* Spoken sentences: pending dim, playing highlighted, played normal, cut struck through. */
 .vp-s { border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; transition: opacity .2s, background-color .2s, color .2s; }

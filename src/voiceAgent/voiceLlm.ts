@@ -2,6 +2,7 @@ import type { AgentBackend } from '../pi/agentBackend';
 import { resolveCliTarget } from '../pi/piCliPaths';
 import { PiRpcBridge } from '../pi/piRpcBridge';
 import type { RpcHostToolDefinition } from '../pi/rpcTypes';
+import type { ImageContent } from '../shared/piTypes';
 import type { VoiceCallUsage, VoiceUsageTotals } from '../shared/voiceViewProtocol';
 
 export interface HostToolCall {
@@ -151,8 +152,9 @@ export class VoiceLlm {
     /**
      * Resolves when the run settles (omp: `agent_end` with `isTerminal !== false`; pi: `agent_settled`),
      * with its error if any. Aborting `signal` aborts the run; text arriving after that is dropped.
+     * `images` go with the message as image parts; a model without vision gets a placeholder from omp/pi.
      */
-    prompt(message: string, signal: AbortSignal, handlers: VoiceTurnHandlers): Promise<{ error?: string }> {
+    prompt(message: string, signal: AbortSignal, handlers: VoiceTurnHandlers, images?: ImageContent[]): Promise<{ error?: string }> {
         if (this._turn) {
             throw new Error('The voice agent is already answering');
         }
@@ -174,7 +176,7 @@ export class VoiceLlm {
         };
         signal.addEventListener('abort', onAbort, { once: true });
         // Written raw (not bridge.prompt) so a failed `prompt` response reaches _onEvent.
-        this._write({ id: promptId, type: 'prompt', message });
+        this._write({ id: promptId, type: 'prompt', message, ...(images?.length ? { images } : {}) });
         return promise;
     }
 

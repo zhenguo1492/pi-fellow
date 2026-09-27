@@ -90,4 +90,4 @@ Extension writes to `~/.pi/agent/settings.json` (same as CLI). Sessions, skills,
 
 ## License & attribution
 
-MIT. Oh My Pi Chater is derived from [vscode-pi-agent](https://github.com/FChatin/vs-pi-agent) by FChatin (MIT); the original copyright and permission notice are kept in [LICENSE](LICENSE). `media/omp-tool-views.js` is vendored from [oh-my-pi](https://github.com/can1357/oh-my-pi) (MIT).
+MIT. Oh My Pi Chater is derived from [vscode-pi-agent](https://github.com/FChatin/vs-pi-agent) by FChatin (MIT); the original copyright and permission notice are kept in [LICENSE](LICENSE). The tool cards (`src/webview/toolCards/`) are ported from the `tool-render` renderers of [oh-my-pi](https://github.com/can1357/oh-my-pi) collab-web (MIT).

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ImageContent } from '../shared/piTypes';
+import type { VoiceAttachments } from '../shared/voiceViewProtocol';
 import type { ProcessedFileAttachment } from './fileAttachments';
 
 export interface PendingAttachment {
@@ -58,6 +59,18 @@ export function toPreviewList(items: PendingAttachment[]): PendingAttachmentPrev
         absolutePath: a.absolutePath ?? absolutePathFromFragment(a.textFragment),
         previewDataUrl: a.isImage ? a.previewDataUrl : undefined,
     }));
+}
+
+/** The attachments going with a message to the voice agent; undefined without any. */
+export function toVoiceAttachments(items: PendingAttachment[]): VoiceAttachments | undefined {
+    if (items.length === 0) {
+        return undefined;
+    }
+    return {
+        names: items.map((a) => a.displayName),
+        images: items.flatMap((a) => (a.image ? [a.image] : [])),
+        files: items.map((a) => a.textFragment).join(''),
+    };
 }
 
 /** Queued user message with file/image snapshot taken at queue time. */

@@ -894,6 +894,31 @@ button.tab-icon:focus-visible {
     margin-bottom: 2px;
 }
 
+/* At an end of a long history's rendered window; scrolling to it renders the earlier / later turns. */
+.history-page {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 8px 0;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.history-page:hover {
+    color: var(--link);
+}
+
+/* Paged far up, the newest turns are not rendered: the live reply and queued messages below them would sit under old turns. */
+.messages--detached > #streaming-message,
+.messages--detached > #pending-messages,
+.messages--detached > .messages-spacer {
+    display: none !important;
+}
+
 .chat-turn-body {
     padding-bottom: 4px;
 }
@@ -920,6 +945,12 @@ button.tab-icon:focus-visible {
 
 .message-group-user--latest {
     z-index: 14;
+}
+
+/* Expanded, a prompt (or a steer under it) scrolls with the transcript: pinned, a group taller than the view would cover the turn below. */
+.message-group-user.user-prompt-expanded,
+.message-group-user:has(.pending-message--expanded) {
+    position: relative;
 }
 
 .user-prompt-card {
@@ -968,7 +999,7 @@ button.tab-icon:focus-visible {
     background: transparent;
     border: none;
     border-radius: 0;
-    padding: 8px 12px 10px 14px;
+    padding: 8px 12px 2px 14px;
     box-shadow: none;
     position: relative;
 }
@@ -990,13 +1021,6 @@ button.tab-icon:focus-visible {
 
 .message-user .message-content p:first-child {
     margin-top: 0;
-}
-
-.user-sticky-sentinel {
-    height: 1px;
-    width: 100%;
-    pointer-events: none;
-    visibility: hidden;
 }
 
 .message-user .message-content.user-prompt-text--collapsed {
@@ -1025,34 +1049,44 @@ button.tab-icon:focus-visible {
     margin: 1px 0 0;
 }
 
-.user-prompt-attachments--hidden {
-    display: none;
+/* Under the prompt text: Show more on the left, the hover actions on the right; never over the text. */
+.user-prompt-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 22px;
+    padding: 0 8px 6px 14px;
 }
 
-.user-prompt-expand-toggle {
-    display: none;
-    width: 100%;
+.user-prompt-bar .message-actions {
+    margin-left: auto;
+}
+
+.user-prompt-expand-toggle,
+.pending-message-expand-toggle,
+.clamp-copy-btn {
     margin: 0;
-    padding: 4px 12px 8px;
+    padding: 0;
     border: none;
-    border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
     background: transparent;
     color: var(--link);
     font: inherit;
     font-size: 10.5px;
     font-weight: 500;
-    text-align: left;
     cursor: pointer;
 }
 
-.user-prompt-expand-toggle:hover {
-    color: color-mix(in srgb, var(--link) 80%, var(--fg));
-    background: color-mix(in srgb, var(--fg) 3%, transparent);
+.clamp-copy-btn {
+    color: var(--muted);
 }
 
-.message-group-user.user-prompt-stuck.user-prompt-clampable .user-prompt-expand-toggle,
-.message-group-user.user-prompt-clampable.user-prompt-expanded .user-prompt-expand-toggle {
-    display: block;
+.user-prompt-expand-toggle:hover,
+.pending-message-expand-toggle:hover {
+    color: color-mix(in srgb, var(--link) 80%, var(--fg));
+}
+
+.clamp-copy-btn:hover {
+    color: var(--fg);
 }
 
 .message-assistant {
@@ -1223,25 +1257,6 @@ button.tab-icon:focus-visible {
 }
 .code-block-pre::-webkit-scrollbar { height: 4px; }
 .code-block-pre::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
-
-/* ── Tool cards: <omp-tool-view> (media/omp-tool-views.js) ──
-   tool-render.css resolves colors via --fg/--muted/--border/--font-mono
-   (from :root) and the names below; scoped so they don't leak into the chat. */
-omp-tool-view {
-    display: block;
-    margin: 0 var(--chat-pad-x) 4px;
-    --dim: var(--vscode-disabledForeground, var(--muted));
-    --accent: var(--focus-border);
-    --ok: var(--success-fg);
-    --err: var(--error-fg);
-    --warn: var(--warning-fg);
-    --bg-inset: var(--code-bg);
-    --bg-raised: var(--surface-raised);
-    --ring: var(--focus-border);
-}
-omp-tool-view[data-filepath] .tv-head .tv-path { cursor: pointer; }
-omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underline; }
-.tools-list > omp-tool-view { margin: 0 0 3px; }
 
 /* Legacy header chrome, still used by approval and diff cards. */
 .tool-header {
@@ -2391,6 +2406,77 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     opacity: 0.7;
 }
 
+.permission-menu-sep {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--vscode-menu-separatorBackground, var(--border));
+}
+
+/* Effort (thinking level): a dumbbell, the level's name, and a pill of dots — one per level — as in Claude's menu. */
+.effort-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 4px;
+    padding: 4px 8px;
+    user-select: none;
+}
+
+.effort-label {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+
+.effort-value {
+    color: var(--muted);
+}
+
+.effort-track {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    outline: none;
+}
+.effort-track:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 1px;
+}
+
+.effort-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+.effort-dot::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--fg) 35%, transparent);
+    transition: width 0.12s, height 0.12s, background-color 0.12s;
+}
+.effort-dot:hover::before {
+    background: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+.effort-dot.selected::before {
+    width: 14px;
+    height: 14px;
+    background: color-mix(in srgb, var(--fg) 82%, transparent);
+}
+/* The top level is tinted, like the purple last dot in Claude's slider. */
+.effort-dot[data-level='xhigh']::before {
+    background: var(--vscode-charts-purple, #b180d7);
+}
+
 .composer-icon-btn {
     display: inline-flex;
     align-items: center;
@@ -2783,6 +2869,24 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     color: var(--voice-accent);
 }
 
+/* Follow Pi: a smaller crosshair than the other status-line icons; green (filled centre) while the editor follows Pi. */
+.voice-bar-btn[data-act='follow'] {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 2px;
+}
+
+.voice-bar-btn[data-act='follow'] svg {
+    width: 12px;
+    height: 12px;
+}
+
+.voice-bar-btn[data-act='follow'][aria-pressed='true'],
+.voice-bar-btn[data-act='follow'][aria-pressed='true']:hover {
+    background: color-mix(in srgb, var(--success-fg) 16%, transparent);
+    color: var(--success-fg);
+}
+
 .composer-btn-icon {
     display: inline-flex;
     align-items: center;
@@ -3142,35 +3246,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 .cf-stat-add { color: var(--success-fg); }
 .cf-stat-del { color: var(--error-fg); }
 
-/* ── Checkpoint rollback ── */
-.checkpoint-btn {
-    position: absolute;
-    top: 4px;
-    right: 6px;
-    background: none;
-    border: 1px solid transparent;
-    color: var(--muted);
-    padding: 1px 4px;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 11px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
-    user-select: none;
-}
-
-.message-user:hover .checkpoint-btn {
-    opacity: 1;
-}
-.checkpoint-btn:hover {
-    background: var(--input-bg);
-    border-color: var(--border);
-    color: var(--fg);
-}
-
 .redo-anchor {
     position: relative;
     height: 0;
@@ -3516,20 +3591,11 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     -webkit-line-clamp: 3;
     overflow: hidden;
 }
-.pending-message-expand-toggle {
-    align-self: flex-start;
-    margin: 2px 0 0;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--link);
-    font: inherit;
-    font-size: 10.5px;
-    font-weight: 500;
-    cursor: pointer;
-}
-.pending-message-expand-toggle:hover {
-    color: color-mix(in srgb, var(--link) 80%, var(--fg));
+.pending-message-clamp-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 2px;
 }
 
 /* ── Steer toast (legacy, unused) ── */
@@ -3761,12 +3827,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     z-index: 3;
 }
 
-.user-prompt-card .message-actions {
-    position: absolute;
-    top: 6px;
-    right: 8px;
-}
-
 .message-group-assistant .message-actions {
     justify-content: flex-end;
     padding: 2px var(--chat-pad-x) 4px;
@@ -3822,7 +3882,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 .msg-action-icon {
     width: 12px;
     height: 12px;
-    opacity: 0.85;
 }
 
 /* ── Composer edit banner (resend: new vs fork) ── */

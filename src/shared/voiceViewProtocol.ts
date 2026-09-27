@@ -5,6 +5,8 @@
  * composer mic) use `VoiceStatus` from the chat protocol instead.
  */
 
+import type { ImageContent } from './piTypes';
+
 /**
  * Voice mode phase as shown; `off` when voice mode is not running, `muted` when the mic is muted
  * while listening. `synthesizing`: the reply's first sentence is with TTS and nothing plays yet.
@@ -28,6 +30,8 @@ export interface VoiceStatus {
     muted: boolean;
     /** `omp`: the voice agent directs the worker; `pair`: it edits and runs commands itself. */
     mode: 'omp' | 'pair';
+    /** The editor follows Pi's focus (AgentCursor): opens and scrolls to what Pi points at, reads or writes. */
+    following: boolean;
 }
 
 /** What the UI calls each mode. The values stay `omp` / `pair`: the voice model's set_mode tool and saved state use them. */
@@ -50,8 +54,29 @@ export type VoiceAgentAction =
     | { type: 'mute'; muted: boolean }
     | { type: 'hush' }
     | { type: 'mode'; mode: 'omp' | 'pair' }
+    /** The follow button in the status line: whether the editor follows Pi's focus; remembered in the `followPi` setting. */
+    | { type: 'follow'; following: boolean }
     /** Typed in the composer for the voice agent: goes in like speech. */
-    | { type: 'send'; text: string };
+    | { type: 'send'; text: string; attachments?: VoiceAttachments };
+
+/**
+ * The composer's attachments going with a message to the voice agent. The extension host takes
+ * them from the chat tab's pending attachments; the webview never sends them.
+ */
+export interface VoiceAttachments {
+    /** Shown with the message in the Bot view. */
+    names: string[];
+    /** Image parts of the user message to the voice model. */
+    images: ImageContent[];
+    /** `<file>` blocks for the voice model: text files' contents, images' paths. */
+    files: string;
+}
+
+/** The user's message as the Bot view shows it: the text, then the attachments' names. */
+export function voiceUserText(text: string, attachments?: VoiceAttachments): string {
+    const names = attachments?.names.map((name) => `[${name}]`) ?? [];
+    return [text, ...names].filter(Boolean).join(' ');
+}
 
 /** Tokens of one LLM call of the voice agent (omp `message_end` usage). */
 export interface VoiceCallUsage {

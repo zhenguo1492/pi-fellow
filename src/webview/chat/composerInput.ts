@@ -134,8 +134,8 @@ export function bindComposerInput(): void {
 
     input?.addEventListener('paste', (e) => {
         const clip = e.clipboardData;
-        // Images are attachments for the worker; the Bot view's text goes to the voice agent alone.
-        if (!clip || composerTarget() === 'voice') return;
+        // Pasted images become attachments, for the worker and for the voice agent alike.
+        if (!clip) return;
         const files: File[] = [];
         for (const item of clip.items) {
             if (!item.type.startsWith('image/')) continue;

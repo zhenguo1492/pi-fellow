@@ -1,4 +1,5 @@
-import { VOICE_MODE_LABEL, type VoiceCallUsage, type VoiceObservationKind, type VoiceUsageTotals } from '../shared/voiceViewProtocol';
+import { VOICE_MODE_LABEL, type VoiceAttachments, type VoiceCallUsage, type VoiceObservationKind, type VoiceUsageTotals } from '../shared/voiceViewProtocol';
+import type { ImageContent } from '../shared/piTypes';
 import { AnchorStream, type CodeAnchor } from './codeAnchors';
 import { FloorArbiter, type ArbiterSettings, type ArbiterView, type Observation } from './floorArbiter';
 import { HostToolRouter, VOICE_HOST_TOOLS, type AgentMode, type EditorHands, type Proposal, type ToolResult, type ToolTurn } from './hostTools';
@@ -72,6 +73,8 @@ export interface SayOptions {
      * knows from playback); replaces the default note, which assumes they saw the whole text.
      */
     interrupted?: string;
+    /** Files and images the user attached in the chat composer. */
+    attachments?: VoiceAttachments;
 }
 
 export interface VoiceTurnListener {
@@ -400,7 +403,7 @@ export class VoiceAgent {
         const digest = this._digest(task.tabId);
         const requests = worker.pendingRequests(task.tabId);
         const message = buildTurnMessage({
-            trigger: { kind: 'user', text, source },
+            trigger: { kind: 'user', text, source, files: options.attachments?.files },
             status: worker.status(task.tabId),
             updates: digest.since(context.seenSeq),
             history: fresh ? { task, turns: worker.recentTurns(task.tabId, 3) } : undefined,
@@ -422,7 +425,7 @@ export class VoiceAgent {
         // The user's turn carries every observation along (§5.9 rule 3).
         this._arbiter.userTurn(task.tabId, requests.map((request) => request.id));
         listener.onStart?.(task);
-        return this._runTurn(llm, key, message, { tabId: task.tabId, seq: ++this._userSeq, userAt }, listener, options.signal);
+        return this._runTurn(llm, key, message, { tabId: task.tabId, seq: ++this._userSeq, userAt }, listener, options.signal, options.attachments?.images);
     }
 
     /**
@@ -558,6 +561,7 @@ export class VoiceAgent {
         turn: ToolTurn,
         listener: VoiceTurnListener,
         signal?: AbortSignal,
+        images?: ImageContent[],
     ): Promise<VoiceTurnResult> {
         const ctl = new AbortController();
         const current: RunningTurn = { key, ctl, turn };
@@ -613,7 +617,7 @@ export class VoiceAgent {
                 }
             },
             onUsage: (usage) => listener.onUsage?.(usage),
-        });
+        }, images);
         // Aborted while queued: the prompt still goes in (the context keeps the user's words), cut off at once.
         if (signal?.aborted) {
             ctl.abort();

@@ -48,24 +48,6 @@
           "when": "resourceScheme == file",
           "group": "9_cutcopypaste@5"
         }
-      ],
-      "editor/title": [
-        {
-          "command": "oh-my-pi-chater.voiceAgent.followPi",
-          "when": "oh-my-pi-chater.piFocus && !oh-my-pi-chater.piFollowing",
-          "group": "navigation@90"
-        },
-        {
-          "command": "oh-my-pi-chater.voiceAgent.unfollowPi",
-          "when": "oh-my-pi-chater.piFocus && oh-my-pi-chater.piFollowing",
-          "group": "navigation@90"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "oh-my-pi-chater.voiceAgent.toggleFollowPi",
-          "when": "false"
-        }
       ]
     },
     "commands": [
@@ -124,20 +106,6 @@
       {
         "command": "oh-my-pi-chater.voiceAgent.clearHighlight",
         "title": "Oh My Pi Chater: Voice Agent — Clear Pi Highlight"
-      },
-      {
-        "command": "oh-my-pi-chater.voiceAgent.followPi",
-        "title": "Oh My Pi Chater: Voice Agent — Follow Pi",
-        "icon": "$(eye-closed)"
-      },
-      {
-        "command": "oh-my-pi-chater.voiceAgent.unfollowPi",
-        "title": "Oh My Pi Chater: Voice Agent — Stop Following Pi",
-        "icon": "$(eye)"
-      },
-      {
-        "command": "oh-my-pi-chater.voiceAgent.toggleFollowPi",
-        "title": "Oh My Pi Chater: Voice Agent — Follow / Stop Following Pi"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.toggleMode",
@@ -379,7 +347,7 @@
         "oh-my-pi-chater.voiceAgent.followPi": {
           "type": "boolean",
           "default": true,
-          "description": "Voice agent: follow Pi when VS Code starts. Following, the editor opens and scrolls to the code Pi talks about, reads or writes; typing in the editor stops following. Toggle with the eye button in the editor title bar or Pi's status bar item."
+          "description": "Voice agent: follow Pi's focus. Following, the editor opens and scrolls to the code Pi talks about, reads or writes; typing in the editor stops following until you turn it on again. Set by the follow button next to Voice agent above the chat input, which remembers your choice here."
         },
         "oh-my-pi-chater.voiceAgent.discoverPreviewCommands": {
           "type": "boolean",

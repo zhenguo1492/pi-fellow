@@ -14,7 +14,7 @@ import type { DiffManager } from './diff';
 import type { CheckpointManager } from './checkpoint';
 import type { ModelStatusTracker } from './model-status';
 import { openPlanDocument, type PlanDocumentProvider } from './plan-document';
-import { toPreviewList } from '../pi/pendingAttachments';
+import { toPreviewList, toVoiceAttachments } from '../pi/pendingAttachments';
 import { VoiceInput } from '../voice/voiceInput';
 import { onVoiceReadinessChange, voiceReadiness } from '../voice/voiceSettings';
 import type {
@@ -279,7 +279,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             }
             const msg = route.deliver;
             if (msg.type === 'voiceAgent') {
-                this._voiceActions.fire(msg.action);
+                if (msg.action.type !== 'send') {
+                    this._voiceActions.fire(msg.action);
+                    return;
+                }
+                // The tab's pending attachments go along, as with a prompt to the worker.
+                const tab = this._backends.activeTab;
+                const attachments = toVoiceAttachments(tab?.pendingAttachments ?? []);
+                if (tab && attachments) {
+                    tab.pendingAttachments = [];
+                    this.sendStateSync();
+                }
+                this._voiceActions.fire({ type: 'send', text: msg.action.text, ...(attachments ? { attachments } : {}) });
                 return;
             }
             if (msg.type === 'voice') {

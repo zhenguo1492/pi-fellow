@@ -16,6 +16,22 @@ const ICON_PATHS: Record<PermissionLevel, string> = {
 
 const CHECK_ICON = icon('<path d="M20 6 9 17l-5-5"/>', 16);
 
+/** A horizontal dumbbell (Lucide's is diagonal), as on Claude's Effort row. */
+const EFFORT_ICON = icon(
+    '<rect x="2" y="9" width="3" height="6" rx="1"/><rect x="5" y="6" width="3.5" height="12" rx="1"/><path d="M8.5 12h7"/><rect x="15.5" y="6" width="3.5" height="12" rx="1"/><rect x="19" y="9" width="3" height="6" rx="1"/>',
+    18,
+);
+
+/** pi's thinking levels, least to most; the Effort slider has one dot per level. */
+const EFFORT_LEVELS: ReadonlyArray<{ level: string; label: string }> = [
+    { level: 'off', label: 'Off' },
+    { level: 'minimal', label: 'Minimal' },
+    { level: 'low', label: 'Low' },
+    { level: 'medium', label: 'Medium' },
+    { level: 'high', label: 'High' },
+    { level: 'xhigh', label: 'Extra high' },
+];
+
 /** Names and order follow Claude's modes: from most to least supervised, with read-only Plan before Auto. */
 const LEVELS: ReadonlyArray<{ level: PermissionLevel; label: string; description: string }> = [
     { level: 'ask', label: 'Manual', description: 'Asks for approval before each edit or command' },
@@ -43,7 +59,15 @@ export function createPermissionMenu(): HTMLElement {
     menu.hidden = true;
     menu.innerHTML = `
         <div class="permission-menu-title">Modes</div>
-        <div id="permission-list" class="permission-list" role="listbox" aria-label="Permission level" tabindex="-1"></div>`;
+        <div id="permission-list" class="permission-list" role="listbox" aria-label="Permission level" tabindex="-1"></div>
+        <div class="permission-menu-sep" role="separator"></div>
+        <div class="effort-row">
+            <span class="permission-item-icon">${EFFORT_ICON}</span>
+            <span class="effort-label">Effort <span class="effort-value" id="effort-value"></span></span>
+            <div id="effort-track" class="effort-track" role="slider" tabindex="0" aria-label="Thinking effort" aria-valuemin="0" aria-valuemax="${EFFORT_LEVELS.length - 1}">
+                ${EFFORT_LEVELS.map(({ level, label }, index) => `<span class="effort-dot" data-index="${index}" data-level="${level}" title="${label}"></span>`).join('')}
+            </div>
+        </div>`;
     return menu;
 }
 
@@ -53,6 +77,34 @@ function currentLevel() {
 
 function describe(level: PermissionLevel, description: string): string {
     return level === 'plan' && state.activeBackend === 'pi' ? `${description} (pi's plan mode)` : description;
+}
+
+function effortIndex(): number {
+    return Math.max(EFFORT_LEVELS.findIndex((l) => l.level === (state.thinkingLevel || 'off')), 0);
+}
+
+/** Label and slider of the menu's Effort row; call on every state sync. */
+export function updateEffortControl(): void {
+    const value = document.getElementById('effort-value');
+    const track = document.getElementById('effort-track');
+    if (!value || !track) return;
+    const index = effortIndex();
+    const { label } = EFFORT_LEVELS[index];
+    value.textContent = `(${label})`;
+    track.setAttribute('aria-valuenow', String(index));
+    track.setAttribute('aria-valuetext', label);
+    track.querySelectorAll<HTMLElement>('.effort-dot').forEach((dot) => {
+        dot.classList.toggle('selected', Number(dot.dataset.index) === index);
+    });
+}
+
+function setEffort(index: number): void {
+    const target = EFFORT_LEVELS[Math.min(Math.max(index, 0), EFFORT_LEVELS.length - 1)];
+    if (target.level === (state.thinkingLevel || 'off')) return;
+    // Shown at once; the host's state sync that follows is authoritative. The menu stays open.
+    state.thinkingLevel = target.level;
+    updateEffortControl();
+    vscode.postMessage({ type: 'setThinkingLevel', level: target.level });
 }
 
 export function updatePermissionControl(): void {
@@ -161,6 +213,31 @@ export function bindPermissionControl(): void {
         if (level) choose(level);
     });
 
+    const track = document.getElementById('effort-track');
+    track?.addEventListener('click', (e) => {
+        const dot = (e.target as HTMLElement).closest('.effort-dot') as HTMLElement | null;
+        if (dot) setEffort(Number(dot.dataset.index));
+    });
+    track?.addEventListener('keydown', (e) => {
+        switch (e.key) {
+            case 'ArrowLeft':
+            case 'ArrowRight':
+                e.preventDefault();
+                setEffort(effortIndex() + (e.key === 'ArrowRight' ? 1 : -1));
+                break;
+            case 'Home':
+            case 'End':
+                e.preventDefault();
+                setEffort(e.key === 'Home' ? 0 : EFFORT_LEVELS.length - 1);
+                break;
+            case 'Escape':
+                e.preventDefault();
+                e.stopPropagation();
+                closeMenu(true);
+                break;
+        }
+    });
+
     if (!dismissBound) {
         dismissBound = true;
         document.addEventListener('click', (e) => {
@@ -171,4 +248,5 @@ export function bindPermissionControl(): void {
     }
 
     updatePermissionControl();
+    updateEffortControl();
 }

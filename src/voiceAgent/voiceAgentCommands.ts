@@ -14,7 +14,15 @@ import { WorkerFocusTracker } from './workerFocus';
 import { formatAnchor, type CodeAnchor } from './codeAnchors';
 import { editorSnapshot } from './editorSnapshot';
 import type { Metrics, Phase } from './conversation';
-import type { VoiceAgentAction, VoiceEngines, VoiceObservationKind, VoicePhase, VoiceStatus } from '../shared/voiceViewProtocol';
+import {
+    voiceUserText,
+    type VoiceAgentAction,
+    type VoiceAttachments,
+    type VoiceEngines,
+    type VoiceObservationKind,
+    type VoicePhase,
+    type VoiceStatus,
+} from '../shared/voiceViewProtocol';
 import type { VoiceLevelSource } from '../shared/protocol';
 import { ActiveVoiceWindow } from './activeWindow';
 import type { ArbiterSettings, Narration } from './floorArbiter';
@@ -62,7 +70,8 @@ export interface VoiceAgentWiring {
  * §11), and, as a log, in the "Oh My Pi Chater: Voice Agent"
  * output channel.
  * - Chat: the robot above the composer starts voice mode and, while it is on, shows its phase and
- *   stops it; the composer mic shows the microphone level and mutes; in the Bot view the composer
+ *   stops it; the follow button next to it sets whether the editor follows Pi's focus (remembered in
+ *   the `followPi` setting); the composer mic shows the microphone level and mutes; in the Bot view the composer
  *   sends typed text to the voice agent (and is locked while it is offline), in the conversation to omp.
  * - `oh-my-pi-chater.voiceAgent.start` / `stop` (robot, palette): voice mode, i.e. microphone and
  *   speaker through a hidden Chrome (design §5.1); stop also ends the omp process. Voice contexts
@@ -70,8 +79,6 @@ export interface VoiceAgentWiring {
  * - `oh-my-pi-chater.voiceAgent.toggleMute`, `hush` (palette, keys), `oh-my-pi-chater.voiceView.show`
  *   and `history` (Bot view's history button, palette).
  * - `oh-my-pi-chater.voiceAgent.clearHighlight` (palette): removes Pi's highlight.
- * - `followPi` / `unfollowPi` (eye button in the editor title bar, palette) and `toggleFollowPi`
- *   (Pi's status bar item): whether the editor follows Pi's focus.
  * - `oh-my-pi-chater.voiceAgent.typeMessage` (palette): input box loop; a new message interrupts the
  *   reply. In voice mode it goes in like speech. Scripts pass the text to send it once.
  * - Internal, scriptable: `say` (one typed turn outside voice mode, resolves with its
@@ -189,9 +196,15 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     // The Bot view, drawn by a chat tab in place of its conversation.
     const view = new VoicePanel(store, worker, { phase: viewPhase, mode: () => agent?.mode ?? 'pair', engines, agent: () => agent }, chat);
 
-    /** The robot status line and composer mic follow voice mode. */
+    /** The robot status line, follow button and composer mic follow voice mode and Pi's focus. */
     const publishStatus = () =>
-        chat.setVoiceStatus({ phase: viewPhase(), starting, muted: voiceMode?.muted ?? false, mode: agent?.mode ?? 'pair' });
+        chat.setVoiceStatus({
+            phase: viewPhase(),
+            starting,
+            muted: voiceMode?.muted ?? false,
+            mode: agent?.mode ?? 'pair',
+            following: cursor.following,
+        });
 
     const setPhase = (next: Phase | undefined) => {
         phase = next;
@@ -335,21 +348,21 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         return agent;
     };
 
-    const say = async (text: string): Promise<VoiceTurnResult> => {
+    const say = async (text: string, attachments?: VoiceAttachments): Promise<VoiceTurnResult> => {
         if (voiceMode) {
             throw new Error('Voice mode is on: typed messages go through Voice Agent — Type a Message.');
         }
-        return getAgent().say(text, 'text', userListener(text, 'text'));
+        return getAgent().say(text, 'text', userListener(voiceUserText(text, attachments), 'text'), { attachments });
     };
 
     /** Typed to the voice agent: like speech in voice mode, a text turn otherwise. */
-    const type = (text: string): void => {
+    const type = (text: string, attachments?: VoiceAttachments): void => {
         if (voiceMode) {
             activeWindow.focused();
-            voiceMode.type(text);
+            voiceMode.type(text, attachments);
             return;
         }
-        void say(text).catch((err: unknown) => {
+        void say(text, attachments).catch((err: unknown) => {
             const message = err instanceof Error ? err.message : String(err);
             output.appendLine(`\n  ✗ ${message}`);
             store.addSystem(message);
@@ -464,6 +477,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 agent?.open({ reason: 'resume', tabId, language: readVoiceSettings().language });
             }
         }),
+        cursor.onDidChangeFollowing(publishStatus),
         chat.onVoiceAction((action) => {
             switch (action.type) {
                 case 'start':
@@ -481,9 +495,15 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 case 'mode':
                     setMode(action.mode);
                     return;
+                case 'follow':
+                    cursor.setFollowing(action.following);
+                    void vscode.workspace
+                        .getConfiguration('oh-my-pi-chater.voiceAgent')
+                        .update('followPi', action.following, vscode.ConfigurationTarget.Global);
+                    return;
                 case 'send':
-                    if (action.text.trim()) {
-                        type(action.text.trim());
+                    if (action.text.trim() || action.attachments) {
+                        type(action.text.trim(), action.attachments);
                     }
                     return;
             }
@@ -505,9 +525,6 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.say', say),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.clearHighlight', () => cursor.clear()),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.agentFocus', () => cursor.current()),
-        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.toggleFollowPi', () => cursor.setFollowing(!cursor.following)),
-        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.followPi', () => cursor.setFollowing(true)),
-        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.unfollowPi', () => cursor.setFollowing(false)),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.toggleMode', () => setMode(agent?.mode === 'omp' ? 'pair' : 'omp')),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.mode', () => agent?.mode ?? 'pair'),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.takeProactiveTurns', () => {

@@ -1,10 +1,21 @@
 let userHasScrolled = false;
 let isProgrammaticScroll = false;
 let scrollFollowPending = false;
+/**
+ * Set by the transcript while its newest turns are not rendered (the user paged far up), else null.
+ * The transcript's end is then not the latest message: following the bottom stops, and a forced
+ * scroll to the bottom first renders the newest turns through it.
+ */
+let showLatestTurns: (() => void) | null = null;
 
-/** True while the user has scrolled away from the bottom of the transcript. */
+export function setDetachedHistory(showLatest: (() => void) | null): void {
+    showLatestTurns = showLatest;
+    updateScrollButton();
+}
+
+/** True while the user has scrolled away from the bottom of the transcript, or paged away from its newest turns. */
 export function hasUserScrolled(): boolean {
-    return userHasScrolled;
+    return userHasScrolled || showLatestTurns !== null;
 }
 
 /** Resume following the bottom of the transcript. */
@@ -13,7 +24,12 @@ export function resetUserScroll(): void {
 }
 
 export function scrollToBottom(force = false): void {
-    if (userHasScrolled && !force) return;
+    if (hasUserScrolled() && !force) return;
+    if (showLatestTurns) {
+        const showLatest = showLatestTurns;
+        showLatestTurns = null;
+        showLatest();
+    }
     const messages = document.getElementById('messages');
     if (messages) {
         isProgrammaticScroll = true;
@@ -34,17 +50,15 @@ export function jumpMessagesScroll(messages: HTMLElement, top: number): void {
 export function isNearBottom(): boolean {
     const messages = document.getElementById('messages');
     if (!messages) return true;
+    // The newest turns are not rendered: the end of what is shown is not the bottom.
+    if (showLatestTurns) return false;
     return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 50;
 }
 
 export function updateScrollButton(): void {
     const btn = document.getElementById('btn-scroll-bottom');
     if (!btn) return;
-    if (userHasScrolled) {
-        btn.classList.add('visible');
-    } else {
-        btn.classList.remove('visible');
-    }
+    btn.classList.toggle('visible', hasUserScrolled());
 }
 
 export function bindScrollListener(): void {

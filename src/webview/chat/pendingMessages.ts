@@ -3,6 +3,8 @@ import { escapeHtml } from '../../shared/html';
 import { el } from './helpers';
 import { hasUserScrolled, scrollToBottom } from './scroll';
 import { state } from './state';
+import { copyPlainText } from './toast';
+import { toggleInStickyPrompt } from './userPromptSticky';
 
 /** A queued steer keeps the prompt it arrived under, even when later turns start. */
 const steeringQueuesByTab = new Map<string, Array<{ text: string; turn: number }>>();
@@ -24,11 +26,13 @@ export function pendingMessageRowHtml(kind: 'steer' | 'followup', text: string, 
 
 function applyPendingClamp(text: HTMLElement, toggle: HTMLButtonElement, expanded: boolean): void {
     text.classList.toggle('pending-message-text--collapsed', !expanded);
+    // Unpins the prompt group a steer sits in (see main.css), as an expanded prompt does.
+    text.closest('.pending-message')?.classList.toggle('pending-message--expanded', expanded);
     toggle.textContent = expanded ? 'Show less' : 'Show more';
     toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
 }
 
-/** Clamps every laid-out steering / follow-up row longer than three lines behind a Show more toggle. */
+/** Clamps every laid-out steering / follow-up row longer than three lines behind a Show more / Copy bar. */
 export function bindPendingMessageClamps(): void {
     document.querySelectorAll<HTMLElement>('.pending-message-text').forEach((text) => {
         // Unmeasurable (hidden) rows stay unbound so the next render retries them.
@@ -55,9 +59,20 @@ export function bindPendingMessageClamps(): void {
             } else {
                 expandedPendingTexts.delete(key);
             }
-            applyPendingClamp(text, toggle, expanded);
+            toggleInStickyPrompt(text, expanded, () => applyPendingClamp(text, toggle, expanded));
         });
-        text.after(toggle);
+        const copy = el('button', 'clamp-copy-btn');
+        copy.type = 'button';
+        copy.title = 'Copy message';
+        copy.textContent = 'Copy';
+        copy.addEventListener('click', (event) => {
+            event.stopPropagation();
+            event.preventDefault();
+            copyPlainText(key);
+        });
+        const bar = el('div', 'pending-message-clamp-bar');
+        bar.append(toggle, copy);
+        text.after(bar);
         applyPendingClamp(text, toggle, expandedPendingTexts.has(key));
     });
 }
@@ -101,11 +116,13 @@ export function updatePendingMessagesInChat(): void {
 
     const steering = state.steeringMessages ?? [];
     const followUp = state.followUpMessages ?? [];
-    const prompts = document.querySelectorAll('.message-group-user');
+    // Turns are absolute (`data-turn`, 1-based): the transcript renders only its newest turns.
+    const prompts = document.querySelectorAll<HTMLElement>('.message-group-user[data-turn]');
+    const latestTurn = Number(prompts[prompts.length - 1]?.dataset.turn ?? 0);
     const queue = reconcileSteeringQueue(
         steeringQueuesByTab.get(state.activeTabId) ?? [],
         steering,
-        prompts.length - 1,
+        latestTurn,
     );
     if (queue.length > 0) {
         steeringQueuesByTab.set(state.activeTabId, queue);
@@ -128,8 +145,9 @@ export function updatePendingMessagesInChat(): void {
     for (const [turn, rows] of byTurn) {
         const steeringEl = el('div', 'pending-messages pending-messages--steering pending-messages--queued');
         steeringEl.innerHTML = rows.join('');
-        if (prompts[turn]) {
-            prompts[turn].appendChild(steeringEl);
+        const prompt = document.querySelector(`.message-group-user[data-turn="${turn}"]`);
+        if (prompt) {
+            prompt.appendChild(steeringEl);
         } else {
             hasUnanchoredSteering = true;
             container.prepend(steeringEl);

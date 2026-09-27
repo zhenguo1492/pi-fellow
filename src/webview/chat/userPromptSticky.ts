@@ -1,4 +1,5 @@
 import { el } from './helpers';
+import { jumpMessagesScroll } from './scroll';
 
 export function markLatestUserMessageGroup(): void {
     document.querySelectorAll('.message-group-user--latest').forEach((node) => {
@@ -9,122 +10,79 @@ export function markLatestUserMessageGroup(): void {
     last?.classList.add('message-group-user--latest');
 }
 
-const USER_PROMPT_STICKY_LINE_CLAMP = 3;
+const USER_PROMPT_LINE_CLAMP = 3;
+/** Prompts the user expanded; keyed by rendered text so the state survives transcript rebuilds. */
+const expandedUserPrompts = new Set<string>();
 
-type UserPromptCollapseState = { expanded: boolean; clampable: boolean };
-
-let userPromptStickyObserver: IntersectionObserver | null = null;
-const userPromptCollapseByGroup = new WeakMap<HTMLElement, UserPromptCollapseState>();
-
-function teardownUserPromptStickyCollapse(): void {
-    userPromptStickyObserver?.disconnect();
-    userPromptStickyObserver = null;
+/** An expanded prompt stops being sticky: pinned, a prompt taller than the view would hide its rest and the turn below. */
+function applyUserPromptCollapse(group: HTMLElement, content: HTMLElement, toggle: HTMLButtonElement, expanded: boolean): void {
+    group.classList.toggle('user-prompt-expanded', expanded);
+    content.classList.toggle('user-prompt-text--collapsed', !expanded);
+    toggle.textContent = expanded ? 'Show less' : 'Show more';
+    toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
 }
 
-function userPromptContentNeedsClamp(content: HTMLElement): boolean {
-    const lineHeight = parseFloat(getComputedStyle(content).lineHeight);
-    const maxHeight =
-        Number.isFinite(lineHeight) && lineHeight > 0
-            ? lineHeight * USER_PROMPT_STICKY_LINE_CLAMP
-            : 52;
-    return content.scrollHeight > maxHeight + 4;
-}
-
-function applyUserPromptCollapse(group: HTMLElement, collapseState: UserPromptCollapseState): void {
-    const stuck = group.classList.contains('user-prompt-stuck');
-    const collapsed = stuck && !collapseState.expanded;
-    const content = group.querySelector('.message-content') as HTMLElement | null;
-    const attachments = group.querySelector('.message-attachments') as HTMLElement | null;
-    const toggle = group.querySelector('.user-prompt-expand-toggle') as HTMLButtonElement | null;
-
-    content?.classList.toggle('user-prompt-text--collapsed', collapsed);
-    attachments?.classList.toggle('user-prompt-attachments--hidden', collapsed);
-    group.classList.toggle('user-prompt-expanded', collapseState.expanded);
-    if (toggle) {
-        toggle.textContent = collapseState.expanded ? 'Show less' : 'Show more';
-        toggle.setAttribute('aria-expanded', collapseState.expanded ? 'true' : 'false');
-    }
-}
-
-function updateUserPromptStickyState(group: HTMLElement, stuck: boolean): void {
-    group.classList.toggle('user-prompt-stuck', stuck);
-    const collapseState = userPromptCollapseByGroup.get(group);
-    if (!collapseState) {
-        return;
-    }
-    if (!stuck) {
-        collapseState.expanded = false;
-    }
-    applyUserPromptCollapse(group, collapseState);
-}
-
-/** Re-attaches the sticky-prompt clamp (sentinel observer + Show more toggle) to every chat turn. */
-export function bindUserPromptStickyCollapse(): void {
-    const container = document.getElementById('messages');
-    if (!container) {
-        return;
-    }
-
-    teardownUserPromptStickyCollapse();
-    userPromptStickyObserver = new IntersectionObserver(
-        (entries) => {
-            for (const entry of entries) {
-                const sentinel = entry.target as HTMLElement;
-                const group = sentinel.nextElementSibling;
-                if (!(group instanceof HTMLElement) || !group.classList.contains('message-group-user')) {
-                    continue;
-                }
-                updateUserPromptStickyState(group, !entry.isIntersecting);
-            }
-        },
-        { root: container, threshold: [0] },
-    );
-
-    document.querySelectorAll('.chat-turn').forEach((turnNode) => {
-        const turn = turnNode as HTMLElement;
-        const group = turn.querySelector('.message-group-user') as HTMLElement | null;
-        if (!group) {
-            return;
-        }
-
-        const content = group.querySelector('.message-content') as HTMLElement | null;
-        turn.querySelector('.user-sticky-sentinel')?.remove();
-        group.querySelector('.user-prompt-expand-toggle')?.remove();
-        group.classList.remove('user-prompt-clampable', 'user-prompt-stuck', 'user-prompt-expanded');
+/**
+ * Clamps every prompt longer than three lines, collapsed by default, with Show more at the left of its action bar.
+ * Resets all prompts, then measures all, then adds toggles: one layout, not one per prompt.
+ */
+export function bindUserPromptClamps(): void {
+    const prompts: Array<{ group: HTMLElement; bar: HTMLElement; content: HTMLElement }> = [];
+    document.querySelectorAll<HTMLElement>('.message-group-user').forEach((group) => {
+        const bar = group.querySelector<HTMLElement>('.user-prompt-bar');
+        const content = group.querySelector<HTMLElement>('.user-prompt-card .message-content');
+        bar?.querySelector('.user-prompt-expand-toggle')?.remove();
         content?.classList.remove('user-prompt-text--collapsed');
-        group.querySelector('.message-attachments')?.classList.remove('user-prompt-attachments--hidden');
-
-        if (!content || !userPromptContentNeedsClamp(content)) {
-            userPromptCollapseByGroup.delete(group);
+        if (bar && content) {
+            prompts.push({ group, bar, content });
+        }
+    });
+    if (prompts.length === 0) {
+        return;
+    }
+    const lineHeight = parseFloat(getComputedStyle(prompts[0].content).lineHeight);
+    const maxHeight = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight * USER_PROMPT_LINE_CLAMP : 52;
+    const long = prompts.map(({ content }) => content.scrollHeight > maxHeight + 4);
+    prompts.forEach(({ group, bar, content }, i) => {
+        if (!long[i]) {
             return;
         }
-
-        const collapseState: UserPromptCollapseState = { expanded: false, clampable: true };
-        userPromptCollapseByGroup.set(group, collapseState);
-        group.classList.add('user-prompt-clampable');
-
-        const sentinel = el('div', 'user-sticky-sentinel');
-        turn.insertBefore(sentinel, group);
-        userPromptStickyObserver!.observe(sentinel);
-
+        const key = content.textContent ?? '';
         const toggle = el('button', 'user-prompt-expand-toggle');
         toggle.type = 'button';
-        toggle.setAttribute('aria-expanded', 'false');
-        toggle.textContent = 'Show more';
         toggle.addEventListener('click', (event) => {
             event.stopPropagation();
             event.preventDefault();
-            const state = userPromptCollapseByGroup.get(group);
-            if (!state) {
-                return;
+            const expanded = !expandedUserPrompts.has(key);
+            if (expanded) {
+                expandedUserPrompts.add(key);
+            } else {
+                expandedUserPrompts.delete(key);
             }
-            state.expanded = !state.expanded;
-            applyUserPromptCollapse(group, state);
+            toggleInStickyPrompt(content, expanded, () => applyUserPromptCollapse(group, content, toggle, expanded));
         });
-        group.querySelector('.user-prompt-card')?.appendChild(toggle);
-
-        const containerRect = container.getBoundingClientRect();
-        const stuckNow = sentinel.getBoundingClientRect().bottom <= containerRect.top + 1;
-        updateUserPromptStickyState(group, stuckNow);
+        bar.prepend(toggle);
+        applyUserPromptCollapse(group, content, toggle, expandedUserPrompts.has(key));
     });
+}
+
+/**
+ * Expands or folds text in a prompt's sticky group (the prompt, or a steer under it) keeping the
+ * reader's place. Expanded, the group stops pinning and would jump to its place in the transcript,
+ * so its first line stays where it was. Folded after reading to the end, the turn below stays where
+ * it was instead of the view landing mid-reply.
+ */
+export function toggleInStickyPrompt(text: HTMLElement, expanding: boolean, apply: () => void): void {
+    const container = document.getElementById('messages');
+    if (!container) {
+        apply();
+        return;
+    }
+    const view = container.getBoundingClientRect();
+    const below = text.closest('.message-group-user')?.nextElementSibling;
+    const anchor = !expanding && below && below.getBoundingClientRect().top < view.bottom ? below : text;
+    const before = Math.max(anchor.getBoundingClientRect().top, view.top);
+    apply();
+    // Instant: `.messages` scrolls smoothly, which would read as the user scrolling mid-animation.
+    jumpMessagesScroll(container, container.scrollTop + anchor.getBoundingClientRect().top - before);
 }

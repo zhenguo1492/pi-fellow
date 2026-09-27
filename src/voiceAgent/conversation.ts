@@ -20,6 +20,7 @@
  * aborts it, and the executor delivers no further event of that turn. So no stale-event checks
  * are needed beyond matching the current turn id.
  */
+import type { VoiceAttachments } from '../shared/voiceViewProtocol';
 import { flushSentence, takeSentences } from './sentences';
 
 /**
@@ -60,8 +61,8 @@ export interface ConvState {
     active: boolean;
     userSpeaking: boolean;
     sttPending: number;
-    /** Heard or typed, not yet sent. */
-    userBuffer: Array<{ text: string; source: 'text' | 'stt' }>;
+    /** Heard or typed, not yet sent; typed messages may carry the composer's attachments. */
+    userBuffer: Array<{ text: string; source: 'text' | 'stt'; attachments?: VoiceAttachments }>;
     /**
      * Sentences of the current reply are being synthesized, queued or played: set when one goes to
      * TTS, cleared when TTS and the page run dry (`audioIdle`) or the reply is cut off.
@@ -92,7 +93,7 @@ export type ConvEvent =
     | { type: 'userSpeechEnd'; at: number; silenceAt: number }
     | { type: 'transcript'; text: string; at: number }
     /** A message typed while voice mode is on: it cuts the reply off like speech does. */
-    | { type: 'typed'; text: string; at: number }
+    | { type: 'typed'; text: string; attachments?: VoiceAttachments; at: number }
     /** The voice agent wants to speak up on its own (design §5.9). */
     | { type: 'proactiveStart'; at: number }
     | { type: 'llmText'; turnId: number; delta: string; at: number }
@@ -110,7 +111,7 @@ export type ConvEvent =
     | { type: 'hush'; at: number };
 
 export type Effect =
-    | { type: 'prompt'; turnId: number; text: string; source: 'text' | 'stt'; interrupted?: string }
+    | { type: 'prompt'; turnId: number; text: string; source: 'text' | 'stt'; interrupted?: string; attachments?: VoiceAttachments }
     /** A proactive turn got the floor: scope its reply to `turnId`. */
     | { type: 'adopt'; turnId: number }
     | { type: 'speak'; turnId: number; text: string }
@@ -221,11 +222,15 @@ function tryPrompt(s: ConvState, at: number): Step {
     if (s.userSpeaking || s.sttPending > 0 || s.userBuffer.length === 0) {
         return { state: s, effects: [] };
     }
-    const text = s.userBuffer.map((part) => part.text).join(' ');
+    const text = s.userBuffer.map((part) => part.text).filter(Boolean).join(' ');
     const source = s.userBuffer.every((part) => part.source === 'text') ? 'text' : 'stt';
+    const attached = s.userBuffer.flatMap((part) => (part.attachments ? [part.attachments] : []));
+    const attachments: VoiceAttachments | undefined = attached.length
+        ? { names: attached.flatMap((a) => a.names), images: attached.flatMap((a) => a.images), files: attached.map((a) => a.files).join('') }
+        : undefined;
     const interrupted = s.interruptedNote;
     const { state, turnId } = newBot({ ...s, userBuffer: [], interruptedNote: undefined, metrics: { ...s.metrics, promptAt: at } });
-    return { state, effects: [{ type: 'prompt', turnId, text, source, ...(interrupted ? { interrupted } : {}) }] };
+    return { state, effects: [{ type: 'prompt', turnId, text, source, ...(interrupted ? { interrupted } : {}), ...(attachments ? { attachments } : {}) }] };
 }
 
 /** Reply fully generated and its audio over (or dropped): close the exchange, and the bot falls silent. */
@@ -267,7 +272,8 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
         }
         case 'typed': {
             const cut = interrupt(s, ev.at);
-            const next = tryPrompt({ ...cut.state, userBuffer: [...cut.state.userBuffer, { text: ev.text, source: 'text' }] }, ev.at);
+            const typed = { text: ev.text, source: 'text' as const, attachments: ev.attachments };
+            const next = tryPrompt({ ...cut.state, userBuffer: [...cut.state.userBuffer, typed] }, ev.at);
             return { state: next.state, effects: [...cut.effects, ...next.effects] };
         }
         case 'proactiveStart': {

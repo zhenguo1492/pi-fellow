@@ -9,7 +9,7 @@ import { bindCheckpointButtons, bindMessageActionButtons, bindRedoButtons } from
 import { extractText, isTurnPrompt, messageFingerprint } from './messageContent';
 import { renderMessage } from './messageRender';
 import { bindPendingMessageClamps, updatePendingMessagesInChat } from './pendingMessages';
-import { hasUserScrolled, isNearBottom, jumpMessagesScroll, scrollToBottom } from './scroll';
+import { hasUserScrolled, isNearBottom, jumpMessagesScroll, scrollToBottom, setDetachedHistory } from './scroll';
 import { state } from './state';
 import { captureThinkingViewState, restoreThinkingScroll } from './thinking';
 import {
@@ -19,7 +19,7 @@ import {
     removeLiveToolArtifacts,
     type ToolStepItem,
 } from './tools';
-import { bindUserPromptStickyCollapse, markLatestUserMessageGroup } from './userPromptSticky';
+import { bindUserPromptClamps, markLatestUserMessageGroup } from './userPromptSticky';
 
 /** Appends a message the host confirmed (dedupes the repeat, replaces the matching optimistic prompt). */
 export function appendUserMessageImmediate(msg: any): void {
@@ -44,6 +44,12 @@ export function appendOptimisticUserMessage(text: string, attachmentCount: numbe
     const content = text + suffix;
     const msg = { role: 'user', content, _optimistic: true };
     state.messages.push(msg);
+    if (turnWindows.get(windowKey())?.last !== undefined) {
+        // Sent while paged far up: show the newest turns, where the message goes.
+        showLatestTurns();
+        scrollToBottom(true);
+        return;
+    }
     appendChatMessageDom(msg, state.messages.length - 1);
     scrollToBottom();
 }
@@ -54,10 +60,16 @@ function appendChatMessageDom(msg: any, index: number): void {
     if (!container || !streamingEl || shouldHideMessageInChat(msg)) {
         return;
     }
+    if (turnWindows.get(windowKey())?.last !== undefined) {
+        // Its turn is past the rendered window: only the later-turns row changes.
+        updateMessages();
+        return;
+    }
     container.querySelector('.welcome, .history-loading')?.remove();
     let userMsgCount = 0;
     for (let i = 0; i <= index && i < state.messages.length; i++) {
-        if (isTurnPrompt(state.messages[i])) {
+        // As updateMessages numbers turns: hidden prompts (plan implementation) do not count.
+        if (isTurnPrompt(state.messages[i]) && !shouldHideMessageInChat(state.messages[i])) {
             userMsgCount++;
         }
     }
@@ -94,7 +106,7 @@ function appendChatMessageDom(msg: any, index: number): void {
     if (isTurnPrompt(msg)) {
         updatePendingMessagesInChat();
     }
-    bindUserPromptStickyCollapse();
+    bindUserPromptClamps();
     bindPendingMessageClamps();
     bindCopyButtons();
     bindCheckpointButtons();
@@ -104,7 +116,94 @@ function appendChatMessageDom(msg: any, index: number): void {
     bindMessageActionButtons();
 }
 
-/** Rebuilds the transcript history from `state.messages`, keeping the viewport, folds, and live nodes. */
+/** Turns a window step loads; a history rebuild renders the newest this many at first. */
+const TURN_WINDOW = 30;
+/** Most turns rendered at once: paging past it drops turns at the far end, so the DOM stays bounded. */
+const MAX_RENDERED_TURNS = 2 * TURN_WINDOW;
+/**
+ * Rendered turns (1-based, inclusive) per tab and session. `last` undefined: the window reaches the
+ * newest turn and follows it. A number: the user paged up so far that the newest turns were dropped.
+ */
+const turnWindows = new Map<string, { first: number; last?: number }>();
+let windowObserver: IntersectionObserver | null = null;
+
+function windowKey(): string {
+    return `${state.activeTabId}\0${state.sessionId ?? ''}`;
+}
+
+/** Renders the newest turns again (the scroll-to-bottom button, sending a message). */
+function showLatestTurns(): void {
+    turnWindows.delete(windowKey());
+    updateMessages();
+}
+
+/**
+ * Moves the window a step towards earlier or later turns, dropping turns at the other end past
+ * `MAX_RENDERED_TURNS`, and keeps the turn at the top of the view where it was.
+ */
+function pageTurns(direction: 'earlier' | 'later'): void {
+    const container = document.getElementById('messages');
+    const win = turnWindows.get(windowKey());
+    if (!container || !win) {
+        return;
+    }
+    if (direction === 'earlier') {
+        if (win.first <= 1) {
+            return;
+        }
+        win.first = Math.max(1, win.first - TURN_WINDOW);
+        const last = win.last ?? Number.POSITIVE_INFINITY;
+        if (last - win.first + 1 > MAX_RENDERED_TURNS) {
+            win.last = win.first + MAX_RENDERED_TURNS - 1;
+        }
+    } else {
+        if (win.last === undefined) {
+            return;
+        }
+        win.last += TURN_WINDOW;
+        win.first = Math.max(win.first, win.last - MAX_RENDERED_TURNS + 1);
+        // updateMessages clears `last` once it reaches the newest turn.
+    }
+
+    // The first turn still on screen, and its offset from the view's top.
+    const viewTop = container.getBoundingClientRect().top;
+    const anchor = [...container.querySelectorAll<HTMLElement>('.chat-turn')].find(
+        (turn) => turn.getBoundingClientRect().bottom > viewTop,
+    );
+    const anchorTurn = anchor?.querySelector<HTMLElement>('.message-group-user')?.dataset.turn;
+    const anchorOffset = anchor ? anchor.getBoundingClientRect().top - viewTop : 0;
+    updateMessages();
+    const again = container.querySelector(`.message-group-user[data-turn="${anchorTurn}"]`)?.closest('.chat-turn');
+    if (again) {
+        jumpMessagesScroll(container, container.scrollTop + again.getBoundingClientRect().top - viewTop - anchorOffset);
+    }
+}
+
+/** The row at an end of the window; scrolling near it (or clicking it) pages that way. */
+function buildPageRow(direction: 'earlier' | 'later', count: number, container: HTMLElement): HTMLElement {
+    const row = el('button', 'history-page');
+    row.type = 'button';
+    row.dataset.direction = direction;
+    row.textContent = `Show ${count} ${direction} turn${count === 1 ? '' : 's'}`;
+    row.addEventListener('click', () => pageTurns(direction));
+    windowObserver ??= new IntersectionObserver(
+        (entries) => {
+            const reached = entries.find((entry) => entry.isIntersecting);
+            if (reached) {
+                pageTurns((reached.target as HTMLElement).dataset.direction === 'later' ? 'later' : 'earlier');
+            }
+        },
+        { root: container, rootMargin: '300px 0px' },
+    );
+    windowObserver.observe(row);
+    return row;
+}
+
+/**
+ * Rebuilds the transcript history from `state.messages`, keeping the viewport, folds, and live nodes.
+ * Only a window of turns is built (see `turnWindows`): a long history would otherwise rebuild
+ * thousands of nodes on every state sync. Other turns load as the user scrolls towards them.
+ */
 export function updateMessages(): void {
     const container = document.getElementById('messages');
     if (!container) return;
@@ -132,13 +231,38 @@ export function updateMessages(): void {
         container.removeChild(child);
     }
 
+    windowObserver?.disconnect();
     resetCodeBlockIds();
     let liveThinkKey: string | null = null;
+    let detached = false;
 
     if (state.messages.length === 0 && !state.isStreaming) {
         container.insertBefore(state.restoringHistory ? buildHistoryLoading() : buildWelcome(), streamingEl);
     } else {
         let userMsgCount = 0;
+        let totalTurns = 0;
+        for (const m of state.messages) {
+            if (!shouldHideMessageInChat(m) && isTurnPrompt(m)) {
+                totalTurns++;
+            }
+        }
+        const saved = turnWindows.get(windowKey());
+        let lastTurn = saved?.last !== undefined && saved.last < totalTurns ? saved.last : totalTurns;
+        let firstTurn = Math.max(1, Math.min(saved?.first ?? lastTurn - TURN_WINDOW + 1, lastTurn - TURN_WINDOW + 1));
+        // Past the cap only by new turns (paging keeps the window within it): following the bottom,
+        // drop the oldest; reading above, drop the newest, so what the user reads stays in place.
+        if (lastTurn - firstTurn + 1 > MAX_RENDERED_TURNS) {
+            if (followBottom) {
+                firstTurn = lastTurn - TURN_WINDOW + 1;
+            } else {
+                lastTurn = firstTurn + MAX_RENDERED_TURNS - 1;
+            }
+        }
+        detached = lastTurn < totalTurns;
+        turnWindows.set(windowKey(), { first: firstTurn, last: detached ? lastTurn : undefined });
+        if (firstTurn > 1) {
+            container.insertBefore(buildPageRow('earlier', firstTurn - 1, container), streamingEl);
+        }
         const rollbackUserIdx = state.rollbackPoint;
         let dimming = false;
         let redoPlaced = false;
@@ -176,6 +300,20 @@ export function updateMessages(): void {
                 continue;
             }
             const role = msg.role ?? 'unknown';
+            const startsTurn = isTurnPrompt(msg);
+            if (startsTurn) {
+                userMsgCount++;
+                if (rollbackUserIdx !== null && userMsgCount > rollbackUserIdx) {
+                    dimming = true;
+                }
+            }
+            // Outside the window: counted (turn numbers, rollback dimming), not built.
+            if (userMsgCount > lastTurn) {
+                break;
+            }
+            if (firstTurn > 1 && userMsgCount < firstTurn) {
+                continue;
+            }
 
             if (role === 'toolResult' || role === 'tool') {
                 stepTools.push({ msg, index: i });
@@ -191,13 +329,8 @@ export function updateMessages(): void {
                 }
                 continue;
             }
-            if (role === 'user') {
+            if (startsTurn) {
                 flushStepTools(false);
-
-                userMsgCount++;
-                if (rollbackUserIdx !== null && userMsgCount > rollbackUserIdx) {
-                    dimming = true;
-                }
 
                 const currentTurn = el('div', 'chat-turn');
                 turnBody = el('div', 'chat-turn-body');
@@ -234,9 +367,13 @@ export function updateMessages(): void {
             flushStepTools(false);
             appendToChat(msgEl);
         }
-        flushStepTools(state.isStreaming);
-        if (state.isStreaming && lastAssistantIndex >= 0) {
+        // Detached, the streaming turn is not rendered: nothing here is live.
+        flushStepTools(state.isStreaming && !detached);
+        if (state.isStreaming && !detached && lastAssistantIndex >= 0) {
             liveThinkKey = `${lastAssistantIndex}:0`;
+        }
+        if (detached) {
+            container.insertBefore(buildPageRow('later', totalTurns - lastTurn, container), streamingEl);
         }
     }
 
@@ -245,7 +382,7 @@ export function updateMessages(): void {
     }
 
     markLatestUserMessageGroup();
-    bindUserPromptStickyCollapse();
+    bindUserPromptClamps();
 
     bindCopyButtons();
     bindCheckpointButtons();
@@ -260,6 +397,9 @@ export function updateMessages(): void {
     updatePendingMessagesInChat();
     restoreThinkingScroll(thinkingScroll, liveThinkKey);
     jumpMessagesScroll(container, followBottom ? container.scrollHeight : prevScrollTop);
+    // Detached, the live reply and the queued messages belong to turns that are not rendered.
+    container.classList.toggle('messages--detached', detached);
+    setDetachedHistory(detached ? showLatestTurns : null);
     updateTuiAuthBanner();
 }
 

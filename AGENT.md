@@ -10,7 +10,7 @@ Oh My Pi Chater 是一款将 **Pi 编码智能体（Pi Coding Agent）** 深度�
 
 - **不打包 SDK**：本扩展不直接打包运行时体积庞大的 `@earendil-works/pi-coding-agent` SDK，而是启动本机环境的 `pi` 命令行（通过 `pi --mode rpc`）。
 - **进程级通信**：VS Code 扩展宿主启动并管理 `pi --mode rpc` 子进程，通过标准输入输出（`stdin` / `stdout`）遵循 JSON-RPC / NDJSON 协议与 CLI 进行双向通信。
-- **轻量原生前端**：Webview 层采用纯 TypeScript + 原生 DOM API + CSS Variables 实现，不依赖 React/Vue 等重型前端框架，启动极快，与 VS Code 原生设计系统高度契合。唯一例外是工具卡片：`media/omp-tool-views.js` 是从 oh-my-pi `packages/collab-web/src/tool-render` 打包的自包含 IIFE（内含 React 与 CSS），注册 `<omp-tool-view>` Web Component。
+- **轻量原生前端**：Webview 层采用纯 TypeScript + 原生 DOM API + CSS Variables 实现，不依赖 React/Vue 等重型前端框架，启动极快，与 VS Code 原生设计系统高度契合。工具卡片也是原生实现（`src/webview/toolCards/`，移植自 oh-my-pi `packages/collab-web/src/tool-render`）。
 
 ---
 
@@ -62,11 +62,12 @@ vs-pi-agent/
 │       ├── modelPicker.ts     # 输入框下方模型 chip：只列收藏模型（`oh-my-pi-chater.favoriteModels`）；收藏在模型 QuickPick（命令 `selectModel`，会话顶部模型状态条右侧的切换按钮）的 ☆ 按钮里切换
 │       ├── modelStatus.ts     # 会话顶部的模型状态条（样式仿 Bot 视图头部）：模型 · ctx · 5h/7d 额度，点击展开上下文、会话 token 与各额度窗口的重置时间
 │       ├── fileDropReaders.ts # 拖拽文件/图片读取处理
-│       ├── toolView.ts        # <omp-tool-view> 工具卡片封装（创建/流式更新/展开状态记忆/read 路径点击打开文件）
+│       ├── toolView.ts        # 工具卡片外壳（状态点/名称/单行摘要/折叠正文、流式 partial、展开状态记忆、read 路径点击打开文件）
+│       ├── toolCards/         # 各工具渲染器（bash/read/edit/write/grep/glob/ast/lsp/fetch/web_search/task/todo，其余走 registry.ts 通用卡片）、parts.ts DOM 积木、util.ts 纯函数
 │       ├── vscodeApi.ts       # acquireVsCodeApi 单例封装
 │       └── styles/            # 完整 CSS 样式（支持深浅色主题、呼吸动画、卡片排版）
 │
-└── media/                     # 图标与静态资源；omp-tool-views.js 为 vendored 工具卡片渲染器
+└── media/                     # 图标与静态资源
 ```
 
 ---
@@ -104,7 +105,7 @@ vs-pi-agent/
 1. **流式进行中（Live Streaming）**：
    - **按步（assistant message）组织**：每条 assistant 消息是一步。`message_start`（assistant）时清空实时思考/回答；宿主 `sidebar.ts` 也在 assistant `message_start`/`message_end` 时重置 `streamingText`/`streamingThinking`，二者都只代表当前这一步。
    - **思考过程**：`thinking_start` / `thinking_delta` 在 `#streaming-message` 末尾（位于上一步仍在运行的工具卡片之后）流式输出。用户手动折叠的意图在该步归档后仍保留。
-   - **工具调用**：收到 `tool_execution_start` 时，所有工具均实时在 `#streaming-message` 中生成 `<omp-tool-view>` 卡片（每个工具有专属渲染器，未知工具走通用 JSON 渲染）；`tool_execution_update` 把输出尾部作为 `partial` 刷新，`tool_execution_end` 写入 `result` 并结束 running 状态。`edit`/`write` 若有 fileChange 仍使用插件自己的 diff 卡片。toolResult 进入历史后，对应实时卡片（`tool-<id>` / `diff-<id>`）被移除。
+   - **工具调用**：收到 `tool_execution_start` 时，所有工具均实时在 `#streaming-message` 中生成工具卡片（`createToolView`；每个工具有专属渲染器，未知工具走通用 JSON 渲染）；`tool_execution_update` 把输出尾部作为 `partial` 刷新，`tool_execution_end` 写入 `result` 并结束 running 状态。`edit`/`write` 若有 fileChange 仍使用插件自己的 diff 卡片。toolResult 进入历史后，对应实时卡片（`tool-<id>` / `diff-<id>`）被移除。
    - **归档**：assistant `message_end` 时 `commitStreamedAssistantMessage` 立即把该消息放进历史（随后的 `stateSync` 以权威副本替换），下一步的工具与思考因此排在它下方。
    - **底部状态栏**：`#stream-activity` 动态呈现精准状态（如 `Running bash: find .…`、`Thinking…`），拒绝笼统的 `Working…`。
 
@@ -118,6 +119,7 @@ vs-pi-agent/
 
 - `SidebarProvider` 维护 `tabs: Map<string, TabState>` 和 `activeTabId`。
 - 每个 Tab 对应独立的 `PiChatSession`，切换 Tab 时通过 `pushStateSync` 同步对应 Tab 的完整历史与流式状态，互不干扰。
+- **输入草稿按 Tab 保留**：`stateSync.ts` 在替换当前 Tab 状态前调用 `stashComposerDraft`，重建输入框后调用 `restoreComposerDraft`；`composer.ts` 保存未发送文字、选区、高度及历史消息编辑上下文。草稿只保存在当前 Webview 内存中，不跨窗口重载持久化；发送或手动清空后不会复活。恢复时只清理当前后端已关闭 Tab 的草稿，切换后端不会误删另一个后端的草稿。
 - **从恢复面板打开会话**：已在某个 Tab 打开 → 切到那个 Tab；否则新开 Tab（`createEmptyTabState(backend, 会话 cwd)`）加载，不覆盖当前 Tab。只有当前 Tab 是空白对话（无消息、空闲、非 Bot 视图、同后端同目录）时才直接复用它。加载走 `SidebarTabs.loadSessionIntoTab`（与启动恢复共用：加载中显示历史加载占位、`tabReady` 挡住发送、标题先用会话名），失败时关闭新 Tab 并回到原 Tab 和原后端。当前 Tab 在 TUI 模式时同样新开 Tab 并在其中启动 TUI。
 - **TUI 模式按 Tab**：标题栏的 TUI 切换只作用于当前 Tab（`TabState.tuiMode`，经 `TabInfo.tuiMode` 发给 webview），其他 Tab 保持各自的聊天/TUI 视图；切回聊天只停止并重新加载这一个 Tab。只拦截当前 Tab 正在流式输出时切入 TUI。TUI 模式随打开的 Tab 持久化（`PersistedOpenTabs.tuiSessionPaths`，按会话文件）；context key `oh-my-pi-chater.tuiMode` 反映当前 Tab。
 - **TUI Tab 与语音 agent**：TUI Tab 没有 Bot 视图——切入时清掉 `botView`，Tab 图标显示终端图标，点击只切到该 Tab（`toggleBotView`/`showBotView` 对 TUI Tab 不改 `botView`）。输入框在 TUI 下只保留语音状态条（隐藏 Bot 视图按钮）和审批卡，语音 agent 仍可开关、对话、用 pair 工具；但 TUI 占着会话文件，`SidebarWorker.send`/`abort` 对 TUI Tab 直接报错（design §5.12 规则 7），语音不能派活或叫停。
@@ -165,8 +167,7 @@ vs-pi-agent/
    - 宿主系统必须安装 `pi` 命令行（`which pi` 正常输出，或在扩展设置中配置 `oh-my-pi-chater.piPath`）。
 4. **思考等级设置**：
    - `package.json` 中的 `oh-my-pi-chater.thinkingLevel` 控制传递给 Pi 的思考深度（`off`, `minimal`, `low`, `medium`, `high`）。需使用具备 reasoning 能力的模型才会有思维链输出。
-5. **工具卡片渲染器（vendored）**：
-   - `media/omp-tool-views.js` 来自 https://github.com/can1357/oh-my-pi （MIT），文件头记录了来源 commit。
-   - 更新方式：在 oh-my-pi 的 `packages/collab-web` 执行 `bun run gen:tool-views`，把生成的 `packages/coding-agent/src/export/html/tool-views.generated.js` 复制为 `media/omp-tool-views.js`，并更新文件头的 commit。
-   - **本地补丁（每次更新后必须重新打）**：自定义元素 `#n()` 里的 `this.#t.render(...)` 改为 `Us().flushSync(()=>this.#t.render(...))`（`Us` 是 bundle 内的 react-dom 模块，变量名随构建可能变化）。否则 React 在后续任务里才提交，新插入的卡片先以 0 高度绘制一帧，`updateMessages()` 每次重建历史时整条对话会塌缩再撑开，表现为滚动跳动/抖动；工具越多跳得越远。
-   - 主题：`main.css` 中 `omp-tool-view { --accent/--ok/--err/... }` 把渲染器的配色映射到 VS Code 主题变量。
+5. **工具卡片（`src/webview/toolView.ts` + `src/webview/toolCards/`）**：
+   - 移植自 https://github.com/can1357/oh-my-pi （MIT）@ a1b3b83 的 `packages/collab-web/src/tool-render`，每个工具一个渲染器（`summary` 返回头部单行内容，`body` 返回展开后的块），在 `toolCards/registry.ts` 注册。
+   - 渲染全部同步完成（原生 DOM），卡片插入时即为最终高度；`updateMessages()` 重建历史不会导致滚动跳动。不要引入异步渲染。
+   - 样式在 `styles/toolCards.css`（`tv-*` 类），`.tv-card` 上的 `--tv-*` 变量映射到 `main.css` `:root` 的 VS Code 主题变量。

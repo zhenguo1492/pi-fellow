@@ -17,6 +17,10 @@ describe('routeComposerSend', () => {
     it('sends to the voice agent in the Bot view while it is online', () => {
         expect(routeComposerSend(voiceSend, true, true)).toEqual({ deliver: voiceSend });
         expect(routeComposerSend(prompt, true, true)).toEqual({ deliver: voiceSend });
+        // Only attachments: the host sends them along with the empty text.
+        expect(routeComposerSend({ type: 'prompt', text: '', attachments: [{ id: 'a' }] }, true, true)).toEqual({
+            deliver: { type: 'voiceAgent', action: { type: 'send', text: '' } },
+        });
         // Worker-only sends never reach the worker from the Bot view.
         expect(routeComposerSend({ type: 'slashCommand', text: '/model' }, true, true)).toHaveProperty('refuse');
         expect(routeComposerSend({ type: 'steer', text: 'faster' }, true, true)).toHaveProperty('refuse');
