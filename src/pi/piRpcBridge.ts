@@ -297,7 +297,7 @@ export class PiRpcBridge {
             data = frame;
         }
 
-        if (data.type === 'response' && data.id && this._pending.has(data.id)) {
+        if (data.type === 'response' && typeof data.id === 'string' && this._pending.has(data.id)) {
             const pending = this._pending.get(data.id)!;
             this._pending.delete(data.id);
             pending.resolve(data as RpcResponse);

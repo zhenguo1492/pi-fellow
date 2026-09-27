@@ -1,9 +1,12 @@
 import * as vscode from 'vscode';
 import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from './rpcTypes';
-import type { ExtensionUiRequestPayload } from '../shared/extensionUi';
+import type { ExtensionUiMethod, ExtensionUiRequestPayload } from '../shared/extensionUi';
 import type { ServerMessage } from '../shared/protocol';
 import type { PiRpcBridge } from './piRpcBridge';
 import type { PiExtensionChrome } from './piExtensionChrome';
+
+/** Requests that block the CLI until answered. Neither pi nor omp sends a `timeout` with `editor`. */
+type RpcDialogRequest = Extract<RpcExtensionUIRequest, { method: ExtensionUiMethod }>;
 
 type PendingDialog = {
     request: ExtensionUiRequestPayload;
@@ -130,18 +133,19 @@ export class RpcExtensionUiHandler {
     }
 
     private async _dialog(
-        req: RpcExtensionUIRequest,
+        req: RpcDialogRequest,
         fields: Omit<ExtensionUiRequestPayload, 'id' | 'method'>,
     ): Promise<void> {
-        const method = req.method as ExtensionUiRequestPayload['method'];
+        const method = req.method;
         const id = req.id;
         const request: ExtensionUiRequestPayload = { id, method, ...fields };
 
-        if (req.timeout) {
+        const timeout = req.method === 'editor' ? undefined : req.timeout;
+        if (timeout) {
             const timer = setTimeout(() => {
                 this._post?.({ type: 'extensionUiDismiss', id });
                 this._finish(id, { type: 'extension_ui_response', id, cancelled: true });
-            }, req.timeout);
+            }, timeout);
             this._pending.set(id, {
                 request,
                 receivedAt: Date.now(),
@@ -178,7 +182,7 @@ export class RpcExtensionUiHandler {
     }
 
     /** When webview is not ready, use VS Code native dialogs so RPC never deadlocks. */
-    private async _fallbackVscodeDialog(req: RpcExtensionUIRequest): Promise<void> {
+    private async _fallbackVscodeDialog(req: RpcDialogRequest): Promise<void> {
         const id = req.id;
         try {
             switch (req.method) {
@@ -213,7 +217,7 @@ export class RpcExtensionUiHandler {
                     const value = await vscode.window.showInputBox({
                         title: req.title,
                         value: req.method === 'editor' ? req.prefill : undefined,
-                        prompt: req.placeholder,
+                        prompt: req.method === 'input' ? req.placeholder : undefined,
                         ignoreFocusOut: true,
                     });
                     if (value === undefined) {
