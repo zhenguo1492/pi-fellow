@@ -420,6 +420,7 @@ synthesize(text, signal) → AsyncIterable<{ pcm: Int16Array, sampleRate }>
 - `VoiceAgent` 每秒询问一次仲裁器，worker 请求增减时（`WorkerController.onRequestsChanged`）和调研结束时也立即询问。主动轮次和用户轮次排在同一条串行队列里；主动轮次在加载语音上下文之后、发出 prompt 之前重新选一次观察，此时如果有用户消息在排队就放弃，让用户先说。
 - 主动轮次的消息以 `<worker-update kind="…">` 加一句说明结尾，代替 `<user>`。`done` 附 worker 最后一条回复（截断到 600 字）。主动轮次里宿主工具只允许 `worker_status`，其他一律返回错误：没人要求，不能替用户派活、叫停或回答。
 - `<silent/>`：回复的文字在还可能是 `<silent/>` 的前缀时先不放出，确定是 `<silent/>` 就整轮不显示（将来也不送 TTS）。
+- **开场白**（2026-09-27）：语音模式连上时（`VoiceAgent.open({ reason: 'connect' })`），以及语音模式开着时用户从恢复列表恢复会话时（`WorkerController.onSessionResumed` → `open({ reason: 'resume', tabId })`），语音智能体先开口说一句：任务有之前的工作（语音对话、`<task-history>`、`<worker-updates>`）或 worker 在等回答时，简要说现在的进展，否则说一句“我在”。它走主动轮次的队列和话语权判断，消息以 `<voice-on reason="…" language="…"/>` 结尾，不允许 `<silent/>`，工具限制同主动轮次；像用户轮次一样带走当前任务的全部观察。用户在它开口之前先说话、或恢复的 tab 已经不是当前 tab 时，开场白作废。`language` 取 `oh-my-pi-chater.voice.language`，只在语音上下文里还没有用户说过的话时起作用。Bot 视图里显示为 `opening` 的 Update。
 
 ### 5.10 EditorWatcher
 
@@ -496,7 +497,7 @@ interface WorkerController {
 7. **tab 生命周期**：
    - 新开 tab：不做任何事；它成为当前任务时，按规则 2 建立上下文。
    - 关闭 tab：丢弃它的观察和语音会话映射；针对它的在途工具调用返回"会话已关闭"。
-   - TUI 模式：待验证 TUI 模式下 RPC 会话是否仍能接收 `prompt`/`steer`。不能的话，该任务的语音只保留讨论，工具返回"当前 tab 在 TUI 模式，无法语音控制"。
+   - TUI 模式（按 tab）：TUI 与 RPC worker 不能同时写同一个会话文件，所以该任务的语音只保留讨论（状态条在 TUI 下方仍可用，pair 工具照常），派活/叫停工具由 `SidebarWorker` 抛错（`TUI_TAB_REFUSAL`：这个 tab 在 TUI 模式，无法语音控制，请用户切回聊天视图）。TUI tab 没有 Bot 视图。
 8. **语音模型**：§5.4 的"跟随 worker 模型"指开启语音模式时当前 tab 的模型；之后切换任务不改变语音模型。
 
 ## 6. 语音智能体工具（host tools）

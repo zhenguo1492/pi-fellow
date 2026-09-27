@@ -1,4 +1,5 @@
 import type { ExtensionUiRequestPayload } from '../shared/extensionUi';
+import { escapeHtml } from '../shared/html';
 import { vscode } from './vscodeApi';
 
 let activeRequest: ExtensionUiRequestPayload | null = null;
@@ -132,18 +133,6 @@ function unbindExtensionUiKeyboard(): void {
     }
 }
 
-function escHtml(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
-
-function escAttr(s: string): string {
-    return escHtml(s).replace(/'/g, '&#39;');
-}
-
 function optionLetter(index: number): string {
     if (index < 26) {
         return String.fromCharCode(65 + index);
@@ -177,11 +166,11 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
     if (req.method === 'confirm') {
         const msg = req.message?.trim() || '';
         return `
-            <div class="extension-ui-card" role="dialog" aria-label="${escHtml(title)}">
+            <div class="extension-ui-card" role="dialog" aria-label="${escapeHtml(title)}">
                 <div class="extension-ui-header">
                     <span class="extension-ui-badge">${badge}</span>
-                    <div class="extension-ui-title">${escHtml(title)}</div>
-                    ${msg ? `<p class="extension-ui-subtitle">${escHtml(msg)}</p>` : ''}
+                    <div class="extension-ui-title">${escapeHtml(title)}</div>
+                    ${msg ? `<p class="extension-ui-subtitle">${escapeHtml(msg)}</p>` : ''}
                 </div>
                 <div class="extension-ui-actions-row">
                     <button type="button" class="extension-ui-btn primary" data-extension-ui-confirm="yes">Yes</button>
@@ -196,13 +185,13 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
         const prefill = req.prefill ?? '';
         const rows = req.method === 'editor' ? 4 : 2;
         return `
-            <div class="extension-ui-card" role="dialog" aria-label="${escHtml(title)}">
+            <div class="extension-ui-card" role="dialog" aria-label="${escapeHtml(title)}">
                 <div class="extension-ui-header">
                     <span class="extension-ui-badge">${badge}</span>
-                    <div class="extension-ui-title">${escHtml(title)}</div>
+                    <div class="extension-ui-title">${escapeHtml(title)}</div>
                     <p class="extension-ui-subtitle">Submit to reply · Esc to cancel</p>
                 </div>
-                <textarea id="extension-ui-input" class="extension-ui-textarea" rows="${rows}" placeholder="${escHtml(placeholder)}">${escHtml(prefill)}</textarea>
+                <textarea id="extension-ui-input" class="extension-ui-textarea" rows="${rows}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(prefill)}</textarea>
                 <div class="extension-ui-actions-row">
                     <button type="button" class="extension-ui-btn primary" data-extension-ui-submit>Submit</button>
                     <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>Cancel</button>
@@ -216,12 +205,12 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
             const letter = optionLetter(i);
             const { title: optTitle, description, value } = parseOptionDisplay(opt);
             const descHtml = description
-                ? `<span class="extension-ui-option-desc">${escHtml(description)}</span>`
+                ? `<span class="extension-ui-option-desc">${escapeHtml(description)}</span>`
                 : '';
             return `
-                <button type="button" class="extension-ui-option" data-extension-ui-option="${escAttr(value)}">
+                <button type="button" class="extension-ui-option" data-extension-ui-option="${escapeHtml(value)}">
                     <span class="extension-ui-letter">${letter}</span>
-                    <span class="extension-ui-option-text">${escHtml(optTitle)}${descHtml}</span>
+                    <span class="extension-ui-option-text">${escapeHtml(optTitle)}${descHtml}</span>
                 </button>`;
         })
         .join('');
@@ -232,11 +221,11 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
             : 'Click an option · Esc to cancel';
 
     return `
-        <div class="extension-ui-card" role="dialog" aria-label="${escHtml(title)}">
+        <div class="extension-ui-card" role="dialog" aria-label="${escapeHtml(title)}">
             <div class="extension-ui-header">
                 <span class="extension-ui-badge">${badge}</span>
-                <div class="extension-ui-title">${escHtml(title)}</div>
-                <p class="extension-ui-subtitle">${escHtml(keyHint)}</p>
+                <div class="extension-ui-title">${escapeHtml(title)}</div>
+                <p class="extension-ui-subtitle">${escapeHtml(keyHint)}</p>
             </div>
             <div class="extension-ui-options">${optionButtons}</div>
             <div class="extension-ui-actions-row">

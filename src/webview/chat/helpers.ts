@@ -4,26 +4,6 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: st
     return e;
 }
 
-const HTML_TEXT_ESCAPES: Record<string, string> = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '\u00a0': '&nbsp;',
-};
-
-/**
- * Escape text for HTML element content. Same output as serializing a Text node
- * (`textContent` → `innerHTML`): `&`, `<`, `>` and U+00A0 are escaped; quotes are left alone.
- */
-export function escHtml(s: string): string {
-    return s.replace(/[&<>\u00a0]/g, (ch) => HTML_TEXT_ESCAPES[ch]);
-}
-
-/** Escape text for a double-quoted HTML attribute value. */
-export function escAttr(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 /** Local wall-clock time for an RPC timestamp given in seconds or milliseconds; `''` when absent. */
 export function formatTimestamp(ts: number): string {
     if (!ts) return '';

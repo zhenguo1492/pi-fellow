@@ -13,6 +13,7 @@ function makeTabs(count: number): TabInfo[] {
         isStreaming: false,
         hasNotification: false,
         botView: false,
+        tuiMode: false,
     }));
 }
 

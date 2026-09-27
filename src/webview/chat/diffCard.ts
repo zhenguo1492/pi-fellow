@@ -1,6 +1,7 @@
+import { escapeHtml } from '../../shared/html';
 import type { FileChangeInfo } from '../../shared/protocol';
 import { vscode } from '../vscodeApi';
-import { el, escHtml, formatTimestamp } from './helpers';
+import { el, formatTimestamp } from './helpers';
 import { state } from './state';
 
 // ── Inline diff card ──
@@ -23,10 +24,10 @@ export function buildDiffCard(change: FileChangeInfo, msg?: any): HTMLElement {
     }
 
     card.innerHTML = `
-        <div class="diff-file-header" data-filepath="${escHtml(change.filePath)}" data-toolcallid="${escHtml(change.toolCallId)}">
+        <div class="diff-file-header" data-filepath="${escapeHtml(change.filePath)}" data-toolcallid="${escapeHtml(change.toolCallId)}">
             <span class="diff-file-icon">${change.isNew ? '&#10010;' : '&#9998;'}</span>
-            <span class="diff-file-name">${escHtml(fileName)}</span>
-            ${dirPath ? `<span class="diff-file-dir">${escHtml(dirPath)}</span>` : ''}
+            <span class="diff-file-name">${escapeHtml(fileName)}</span>
+            ${dirPath ? `<span class="diff-file-dir">${escapeHtml(dirPath)}</span>` : ''}
             ${statsHtml}
             ${change.isNew ? '<span class="diff-new-badge">NEW</span>' : ''}
         </div>
@@ -60,13 +61,13 @@ export function renderDiffLines(diff: string): string {
             continue;
         }
         if (line.startsWith('@@')) {
-            htmlLines.push(`<div class="diff-line diff-line-hunk">${escHtml(line)}</div>`);
+            htmlLines.push(`<div class="diff-line diff-line-hunk">${escapeHtml(line)}</div>`);
         } else if (line.startsWith('+')) {
-            htmlLines.push(`<div class="diff-line diff-line-add">${escHtml(line)}</div>`);
+            htmlLines.push(`<div class="diff-line diff-line-add">${escapeHtml(line)}</div>`);
         } else if (line.startsWith('-')) {
-            htmlLines.push(`<div class="diff-line diff-line-del">${escHtml(line)}</div>`);
+            htmlLines.push(`<div class="diff-line diff-line-del">${escapeHtml(line)}</div>`);
         } else {
-            htmlLines.push(`<div class="diff-line diff-line-ctx">${escHtml(line)}</div>`);
+            htmlLines.push(`<div class="diff-line diff-line-ctx">${escapeHtml(line)}</div>`);
         }
     }
 

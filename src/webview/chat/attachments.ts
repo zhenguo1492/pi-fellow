@@ -1,7 +1,8 @@
 import { isImageFilePath } from '../../shared/attachmentMessageDisplay';
+import { escapeHtml } from '../../shared/html';
 import { renderMessageAttachmentChip } from '../attachmentChipHtml';
 import { vscode } from '../vscodeApi';
-import { el, escAttr, escHtml } from './helpers';
+import { el } from './helpers';
 import { scrollIfFollowing } from './scroll';
 
 // ── Image Preview Handling ──
@@ -66,8 +67,6 @@ export function buildMessageAttachmentChips(
             f.displayName,
             f.path,
             isImg,
-            escHtml,
-            escAttr,
             f.startLine && f.endLine ? { startLine: f.startLine, endLine: f.endLine } : undefined,
         );
         const chip = wrap.firstElementChild as HTMLElement;
@@ -84,7 +83,7 @@ export function buildMessageAttachmentChips(
             }
             preview.innerHTML = `
                 <div class="message-image-loading">正在读取图片…</div>
-                <img class="message-image-preview" alt="${escAttr(f.displayName)}" title="点击收起图片" />
+                <img class="message-image-preview" alt="${escapeHtml(f.displayName)}" title="点击收起图片" />
             `;
             itemWrap.appendChild(preview);
         }

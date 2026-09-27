@@ -1,6 +1,7 @@
+import { escapeHtml } from '../../shared/html';
 import { createToolView, toToolResult, updateToolView } from '../toolView';
 import { buildDiffCard, findFileChangeForToolResult } from './diffCard';
-import { el, escHtml } from './helpers';
+import { el } from './helpers';
 import { scrollIfFollowing } from './scroll';
 import { extractToolResultText, findToolCallArgs, toolFooterParts } from './toolFormat';
 
@@ -85,7 +86,7 @@ export function buildStepToolsBlock(
     summary.className = 'tools-summary';
     summary.innerHTML = `
         <span class="tools-indicator"></span>
-        <span class="tools-label">${live ? 'Using' : 'Used'} ${count} tool${count !== 1 ? 's' : ''} (${escHtml(toolNames.join(', '))})</span>
+        <span class="tools-label">${live ? 'Using' : 'Used'} ${count} tool${count !== 1 ? 's' : ''} (${escapeHtml(toolNames.join(', '))})</span>
         <span class="tools-chevron">&#9656;</span>
     `;
 
@@ -128,7 +129,7 @@ export function renderToolStart(event: any): void {
         card.innerHTML = `
             <div class="diff-file-header">
                 <span class="diff-file-icon">&#9998;</span>
-                <span class="diff-file-name">${escHtml(fileName)}</span>
+                <span class="diff-file-name">${escapeHtml(fileName)}</span>
                 <span class="tool-status running">running</span>
             </div>
         `;

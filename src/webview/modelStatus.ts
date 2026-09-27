@@ -4,6 +4,7 @@
  * session tokens, every usage window with its reset) over the transcript. Renders the host's
  * `ModelStatusInfo` (src/providers/model-status.ts).
  */
+import { escapeHtml } from '../shared/html';
 import type { ClientMessage, ModelStatusInfo } from '../shared/protocol';
 import { formatTokenCount } from './tokenStatsBar';
 import { vscode } from './vscodeApi';
@@ -13,10 +14,6 @@ const SWITCH_ICON =
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5h10M10 3l2.5 2.5L10 8"/><path d="M13.5 10.5h-10M6 8l-2.5 2.5L6 13"/></svg>';
 
 const SEP = '<span class="ms-sep">·</span>';
-
-function esc(text: string): string {
-    return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-}
 
 /** Limit tone: warning from 90%, error once exhausted (as the old status bar item's background). */
 function tone(usedPercent: number): string {
@@ -29,7 +26,7 @@ function meter(percent: number): string {
 }
 
 function row(key: string, value: string): string {
-    return `<div class="ms-row"><span class="ms-k">${esc(key)}</span><span class="ms-v">${value}</span></div>`;
+    return `<div class="ms-row"><span class="ms-k">${escapeHtml(key)}</span><span class="ms-v">${value}</span></div>`;
 }
 
 const root = document.createElement('div');
@@ -122,9 +119,9 @@ function renderHeader(s: ModelStatusInfo): void {
     setHtml(
         sumEl,
         [
-            `<span class="ms-model">${esc(name)}</span>`,
+            `<span class="ms-model">${escapeHtml(name)}</span>`,
             ...(ctxPct !== undefined ? [brief('ctx', `${ctxPct}%`)] : []),
-            ...s.limits.map((l) => brief(esc(l.text), `${Math.round(l.usedPercent)}%`, tone(l.usedPercent))),
+            ...s.limits.map((l) => brief(escapeHtml(l.text), `${Math.round(l.usedPercent)}%`, tone(l.usedPercent))),
             ...(s.activity === 'retrying' ? [`<span class="ms-item ms-warn">reconnecting${s.retryAttempt > 0 ? ` ${s.retryAttempt}` : ''}</span>`] : []),
         ].join(SEP),
     );
@@ -140,7 +137,7 @@ function renderHeader(s: ModelStatusInfo): void {
     sumBtn.title = workingText
         ? `${workingText} — Show context and usage limits`
         : 'Show context and usage limits';
-    const rows = [row('Model', [esc(name), ...(s.thinking ? [`thinking ${esc(s.thinking)}`] : [])].join(SEP))];
+    const rows = [row('Model', [escapeHtml(name), ...(s.thinking ? [`thinking ${escapeHtml(s.thinking)}`] : [])].join(SEP))];
     const ctx = s.context;
     if (ctx && ctx.contextWindow > 0) {
         const used = ctx.tokens === null ? '—' : formatTokenCount(ctx.tokens);
@@ -166,18 +163,18 @@ function renderHeader(s: ModelStatusInfo): void {
         );
     }
     for (const acct of s.usage) {
-        rows.push(`<div class="ms-group">${esc(acct.title)} usage</div>`);
+        rows.push(`<div class="ms-group">${escapeHtml(acct.title)} usage</div>`);
         for (const w of acct.windows) {
             rows.push(
                 row(
                     w.label,
-                    `${meter(w.usedPercent)}<span class="${tone(w.usedPercent).trim()}">${Math.round(w.usedPercent)}%</span>${w.reset ? `${SEP}${esc(w.reset)}` : ''}`,
+                    `${meter(w.usedPercent)}<span class="${tone(w.usedPercent).trim()}">${Math.round(w.usedPercent)}%</span>${w.reset ? `${SEP}${escapeHtml(w.reset)}` : ''}`,
                 ),
             );
         }
     }
     if (s.usageError) {
-        rows.push(`<div class="ms-group ms-err">Usage fetch failed: ${esc(s.usageError)}</div>`);
+        rows.push(`<div class="ms-group ms-err">Usage fetch failed: ${escapeHtml(s.usageError)}</div>`);
     }
     setHtml(detailEl, rows.join(''));
 }

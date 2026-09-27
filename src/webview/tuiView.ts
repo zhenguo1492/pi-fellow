@@ -1,4 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { type ITheme, Terminal } from '@xterm/xterm';
 import type { ClientMessage } from '../shared/protocol';
 import { vscode } from './vscodeApi';
@@ -96,8 +97,7 @@ function createPane(tabId: string): TuiPane {
     el.className = 'tui-pane';
     host.appendChild(el);
     // Chat typography: `--chat-font` size and `--font-mono` (the chat's code font), since a TUI grid
-    // needs monospace. Line height sits below `--chat-line` (1.5): the DOM renderer draws box-drawing
-    // glyphs from the font, so taller rows break the TUI's vertical borders into dashes.
+    // needs monospace. Line height sits below `--chat-line` (1.5) to keep the grid dense.
     const fontSize = Number.parseFloat(cssVar('--chat-font') ?? '');
     const term = new Terminal({
         fontFamily: cssVar('--font-mono') ?? 'monospace',
@@ -111,6 +111,18 @@ function createPane(tabId: string): TuiPane {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
+    // The DOM renderer draws block elements and box drawing from the font, which never fills a
+    // row taller than the glyph box: half-block art (the QR code `/collab` prints) gets gaps and
+    // unequal halves and phones can't scan it, and vertical borders break into dashes. WebGL draws
+    // those characters as exact cell-sized shapes. Without WebGL, or when the browser reclaims the
+    // context (it caps live contexts per page), xterm falls back to the DOM renderer.
+    try {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => webgl.dispose());
+        term.loadAddon(webgl);
+    } catch {
+        // No WebGL2 in this webview: keep the DOM renderer.
+    }
     const pane: TuiPane = { el, term, fit, started: false, exited: false };
     term.onData((data) => {
         if (pane.exited) {
@@ -139,22 +151,20 @@ export function getTuiHost(): HTMLElement {
     return host;
 }
 
-/** Show the active tab's terminal (TUI mode), or drop every terminal (chat mode). */
-export function syncTuiView(enabled: boolean, tabIds: string[], active: string): void {
-    document.getElementById('app')?.classList.toggle('tui-mode', enabled);
-    if (!enabled) {
-        for (const id of [...panes.keys()]) disposePane(id);
-        activeTabId = '';
-        return;
-    }
+/** Show the active tab's terminal when it is in TUI mode; keep other TUI tabs' terminals, drop the rest. */
+export function syncTuiView(tuiTabIds: string[], active: string): void {
     for (const id of [...panes.keys()]) {
-        if (!tabIds.includes(id)) disposePane(id);
+        if (!tuiTabIds.includes(id)) disposePane(id);
     }
-    activeTabId = active;
-    const pane = panes.get(active) ?? createPane(active);
+    const enabled = tuiTabIds.includes(active);
+    document.getElementById('app')?.classList.toggle('tui-mode', enabled);
+    activeTabId = enabled ? active : '';
     for (const [id, p] of panes) {
-        p.el.classList.toggle('tui-pane--active', id === active);
+        p.el.classList.toggle('tui-pane--active', id === activeTabId);
     }
+    if (!enabled) return;
+    const pane = panes.get(active) ?? createPane(active);
+    pane.el.classList.add('tui-pane--active');
     requestAnimationFrame(() => {
         fitPane(active, pane);
         pane.term.focus();

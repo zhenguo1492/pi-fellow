@@ -1,6 +1,6 @@
+import { escapeHtml } from '../../shared/html';
 import type { SkillInfo, SlashCommandListItem } from '../../shared/protocol';
 import { vscode } from '../vscodeApi';
-import { escHtml } from './helpers';
 import { resetUserScroll, updateScrollButton } from './scroll';
 import { state } from './state';
 
@@ -99,13 +99,13 @@ function renderSlashMenu(menu: HTMLElement): void {
     menu.innerHTML = slashMenuItems.map((item, i) => {
         const active = i === slashMenuIndex ? ' slash-item-active' : '';
         const desc = item.description
-            ? `<span class="slash-item-desc">${escHtml(item.description)}</span>`
+            ? `<span class="slash-item-desc">${escapeHtml(item.description)}</span>`
             : '';
         const tag = item.source !== 'builtin'
-            ? `<span class="slash-item-source">${escHtml(item.source)}</span>`
+            ? `<span class="slash-item-source">${escapeHtml(item.source)}</span>`
             : '';
         return `<div class="slash-item${active}" data-index="${i}">
-            <span class="slash-item-name">${escHtml(item.invocation)}</span>
+            <span class="slash-item-name">${escapeHtml(item.invocation)}</span>
             ${desc}
             ${tag}
         </div>`;

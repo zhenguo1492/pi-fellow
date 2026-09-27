@@ -1,3 +1,4 @@
+import { escapeHtml } from '../shared/html';
 import type { SessionTreeNodeData, SessionTreePayload } from '../shared/protocol';
 import { vscode } from './vscodeApi';
 
@@ -14,15 +15,6 @@ let actionMenuIndex = 0; // 0: No summary, 1: Summarize, 2: Summarize with custo
 let customPromptMode = false;
 let statusMessage = '';
 let statusTimeout: any = null;
-
-function escapeHtml(text: string): string {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
 
 function showStatus(msg: string, durationMs = 2500): void {
     statusMessage = msg;

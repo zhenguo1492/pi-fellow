@@ -8,17 +8,26 @@ import type {
     WorkerSendOptions,
     WorkerStatus,
 } from '../../../voiceAgent/workerController';
+import type { PermissionLevel } from '../../../shared/protocol';
 
 class FakeWorker implements WorkerController {
     phase: WorkerStatus['phase'] = 'idle';
     requests: WorkerRequest[] = [];
     sends: Array<{ tabId: string; text: string; options: WorkerSendOptions }> = [];
     answers: Array<{ requestId: string; answer: WorkerAnswer }> = [];
+    /** Existing tests predate permission levels: Auto keeps their pair-mode tools running at once. */
+    level: PermissionLevel = 'auto';
+    /** Approvals asked for (Manual, or commands and deletions in Edit automatically), answered by `approve`. */
+    approvals: Array<{ tabId: string; toolName: string; args: Record<string, unknown> }> = [];
+    approve: () => Promise<boolean> = async () => true;
 
     activeTask() {
         return { tabId: 'tab-1', name: 'Task', backend: 'omp' as const };
     }
     onActiveTaskChanged() {
+        return { dispose() {} };
+    }
+    onSessionResumed() {
         return { dispose() {} };
     }
     onTabEvent() {
@@ -47,6 +56,13 @@ class FakeWorker implements WorkerController {
     }
     async nameTask() {
         return false;
+    }
+    permissionLevel() {
+        return this.level;
+    }
+    requestToolApproval(tabId: string, toolName: string, args: Record<string, unknown>) {
+        this.approvals.push({ tabId, toolName, args });
+        return this.approve();
     }
 }
 
@@ -502,5 +518,142 @@ describe('HostToolRouter: list_viewers / open_with', () => {
         expect(opened).toEqual([]);
         expect((await router.execute('open_with', { path: 'notes.txt', viewer: 'default' }, turn(1))).isError).toBe(false);
         expect(opened).toEqual(['editor default notes.txt']);
+    });
+});
+
+describe('HostToolRouter: permission levels', () => {
+    const edit = { path: 'a.ts', oldText: 'x', newText: 'y' };
+
+    it('in Plan refuses every change and command with a read-only message, but still reads and opens', async () => {
+        const { worker, router, turn, edits, commands } = setup();
+        router.setMode('pair');
+        worker.level = 'plan';
+        const refused = await Promise.all([
+            router.execute('edit_file', edit, turn(1)),
+            router.execute('create_file', { path: 'b.ts', content: 'x' }, turn(1)),
+            router.execute('create_folder', { path: 'dir' }, turn(1)),
+            router.execute('rename_file', { from: 'a.ts', to: 'b.ts' }, turn(1)),
+            router.execute('delete_file', { path: 'a.ts' }, turn(1)),
+            router.execute('run_in_terminal', { command: 'rm -rf build' }, turn(1)),
+        ]);
+        for (const result of refused) {
+            expect(result).toEqual({ text: expect.stringMatching(/read-only Plan mode/), isError: true });
+        }
+        // The deletion was not even asked about: nothing to confirm in a later turn.
+        expect((await router.execute('delete_file', { path: 'a.ts' }, turn(2))).isError).toBe(true);
+        expect([edits, commands, worker.approvals, router.pendingDelete]).toEqual([[], [], [], undefined]);
+        expect((await router.execute('read_output', {}, turn(3))).isError).toBe(false);
+        expect((await router.execute('open_file', { path: 'a.ts' }, turn(3))).isError).toBe(false);
+    });
+
+    /** Resolves once `count` more approval cards were answered and their outcome recorded. */
+    function settled(router: HostToolRouter, count = 1): Promise<void> {
+        let left = count;
+        const { promise, resolve } = Promise.withResolvers<void>();
+        router.onApprovalSettled = () => {
+            if (--left === 0) resolve();
+        };
+        return promise;
+    }
+
+    it('in Manual returns at once so it can tell the user, and acts only once the card is approved', async () => {
+        const { worker, router, turn, edits } = setup();
+        router.setMode('pair');
+        worker.level = 'ask';
+        let decide: (approved: boolean) => void = () => {};
+        worker.approve = () => new Promise<boolean>((resolve) => (decide = resolve));
+
+        const held = await router.execute('edit_file', edit, turn(1));
+        expect(held).toEqual({ text: expect.stringMatching(/Waiting for the user's approval \(a1\).*Tell the user now/s), isError: false });
+        expect(worker.approvals).toEqual([{ tabId: 'tab-1', toolName: 'edit_file', args: edit }]);
+        expect(router.heldApprovals('tab-1')).toEqual([{ id: 'a1', tabId: 'tab-1', toolName: 'edit_file', summary: 'a.ts' }]);
+        expect(edits).toEqual([]);
+
+        const done = settled(router);
+        decide(true);
+        await done;
+        expect([edits, router.heldApprovals('tab-1'), router.settledApprovalCount('tab-1')]).toEqual([['a.ts'], [], 1]);
+        expect(router.takeSettledApprovals('tab-1')).toEqual([
+            { id: 'a1', tabId: 'tab-1', toolName: 'edit_file', summary: 'a.ts', outcome: 'done', result: 'edited a.ts' },
+        ]);
+        // Handed out once.
+        expect(router.settledApprovalCount('tab-1')).toBe(0);
+    });
+
+    it('in Manual does nothing when the card is rejected, or when the task went to Plan before it was approved', async () => {
+        const { worker, router, turn, edits, commands } = setup();
+        router.setMode('pair');
+        worker.level = 'ask';
+        worker.approve = async () => false;
+        const rejected = settled(router);
+        await router.execute('run_in_terminal', { command: 'npm publish' }, turn(1));
+        await rejected;
+        expect(router.takeSettledApprovals('tab-1')).toMatchObject([{ toolName: 'run_in_terminal', summary: 'npm publish', outcome: 'rejected' }]);
+
+        let decide: (approved: boolean) => void = () => {};
+        worker.approve = () => new Promise<boolean>((resolve) => (decide = resolve));
+        await router.execute('create_file', { path: 'b.ts', content: 'x' }, turn(2));
+        worker.level = 'plan';
+        const late = settled(router);
+        decide(true);
+        await late;
+        expect(router.takeSettledApprovals('tab-1')).toMatchObject([{ toolName: 'create_file', outcome: 'failed', result: expect.stringMatching(/Plan mode/) }]);
+        expect([edits, commands]).toEqual([[], []]);
+    });
+
+    it('in Manual keeps the two-turn delete confirmation and puts up the card only when it would delete', async () => {
+        const { worker, router, turn, edits } = setup();
+        router.setMode('pair');
+        worker.level = 'ask';
+        worker.approve = async () => false;
+        expect((await router.execute('delete_file', { path: 'a.ts' }, turn(1))).text).toMatch(/Not deleted yet/);
+        expect(worker.approvals).toEqual([]);
+        const rejected = settled(router);
+        expect((await router.execute('delete_file', { path: 'a.ts' }, turn(2))).text).toMatch(/Waiting for the user's approval/);
+        await rejected;
+        expect([worker.approvals.map((a) => a.toolName), edits, router.pendingDelete]).toEqual([['delete_file'], [], undefined]);
+
+        worker.approve = async () => true;
+        await router.execute('delete_file', { path: 'a.ts' }, turn(3));
+        const approved = settled(router);
+        await router.execute('delete_file', { path: 'a.ts' }, turn(4));
+        await approved;
+        expect(router.takeSettledApprovals('tab-1').map((s) => [s.outcome, s.result])).toEqual([
+            ['rejected', expect.any(String)],
+            ['done', 'deleted a.ts'],
+        ]);
+        expect(edits).toEqual(['delete a.ts']);
+    });
+
+    it('in Auto acts at once without asking', async () => {
+        const { worker, router, turn, edits, commands } = setup();
+        router.setMode('pair');
+        worker.level = 'auto';
+        await router.execute('edit_file', edit, turn(1));
+        await router.execute('run_in_terminal', { command: 'ls' }, turn(1));
+        expect([edits, commands, worker.approvals]).toEqual([['a.ts'], ['ls'], []]);
+    });
+
+    it('in Edit automatically changes files at once, but holds commands, deletions and moves for approval', async () => {
+        const { worker, router, turn, edits, commands } = setup();
+        router.setMode('pair');
+        worker.level = 'edit';
+        worker.approve = async () => false;
+        expect((await router.execute('edit_file', edit, turn(1))).text).toBe('edited a.ts');
+        await router.execute('create_file', { path: 'b.ts', content: 'x' }, turn(1));
+        expect([edits, worker.approvals]).toEqual([['a.ts', 'create b.ts'], []]);
+
+        const answered = settled(router, 3);
+        await router.execute('run_in_terminal', { command: 'npm publish' }, turn(1));
+        await router.execute('rename_file', { from: 'a.ts', to: 'c.ts' }, turn(1));
+        await router.execute('delete_file', { path: 'a.ts' }, turn(1));
+        await router.execute('delete_file', { path: 'a.ts' }, turn(2));
+        await answered;
+        expect(router.takeSettledApprovals('tab-1').map((s) => [s.toolName, s.summary, s.outcome])).toEqual([
+            ['run_in_terminal', 'npm publish', 'rejected'],
+            ['rename_file', 'a.ts -> c.ts', 'rejected'],
+            ['delete_file', 'a.ts', 'rejected'],
+        ]);
+        expect([edits, commands]).toEqual([['a.ts', 'create b.ts'], []]);
     });
 });

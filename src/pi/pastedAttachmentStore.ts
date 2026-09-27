@@ -8,12 +8,6 @@ export function pastedAttachmentsDir(globalStorageFsPath: string): string {
     return join(globalStorageFsPath, SUBDIR);
 }
 
-export async function ensurePastedAttachmentsDir(globalStorageFsPath: string): Promise<string> {
-    const dir = pastedAttachmentsDir(globalStorageFsPath);
-    await mkdir(dir, { recursive: true });
-    return dir;
-}
-
 function sanitizeFileName(name: string): string {
     const base = basename(name).replace(/[^\w.\-()+ ]+/g, '_') || 'pasted-image.png';
     return base.slice(0, 120);

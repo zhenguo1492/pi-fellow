@@ -76,6 +76,9 @@ class FakeWorker implements WorkerController {
     onActiveTaskChanged() {
         return { dispose() {} };
     }
+    onSessionResumed() {
+        return { dispose() {} };
+    }
     onTabEvent(listener: (event: { tabId: string; event: WorkerEvent }) => void) {
         this._tabListeners.add(listener);
         return { dispose: () => this._tabListeners.delete(listener) };
@@ -106,6 +109,12 @@ class FakeWorker implements WorkerController {
     }
     async nameTask() {
         return false;
+    }
+    permissionLevel() {
+        return 'auto' as const;
+    }
+    async requestToolApproval() {
+        return true;
     }
 }
 
@@ -275,6 +284,54 @@ describe('VoiceAgent: resuming a task’s voice conversation', () => {
         await window.store.pruneContexts(omp.dir);
         expect(existsSync(omp.created[0])).toBe(true);
         expect(existsSync(unused)).toBe(false);
+    });
+});
+
+describe('VoiceAgent: speaking first when voice comes on', () => {
+    /** Lets every turn the agent could have queued reach the (instant) fake omp. */
+    const settle = () => {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setImmediate(resolve);
+        return promise;
+    };
+
+    it('opens in the resumed conversation before the user says anything', async () => {
+        const worker = new FakeWorker();
+        const state = memento();
+        const first = openWindow(worker, state);
+        await first.say('What is it doing?');
+        await first.stopVoice();
+
+        const second = openWindow(worker, state);
+        const agent = second.startVoice();
+        agent.warmUp();
+        agent.open({ reason: 'connect', language: 'zh' });
+        await vi.waitFor(() => expect(omp.prompts).toHaveLength(2));
+
+        expect(omp.switched).toEqual([omp.created[0]]);
+        expect(omp.prompts[1]).toContain('<task-history');
+        expect(omp.prompts[1]).toContain('<voice-on reason="connect" language="zh"/>');
+        expect(omp.prompts[1]).not.toContain('<user');
+
+        await second.say('And now?');
+        expect(omp.prompts).toHaveLength(3);
+        expect(omp.prompts[2]).toContain('<user source="text">And now?</user>');
+        await second.stopVoice();
+    });
+
+    it('says nothing first once the user has spoken, or for a resumed tab the user already left', async () => {
+        const worker = new FakeWorker();
+        const window = openWindow(worker, memento());
+        const agent = window.startVoice();
+        // Not warmed up yet: the opening waits for the process, and the user gets in first.
+        agent.open({ reason: 'connect' });
+        await window.say('Hello');
+        agent.open({ reason: 'resume', tabId: 'tab-2' });
+        await settle();
+
+        expect(omp.prompts).toHaveLength(1);
+        expect(omp.prompts[0]).toContain('<user source="text">Hello</user>');
+        await window.stopVoice();
     });
 });
 

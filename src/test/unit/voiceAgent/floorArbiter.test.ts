@@ -10,6 +10,8 @@ function setup(overrides: Partial<ArbiterSettings> = {}) {
         tabId: 'tab-1',
         phase: 'idle',
         requestIds: [],
+        fromVoice: false,
+        settledApprovals: 0,
         settledResearch: [],
         unseenUpdates: 0,
         ...patch,
@@ -101,6 +103,25 @@ describe('FloorArbiter: priority and pacing', () => {
         expect(all.arbiter.next(all.view(busy), 69999)).toBeUndefined();
         expect(all.arbiter.next(all.view({ ...busy, unseenUpdates: 0 }), 70000)).toBeUndefined();
         expect(all.arbiter.next(all.view(busy), 70000)).toEqual({ kind: 'progress', tabId: 'tab-1' });
+    });
+
+    it('with narration off, still relays a request from a task the voice agent sent', () => {
+        const off = setup({ narration: 'off' });
+        const request = { phase: 'awaiting' as const, requestIds: ['q1'] };
+        expect(off.arbiter.next(off.view(request), 60000)).toBeUndefined();
+        const relayed = off.arbiter.next(off.view({ ...request, fromVoice: true }), 60000);
+        expect(relayed).toEqual({ kind: 'needs_input', tabId: 'tab-1', requestIds: ['q1'] });
+        off.arbiter.consume(relayed!);
+        expect(off.arbiter.next(off.view({ ...request, fromVoice: true }), 60001)).toBeUndefined();
+    });
+
+    it("says the outcome of the voice agent's own approval card first, right after a turn and with narration off", () => {
+        const off = setup({ narration: 'off' });
+        off.arbiter.turnEnded(59000);
+        expect(off.arbiter.next(off.view({ settledApprovals: 1, requestIds: ['q1'], fromVoice: true }), 60000)).toEqual({
+            kind: 'approval',
+            tabId: 'tab-1',
+        });
     });
 });
 

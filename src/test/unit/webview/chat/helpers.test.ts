@@ -1,37 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { escAttr, escHtml, formatTimestamp, truncate, tryParseJSON } from '../../../../webview/chat/helpers';
-
-describe('escHtml', () => {
-    it('escapes &, <, > like Text node serialization', () => {
-        expect(escHtml('a & b <tag> c')).toBe('a &amp; b &lt;tag&gt; c');
-    });
-
-    it('does not double-escape existing entities beyond the ampersand', () => {
-        expect(escHtml('&lt;')).toBe('&amp;lt;');
-    });
-
-    it('leaves quotes untouched', () => {
-        expect(escHtml(`"double" 'single'`)).toBe(`"double" 'single'`);
-    });
-
-    it('serializes non-breaking spaces as &nbsp; but keeps regular spaces', () => {
-        expect(escHtml('a\u00a0b c')).toBe('a&nbsp;b c');
-    });
-});
-
-describe('escAttr', () => {
-    it('escapes double quotes (unlike escHtml) along with &, <, >', () => {
-        expect(escAttr('say "hi" & <go>')).toBe('say &quot;hi&quot; &amp; &lt;go&gt;');
-    });
-
-    it('escapes & first so produced entities are not re-escaped', () => {
-        expect(escAttr('"')).toBe('&quot;');
-    });
-
-    it('leaves single quotes and non-breaking spaces alone', () => {
-        expect(escAttr("it's\u00a0x")).toBe("it's\u00a0x");
-    });
-});
+import { formatTimestamp, truncate, tryParseJSON } from '../../../../webview/chat/helpers';
 
 describe('truncate', () => {
     it('keeps strings at exactly maxLen', () => {

@@ -4,6 +4,7 @@ import type { ExtensionUiMethod, ExtensionUiRequestPayload } from '../shared/ext
 import type { ServerMessage } from '../shared/protocol';
 import type { PiRpcBridge } from './piRpcBridge';
 import type { PiExtensionChrome } from './piExtensionChrome';
+import { APPROVE_OPTION, isToolApprovalSelect } from './permissionPolicy';
 
 /** Requests that block the CLI until answered. Neither pi nor omp sends a `timeout` with `editor`. */
 type RpcDialogRequest = Extract<RpcExtensionUIRequest, { method: ExtensionUiMethod }>;
@@ -25,6 +26,8 @@ export class RpcExtensionUiHandler {
     private readonly _pendingListeners = new Set<() => void>();
     private _post: ((msg: ServerMessage) => void) | undefined;
     private _chrome: PiExtensionChrome | undefined;
+    /** The tab is in Auto: tool-approval selects (omp's own `Allow tool:` prompts) are approved without asking. */
+    autoApproveTools = false;
 
     constructor(private readonly _bridge: PiRpcBridge) {}
 
@@ -116,6 +119,10 @@ export class RpcExtensionUiHandler {
                 this._post?.({ type: 'setComposerText', text: req.text });
                 return;
             case 'select':
+                if (this.autoApproveTools && isToolApprovalSelect(req)) {
+                    this._bridge.sendExtensionUiResponse({ type: 'extension_ui_response', id: req.id, value: APPROVE_OPTION });
+                    return;
+                }
                 void this._dialog(req, { title: req.title, options: req.options });
                 return;
             case 'confirm':

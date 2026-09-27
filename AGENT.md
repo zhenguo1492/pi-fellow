@@ -31,12 +31,18 @@ vs-pi-agent/
 │   │   └── slashCommands.ts   # 斜杠命令处理（/help, /clear, /session 等）
 │   │
 │   ├── providers/             # VS Code 视图与面板提供者
-│   │   ├── sidebar.ts         # 核心侧边栏 WebviewViewProvider（管理多 Tab、事件分发与消息中转）
+│   │   ├── sidebar.ts         # 核心侧边栏 WebviewViewProvider：组装下列 sidebar*.ts 模块、视图生命周期、stateSync、按消息类型分发的 handler 表
+│   │   ├── sidebarHost.ts     # 各模块依赖的 SidebarHost 接口（post、当前后端的 tabs/活动 tab、stateSync）
+│   │   ├── sidebarBackends.ts / sidebarTabs.ts / sidebarTabState.ts # 每个后端的 Tab 工作区与预热会话；Tab 生命周期、订阅、打开 Tab 的持久化；TabState
+│   │   ├── sidebarPromptQueue.ts / sidebarSessionPanel.ts / sidebarAttachments.ts / sidebarToolApproval.ts # 发送/排队/中止；恢复面板与会话树；附件与编辑器上下文；工具审批（各自导出 webview 消息 handler）
+│   │   ├── sidebarTuiMode.ts / sidebarTui.ts / sidebarBotView.ts / sidebarWorker.ts / sidebarVoiceSessions.ts # TUI 模式；Bot 视图与听写；语音 agent 的 WorkerController；语音会话
+│   │   ├── sidebarMessageHandlers.ts / sidebarHtml.ts # handler 表类型与会话类 handler；侧边栏 HTML
 │   │   └── settings-panel.ts  # 设置面板 WebviewPanel（管理模型、Provider、API Key 等配置）
 │   │
 │   ├── shared/                # 扩展宿主与 Webview 共享代码
 │   │   ├── protocol.ts        # Webview <-> Extension 双向通信协议定义
-│   │   └── planMessageFilter.ts # Plan 模式消息过滤与解析逻辑
+│   │   ├── planMessageFilter.ts # Plan 模式消息过滤与解析逻辑
+│   │   └── html.ts            # escapeHtml：宿主与 Webview 唯一的 HTML 转义（& < > " '）
 │   │
 │   └── webview/               # 前端 Webview 界面代码
 │       ├── main.ts            # 聊天界面入口：挂 Bot 视图、注册 message 监听、注入消息操作回调、调用 render()
@@ -50,7 +56,8 @@ vs-pi-agent/
 │       │   ├── composer.ts / composerInput.ts / composerChips.ts / slashMenu.ts / queuedBanner.ts # 输入框（发送/插队/中止/编辑重发）、键盘绑定、附件与编辑器上下文 chip、斜杠菜单、排队消息
 │       │   └── helpers.ts / markdown.ts / messageContent.ts / scroll.ts / … # 纯函数与共用小工具（测试在 src/test/unit/webview/chat/）
 │       ├── tsconfig.json      # Webview 类型检查（DOM lib）：`npm run typecheck`
-│       ├── settings.ts        # 设置页 Webview 前端逻辑
+│       ├── settings.ts        # 设置页 Webview 入口（注册 message 监听并请求初始数据）
+│       ├── settings/          # 设置页模块：state.ts（唯一可变状态 settingsState）、api.ts、tabs.ts、render.ts、messages.ts、events.ts、dom.ts 与各标签页（general/auth/voice/packages/skills/mcp/commands）
 │       ├── fileMentionMenu.ts # @ 文件与路径引用自动补全菜单
 │       ├── modelPicker.ts     # 输入框下方模型 chip：只列收藏模型（`oh-my-pi-chater.favoriteModels`）；收藏在模型 QuickPick（命令 `selectModel`，会话顶部模型状态条右侧的切换按钮）的 ☆ 按钮里切换
 │       ├── modelStatus.ts     # 会话顶部的模型状态条（样式仿 Bot 视图头部）：模型 · ctx · 5h/7d 额度，点击展开上下文、会话 token 与各额度窗口的重置时间
@@ -111,6 +118,22 @@ vs-pi-agent/
 
 - `SidebarProvider` 维护 `tabs: Map<string, TabState>` 和 `activeTabId`。
 - 每个 Tab 对应独立的 `PiChatSession`，切换 Tab 时通过 `pushStateSync` 同步对应 Tab 的完整历史与流式状态，互不干扰。
+- **从恢复面板打开会话**：已在某个 Tab 打开 → 切到那个 Tab；否则新开 Tab（`createEmptyTabState(backend, 会话 cwd)`）加载，不覆盖当前 Tab。只有当前 Tab 是空白对话（无消息、空闲、非 Bot 视图、同后端同目录）时才直接复用它。加载走 `SidebarTabs.loadSessionIntoTab`（与启动恢复共用：加载中显示历史加载占位、`tabReady` 挡住发送、标题先用会话名），失败时关闭新 Tab 并回到原 Tab 和原后端。当前 Tab 在 TUI 模式时同样新开 Tab 并在其中启动 TUI。
+- **TUI 模式按 Tab**：标题栏的 TUI 切换只作用于当前 Tab（`TabState.tuiMode`，经 `TabInfo.tuiMode` 发给 webview），其他 Tab 保持各自的聊天/TUI 视图；切回聊天只停止并重新加载这一个 Tab。只拦截当前 Tab 正在流式输出时切入 TUI。TUI 模式随打开的 Tab 持久化（`PersistedOpenTabs.tuiSessionPaths`，按会话文件）；context key `oh-my-pi-chater.tuiMode` 反映当前 Tab。
+- **TUI Tab 与语音 agent**：TUI Tab 没有 Bot 视图——切入时清掉 `botView`，Tab 图标显示终端图标，点击只切到该 Tab（`toggleBotView`/`showBotView` 对 TUI Tab 不改 `botView`）。输入框在 TUI 下只保留语音状态条（隐藏 Bot 视图按钮）和审批卡，语音 agent 仍可开关、对话、用 pair 工具；但 TUI 占着会话文件，`SidebarWorker.send`/`abort` 对 TUI Tab 直接报错（design §5.12 规则 7），语音不能派活或叫停。
+- **TUI Tab 的运行状态**：TUI 的运行不经过 RPC worker。`TabTuis` 在 TUI 启动后对它的会话文件建 `SessionActivityWatcher`（`src/pi/sessionActivity.ts`，`fs.watchFile` 每 500ms 轮询，只读追加的完整行，文件变短则从头重扫）：user / toolResult / `stopReason: toolUse` 的 assistant 记为工作中，其他 assistant 结束（stop、aborted、error）记为空闲（`sessionEntryBusy`）。`TabTuis` 再和 PTY 输出合并：文件说在跑且 TUI 在重绘（omp / pi 工作时 spinner 每秒上万字节，空闲时 0）才算工作中；静默 3s（`TUI_QUIET_MS`）即结束，兜住中断后文件没记下结束的情况，之后再有输出而文件仍在跑又恢复工作中。结果经 `busyChanged` 写入 `TabState.tuiBusy`，`getTabInfos` 把它并进 `TabInfo.isStreaming`，Tab 图标显示彩色旋转的终端图标；后台 Tab 跑完标 `hasNotification`。TUI 停止或退出时撤掉监听并结束运行状态。只跟随启动时的会话文件：在 TUI 里 `/new` 或 `/resume` 换了会话后不再反映状态。
+- **启动不阻塞侧边栏**：`activate` 内没有 `await`——主会话 `initialize()` 在后台跑，侧边栏立即注册；CLI 检查、native 模块预检、清理扩展侧 API key 都只在后台报告。上次打开的 Tab 由 `restorePersistedTabs` 并行恢复（每个 Tab 一个 omp/pi 进程同时启动，不 `await`）。进程未就绪时 stateSync 的 `connectionStatus` 为 `connecting`（`tabConnectionStatus`），输入框上方显示 “Starting omp…”；会话恢复中 `restoringHistory` 为 true，消息区用 “Loading conversation history…” 占位代替欢迎页。
+- **Tab 就绪门**：发送、排队、斜杠命令、语音 worker、TUI 启动都先 `await tabReady(tab)`（进程就绪 + `tab.restoring` 完成），不要直接用 `session.isReady` / `waitUntilReady()` 判断能否发送，否则提示词会落进尚未恢复的 Tab。
+- **预热**：窗口首个进程启动期间和恢复 Tab 期间 `SidebarBackends.holdPrewarm()` 暂停预热，全部释放后 1.5s 才启动预热进程。
+- **模型/技能列表**：`get_available_models` 要等 omp 的 provider 发现（本地端口 + 网络，约 0.5s 起），所以 `_refreshModelsAndSkills` 在初始化和 `syncFromRpc` 中都在后台执行，列表变化时通过 `onDidChangeCatalog` 通知 Tab 重发模型栏和技能；同一后端 + 目录的上次结果缓存在 `catalogByWorkspace`，新进程先用它显示。
+
+### 3.4 权限模式（Manual / Edit automatically / Plan / Auto）
+
+- 名称照 Claude 的模式；内部值依次是 `ask` / `edit` / `plan` / `auto`（`PermissionLevel`）。输入框下方模型选择同一行右侧的按钮打开 “Modes” 菜单（`src/webview/chat/permission.ts`，消息 `setPermissionLevel`），按 Tab 设置；新 Tab 取本工作区上次在菜单里选的模式（`workspaceState` 的 `oh-my-pi-chater.lastPermissionLevel`，`newTabPermissionLevel`），从没选过时取 `oh-my-pi-chater.defaultPermissionLevel`（未设置时沿用旧的 `autoApproveTools`：true → Auto，否则 Manual）；改这个设置会清掉上次的选择。每个会话的模式按会话文件（canonical 路径）记在 `oh-my-pi-chater.sessionPermissions`（最多 500 条，最旧的先丢），`_persistOpenTabs` 与关闭 Tab 时写入，`loadSessionIntoTab`（启动恢复与恢复面板共用）加载前应用，所以关掉再打开的会话仍是它自己的模式。
+- **worker 的统一闸门**：每个聊天 worker（omp 与 pi）都用 `--extension out/pi-extension/permissionGate.js` 加载 `src/piExtension/permissionGate.ts`，在 `tool_call` 事件里判定。规则在 `src/pi/permissionPolicy.ts` 的 `toolTier`：`read`（只读白名单、写 `local://`/`memory://`/`xd://`）任何模式都放行；`write`（edit、write、ast_edit、lsp rename/应用 code action）只改文件内容；`exec` 是其余一切（bash、eval、task、browser、MCP、未知工具），以及删除或移动文件的 edit（hashline `REM`/`MV`、apply_patch `*** Delete File:`/`*** Move to:`、patch 形式的 `op: 'delete'`/`rename`）。Manual 对 write 和 exec 都询问；Edit automatically 放行 write、询问 exec；Plan 返回 `{ block, reason }` 告诉模型处于只读计划模式；Auto 全放行。询问是 `select`「`Allow tool: <name>` / Approve·Deny」（与 omp 自带审批同格式，走 `RpcExtensionUiHandler` 的对话框，语音 agent 也能 `answer_worker`）；`oh-my-pi-chater.allowedTools` 里的工具在 Manual / Edit automatically 下免审批。模式写在每个进程一个的临时文件（`PermissionGateFile`，env `VSCODE_PI_PERMISSION_FILE`），闸门每次调用都重读，切换无需重启。Auto 下宿主还会自动批准 omp 自身的 `Allow tool:` 审批（`RpcExtensionUiHandler.autoApproveTools`）。
+- **pi 的 Plan** 就是 pi 自己的计划模式（pi-plan-mode）：选 Plan 时 `TabState.readOnlyPlan` 先让闸门只读，`setAgentMode('plan')` 确认开启后交还给 pi（`releasePlanToPi`），闸门在 pi 计划模式开着时放行（由 pi-plan-mode 自己的 `tool_call` 拦截），pi 退出计划模式（Implement 或它自己的菜单）后回到 Tab 的 `permissionBase`（Manual / Edit automatically / Auto）。标题栏只剩 Implement 按钮，没有第二个 Plan 开关。
+- **语音 agent**：`HostToolRouter` 的 `PERMISSION_TIER` 把 pair 工具分成 write（edit_file、create_file、create_folder、save_file）和 exec（run_in_terminal、debug_start、delete_file、rename_file），规则同 worker：Plan 拒绝；Manual 两类都要审批，Edit automatically 只有 exec 要审批。需要审批时 `_holdForApproval` 通过 `WorkerController.requestToolApproval` 挂出输入框上方的审批卡（`#tool-approval-host`，随 stateSync 的 `pendingToolApprovals` 重建，Bot 视图下也可见），工具调用**立即返回**“等待批准”，让语音 agent 能马上开口提醒用户去点（工具调用没返回时它说不了话）；等待中的卡片每轮以 `<approval-pending>` 出现在消息里。用户点了之后，批准则执行动作（执行前再查一次 Plan 与 worker 是否在写文件），结果进 `takeSettledApprovals`，`onApprovalSettled` 触发 `approval` 观察，语音 agent 主动说出结果（`<approval-settled>`）。delete_file 仍保留两轮口头确认，卡片在真正删除时才挂出。
+- **提醒用户审批**：`FloorArbiter` 的 `approval`（自己审批卡的结果）优先级最高、不等安静间隔；worker 的请求在 `WorkerStatus.fromVoice`（worker 当前指令是语音 agent 发的，按 `voiceOrigins` 判断最新一条 user 消息）时即使 `voiceAgent.narration` 为 off 也会播报，`_describe` 让它提醒用户去聊天里批准/拒绝或口头告诉它。二者都只看当前（语音绑定的）Tab。
 
 ---
 

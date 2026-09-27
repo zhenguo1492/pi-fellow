@@ -1,3 +1,4 @@
+import { escapeHtml } from '../shared/html';
 import type { PendingAttachmentPreview } from '../shared/protocol';
 import { formatLineRange, type EditorContextInfo } from '../shared/editorContext';
 
@@ -30,8 +31,6 @@ function fileExtension(name: string): string {
 export function renderComposerAttachmentChip(
     a: PendingAttachmentPreview,
     active: boolean,
-    escHtml: (s: string) => string,
-    escAttr: (s: string) => string,
 ): string {
     const kind = a.isImage ? 'image' : 'file';
     const clickable = a.isImage || Boolean(a.absolutePath);
@@ -40,10 +39,10 @@ export function renderComposerAttachmentChip(
         : a.absolutePath
           ? `Open ${a.displayName}`
           : a.displayName;
-    return `<div class="attachment-chip${clickable ? ' attachment-chip--openable' : ''}${active ? ' attachment-chip--active' : ''}" data-id="${escAttr(a.id)}" role="${clickable ? 'button' : 'group'}" tabindex="${clickable ? '0' : '-1'}"${a.isImage ? ` aria-pressed="${active}"` : ''} title="${escAttr(title)}">
+    return `<div class="attachment-chip${clickable ? ' attachment-chip--openable' : ''}${active ? ' attachment-chip--active' : ''}" data-id="${escapeHtml(a.id)}" role="${clickable ? 'button' : 'group'}" tabindex="${clickable ? '0' : '-1'}"${a.isImage ? ` aria-pressed="${active}"` : ''} title="${escapeHtml(title)}">
         <span class="attachment-chip-glyph attachment-chip-glyph--${kind}">${a.isImage ? CHIP_IMAGE_ICON : CHIP_FILE_ICON}</span>
-        <span class="attachment-name">${escHtml(a.displayName)}</span>
-        <button type="button" class="attachment-remove" data-id="${escAttr(a.id)}" title="Remove" aria-label="Remove ${escAttr(a.displayName)}">${CHIP_CLOSE_ICON}</button>
+        <span class="attachment-name">${escapeHtml(a.displayName)}</span>
+        <button type="button" class="attachment-remove" data-id="${escapeHtml(a.id)}" title="Remove" aria-label="Remove ${escapeHtml(a.displayName)}">${CHIP_CLOSE_ICON}</button>
     </div>`;
 }
 
@@ -51,8 +50,6 @@ export function renderComposerAttachmentChip(
 export function renderEditorContextChip(
     context: EditorContextInfo,
     enabled: boolean,
-    escHtml: (s: string) => string,
-    escAttr: (s: string) => string,
 ): string {
     const name = context.displayPath.split(/[/\\]/).pop() || context.displayPath;
     const lines =
@@ -61,10 +58,10 @@ export function renderEditorContextChip(
     const title = enabled
         ? `Sent with your message: ${target}. Click to exclude.`
         : `Not sent: ${target}. Click to include.`;
-    return `<button type="button" class="editor-context-chip${enabled ? '' : ' editor-context-chip--off'}" aria-pressed="${enabled}" title="${escAttr(title)}">
+    return `<button type="button" class="editor-context-chip${enabled ? '' : ' editor-context-chip--off'}" aria-pressed="${enabled}" title="${escapeHtml(title)}">
         <span class="editor-context-icon">${CHIP_FILE_ICON}</span>
-        <span class="editor-context-name">${escHtml(name)}</span>
-        ${lines ? `<span class="editor-context-lines">${escHtml(lines)}</span>` : ''}
+        <span class="editor-context-name">${escapeHtml(name)}</span>
+        ${lines ? `<span class="editor-context-lines">${escapeHtml(lines)}</span>` : ''}
         <span class="editor-context-toggle">${enabled ? CHIP_EYE_ICON : CHIP_EYE_OFF_ICON}</span>
     </button>`;
 }
@@ -73,15 +70,13 @@ export function renderMessageAttachmentChip(
     displayName: string,
     filePath: string,
     isImage: boolean,
-    escHtml: (s: string) => string,
-    escAttr: (s: string) => string,
     lines?: { startLine: number; endLine: number },
 ): string {
     const ext = fileExtension(displayName);
     const extLabel = lines
-        ? `<span class="attachment-ext attachment-ext--muted">${escHtml(formatLineRange(lines.startLine, lines.endLine))}</span>`
+        ? `<span class="attachment-ext attachment-ext--muted">${escapeHtml(formatLineRange(lines.startLine, lines.endLine))}</span>`
         : ext
-          ? `<span class="attachment-ext">${escHtml(ext)}</span>`
+          ? `<span class="attachment-ext">${escapeHtml(ext)}</span>`
           : `<span class="attachment-ext attachment-ext--muted">${isImage ? 'image' : 'file'}</span>`;
     const iconClass = isImage ? 'attachment-chip-icon--image' : 'attachment-chip-icon--file';
     const icon = isImage ? CHIP_IMAGE_ICON : CHIP_FILE_ICON;
@@ -90,24 +85,24 @@ export function renderMessageAttachmentChip(
         : 'message-attachment-chip';
 
     if (isImage) {
-        return `<div class="${chipClass} attachment-chip--openable" data-filepath="${escAttr(filePath)}" data-is-image="true" role="button" tabindex="0" title="${escAttr(`点击在对话框展开/折叠图片: ${displayName}`)}">
+        return `<div class="${chipClass} attachment-chip--openable" data-filepath="${escapeHtml(filePath)}" data-is-image="true" role="button" tabindex="0" title="${escapeHtml(`点击在对话框展开/折叠图片: ${displayName}`)}">
         <span class="attachment-chip-icon ${iconClass}">${icon}</span>
         <span class="attachment-chip-text">
-            <span class="message-attachment-name">${escHtml(displayName)}</span>
+            <span class="message-attachment-name">${escapeHtml(displayName)}</span>
             ${extLabel}
         </span>
         <span class="attachment-preview-toggle" title="展开/收起预览">${CHIP_EXPAND_ICON}</span>
-        <button type="button" class="attachment-open-external" data-filepath="${escAttr(filePath)}" title="在编辑器中打开原图" aria-label="Open in editor">${CHIP_EXTERNAL_ICON}</button>
+        <button type="button" class="attachment-open-external" data-filepath="${escapeHtml(filePath)}" title="在编辑器中打开原图" aria-label="Open in editor">${CHIP_EXTERNAL_ICON}</button>
     </div>`;
     }
 
     const lineAttrs = lines
         ? ` data-start-line="${lines.startLine}" data-end-line="${lines.endLine}"`
         : '';
-    return `<div class="${chipClass} attachment-chip--openable" data-filepath="${escAttr(filePath)}"${lineAttrs} role="button" tabindex="0" title="${escAttr(`Open ${displayName}`)}">
+    return `<div class="${chipClass} attachment-chip--openable" data-filepath="${escapeHtml(filePath)}"${lineAttrs} role="button" tabindex="0" title="${escapeHtml(`Open ${displayName}`)}">
         <span class="attachment-chip-icon ${iconClass}">${icon}</span>
         <span class="attachment-chip-text">
-            <span class="message-attachment-name">${escHtml(displayName)}</span>
+            <span class="message-attachment-name">${escapeHtml(displayName)}</span>
             ${extLabel}
         </span>
     </div>`;

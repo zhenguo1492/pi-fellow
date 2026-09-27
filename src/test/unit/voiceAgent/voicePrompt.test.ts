@@ -98,3 +98,21 @@ describe('turn message: proposals settled with the panel buttons', () => {
         expect(message).toContain('<proposal-settled id="p1" outcome="confirmed">bump version\nResult: It is being sent now.</proposal-settled>');
     });
 });
+
+describe('turn message: approval cards', () => {
+    it('shows a card still waiting and an answered one with its result, so the model reminds the user or reports it', () => {
+        const message = buildTurnMessage({
+            trigger: { kind: 'proactive', observation: 'approval', detail: 'The user answered your approval card.' },
+            status: { phase: 'idle', queued: 0 },
+            updates: [],
+            requests: [],
+            proposals: [],
+            research: [],
+            heldApprovals: [{ id: 'a2', tabId: 'tab-1', toolName: 'delete_file', summary: 'old.ts' }],
+            settledApprovals: [{ id: 'a1', tabId: 'tab-1', toolName: 'run_in_terminal', summary: 'npm test', outcome: 'done', result: 'Exit code 0.' }],
+        });
+        expect(message).toContain('<approval-pending id="a2" tool="delete_file">old.ts</approval-pending>');
+        expect(message).toContain('<approval-settled id="a1" tool="run_in_terminal" outcome="done">npm test\nResult: Exit code 0.</approval-settled>');
+        expect(message).toContain('<worker-update kind="approval">');
+    });
+});

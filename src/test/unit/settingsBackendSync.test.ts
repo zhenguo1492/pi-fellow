@@ -17,6 +17,7 @@ vi.mock('vscode', () => ({
     workspace: {
         getConfiguration: () => ({
             get: (_key: string, fallback: unknown) => fallback,
+            inspect: () => undefined,
         }),
         onDidChangeConfiguration: (listener: (event: { affectsConfiguration: (key: string) => boolean }) => void) => {
             state.listeners.push(listener);

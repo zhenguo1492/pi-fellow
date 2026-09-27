@@ -9,7 +9,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { PiRpcSessionManager, createPiChatSession } from './pi/rpcSession';
+import { PiRpcSessionManager } from './pi/rpcSession';
 import type { PiChatSession } from './pi/slashCommands';
 import type { TuiAuthCommand } from './shared/protocol';
 import { SidebarProvider } from './providers/sidebar';
@@ -28,7 +28,7 @@ import { PlanDocumentProvider } from './providers/plan-document';
 import { createBootErrorWebviewProvider, createCliMissingWebviewProvider } from './providers/boot-error-webview';
 import { rebuildAgentNativeModules } from './pi/piExtensionCompat';
 import { registerAttachFromExplorer } from './pi/attachFromExplorer';
-import { ensurePastedAttachmentsDir } from './pi/pastedAttachmentStore';
+import { pastedAttachmentsDir } from './pi/pastedAttachmentStore';
 import { registerWorkerControlCommands } from './voiceAgent/workerControlCommands';
 import { registerVoiceAgentCommands } from './voiceAgent/voiceAgentCommands';
 
@@ -67,29 +67,8 @@ async function promptInstallCli(): Promise<void> {
     }
 }
 
-export async function activate(context: vscode.ExtensionContext) {
-    const outputChannel = vscode.window.createOutputChannel('Oh My Pi Chater');
-    outputChannel.appendLine('Oh My Pi Chater extension activating...');
-    setPiExtensionPath(context.extensionPath);
-    context.subscriptions.push(initWindowBackend(context.workspaceState));
-
-    if (getAvailableBackends().length === 0) {
-        outputChannel.appendLine('Agent CLI not found: neither omp nor pi is installed (PATH, common install dirs, oh-my-pi-chater.cliPath).');
-        context.subscriptions.push(
-            vscode.window.registerWebviewViewProvider('oh-my-pi-chater.chat', createCliMissingWebviewProvider()),
-        );
-        void promptInstallCli();
-        return;
-    }
-
-    if (!(await verifyPiCliAvailable(outputChannel))) {
-        registerBootErrorSidebar(
-            context,
-            'Agent CLI not found. Install omp (Oh My Pi) or pi (`npm i -g @earendil-works/pi-coding-agent`), or set oh-my-pi-chater.cliPath.',
-        );
-        return;
-    }
-
+/** pi only: its memory/search tools need better-sqlite3 built for the pi CLI's Node. Reports; never blocks startup. */
+async function checkPiNativeModules(outputChannel: vscode.OutputChannel): Promise<void> {
     try {
         const invocation = await resolvePiCliInvocation();
         const npmDir = path.join(getPiAgentDir(), 'npm');
@@ -105,38 +84,74 @@ export async function activate(context: vscode.ExtensionContext) {
         const msg = err instanceof Error ? err.message : String(err);
         outputChannel.appendLine(`Pi native module preflight skipped: ${msg}`);
     }
+}
+
+/** With CLI sync on, the agent dir's auth file is the only key store: drop the extension's own copies. */
+async function clearExtensionOnlyKeys(context: vscode.ExtensionContext, outputChannel: vscode.OutputChannel): Promise<void> {
+    if (!isSyncWithPiCli()) {
+        return;
+    }
+    try {
+        const cleared = await clearExtensionApiKeySecrets(context.secrets);
+        outputChannel.appendLine(
+            `Pi CLI sync enabled. Agent dir: ${getPiAgentDir()}${cleared > 0 ? ` (removed ${cleared} extension-only API key(s))` : ''}`,
+        );
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        outputChannel.appendLine(`Clearing extension-only API keys failed: ${msg}`);
+    }
+}
+
+export function activate(context: vscode.ExtensionContext): void {
+    const outputChannel = vscode.window.createOutputChannel('Oh My Pi Chater');
+    outputChannel.appendLine('Oh My Pi Chater extension activating...');
+    setPiExtensionPath(context.extensionPath);
+    context.subscriptions.push(initWindowBackend(context.workspaceState));
+
+    if (getAvailableBackends().length === 0) {
+        outputChannel.appendLine('Agent CLI not found: neither omp nor pi is installed (PATH, common install dirs, oh-my-pi-chater.cliPath).');
+        context.subscriptions.push(
+            vscode.window.registerWebviewViewProvider('oh-my-pi-chater.chat', createCliMissingWebviewProvider()),
+        );
+        void promptInstallCli();
+        return;
+    }
+
+    // Activation never waits on the agent CLI: the sidebar is registered at once and each tab shows its
+    // worker starting (SidebarTabs.watchStartup). These checks run alongside and only report.
+    void verifyPiCliAvailable(outputChannel);
+    void checkPiNativeModules(outputChannel);
+    void clearExtensionOnlyKeys(context, outputChannel);
 
     try {
-        if (isSyncWithPiCli()) {
-            const cleared = await clearExtensionApiKeySecrets(context.secrets);
-            const agentDir = getPiAgentDir();
-            outputChannel.appendLine(
-                `Pi CLI sync enabled. Agent dir: ${agentDir}${cleared > 0 ? ` (removed ${cleared} extension-only API key(s))` : ''}`,
-            );
-        }
-
-        piSession = await createPiChatSession(outputChannel);
+        const session = new PiRpcSessionManager(outputChannel);
+        piSession = session;
+        // A startup failure is reported on the tab that owns the session.
+        session.initialize().catch(() => undefined);
         outputChannel.appendLine(
             'Backend: agent CLI RPC only (`--mode rpc`) — same packages/skills/extensions as terminal.',
         );
 
-        void maybePromptForRecommendedPackages(context, piSession, outputChannel);
+        void session.waitUntilReady().then(
+            () => maybePromptForRecommendedPackages(context, session, outputChannel),
+            () => undefined,
+        );
 
         const diffContentProvider = new DiffContentProvider();
         const planDocumentProvider = new PlanDocumentProvider();
         const checkpointManager = new CheckpointManager();
-        const modelStatus = new ModelStatusTracker(piSession);
+        const modelStatus = new ModelStatusTracker(session);
 
-        const diffManager = new DiffManager(piSession, checkpointManager);
-        const pastedStorageDir = await ensurePastedAttachmentsDir(context.globalStorageUri.fsPath);
+        const diffManager = new DiffManager(session, checkpointManager);
         const sidebarProvider = new SidebarProvider(
             context.extensionUri,
-            piSession,
+            session,
             diffManager,
             checkpointManager,
             outputChannel,
             planDocumentProvider,
-            pastedStorageDir,
+            // savePastedFile creates it on first paste.
+            pastedAttachmentsDir(context.globalStorageUri.fsPath),
             context.workspaceState,
             modelStatus,
         );
@@ -151,7 +166,8 @@ export async function activate(context: vscode.ExtensionContext) {
             ...registerVoiceAgentCommands(context, { worker: sidebarProvider, chat: sidebarProvider, resumeList: sidebarProvider }),
         );
         // After the voice agent's history is in: a tab the user only talked to it about comes back under its voice name.
-        await sidebarProvider.restorePersistedTabs();
+        // Not awaited: the tabs appear at once and load side by side; prompts wait for their tab (tabReady).
+        void sidebarProvider.restorePersistedTabs();
 
         context.subscriptions.push(
             // Retained so switching to another view container keeps the terminals (TUI mode) and chat DOM.

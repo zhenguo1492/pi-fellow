@@ -142,7 +142,7 @@ export interface SettingsData {
     authMethod: 'env' | 'pi-login' | 'manual' | 'none';
     defaultModel: string;
     thinkingLevel: string;
-    autoApproveTools: boolean;
+    defaultPermissionLevel: PermissionLevel;
     allowedTools: string[];
     autoSaveSessions: boolean;
     sessionStoragePath: string;
@@ -214,6 +214,13 @@ export interface FileChangeInfo {
     turnIndex: number;
 }
 
+/**
+ * What the tab's agents may do without asking (the composer's permission menu, labelled like Claude's
+ * modes): ask (Manual) needs approval for file changes and commands; edit (Edit automatically)
+ * changes files unasked but asks before commands and deletions; plan is read-only; auto runs everything.
+ */
+export type PermissionLevel = 'ask' | 'edit' | 'plan' | 'auto';
+
 export interface TabInfo {
     id: string;
     name: string;
@@ -222,6 +229,8 @@ export interface TabInfo {
     hasNotification: boolean;
     /** The tab shows the Bot view (the voice agent's conversation) instead of its chat. */
     botView: boolean;
+    /** The tab shows the agent CLI's TUI in an embedded terminal instead of its chat. */
+    tuiMode: boolean;
 }
 
 export interface PlanTodoItem {
@@ -247,7 +256,8 @@ export interface PiExtensionChromeSnapshot {
 
 /** Shown in chat when the model API is unreachable or auto-retry is in progress. */
 export interface ConnectionStatus {
-    phase: 'idle' | 'retrying' | 'failed';
+    /** `connecting`: the tab's worker is starting or a restored conversation is loading; `message` says which. */
+    phase: 'idle' | 'connecting' | 'retrying' | 'failed';
     message?: string;
     attempt?: number;
     maxAttempts?: number;
@@ -283,10 +293,14 @@ export interface SerializedAgentState {
     planMode?: PlanModeInfo;
     piExtensionChrome?: PiExtensionChromeSnapshot;
     connectionStatus?: ConnectionStatus;
+    /** The tab is loading a conversation restored at window startup: the transcript shows a loading state, not the welcome. */
+    restoringHistory?: boolean;
+    /** The tab's permission level; for pi, `plan` is pi's own plan mode. */
+    permissionLevel?: PermissionLevel;
+    /** Voice-agent tool calls of this tab waiting for Approve/Reject. */
+    pendingToolApprovals?: ToolCallPendingInfo[];
     /** Active backend ('omp' or 'pi') of the current tab or workspace preference. */
     activeBackend?: AgentBackend;
-    /** Every tab shows the agent CLI's TUI in an embedded terminal instead of the chat UI. */
-    tuiMode?: boolean;
     /** omp /login or /logout was requested: chat shows a banner that finishes it in the TUI. */
     tuiAuthPrompt?: TuiAuthCommand;
     /** Whether the speech services answered their checks: gates the composer mic (STT) and the voice agent (both). */
@@ -449,8 +463,10 @@ export type ClientMessage =
     | { type: 'interruptAndSend'; text: string }
     | { type: 'editQueuedMessage'; index: number; text: string }
     | { type: 'removeQueuedMessage'; index: number }
+    /** Pull a queued message out of the queue and deliver it to the running turn as a steer. */
+    | { type: 'steerQueuedMessage'; index: number }
     | { type: 'cancelQueue' }
-    | { type: 'setAgentMode'; mode: 'agent' | 'plan' }
+    | { type: 'setPermissionLevel'; level: PermissionLevel }
     | { type: 'implementPlan' }
     | { type: 'openPlanDocument' }
     | {

@@ -1,11 +1,5 @@
 /** Shared session types (no Pi SDK dependency). */
 
-export type ToolApprovalHandler = (
-    toolCallId: string,
-    toolName: string,
-    args: unknown,
-) => Promise<boolean>;
-
 export interface PlanModeSessionLike {
     messages?: unknown[];
     sessionManager?: {

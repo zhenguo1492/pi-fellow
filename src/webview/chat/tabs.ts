@@ -102,15 +102,18 @@ export function initTabLayoutObserver(): void {
 }
 
 function tabIconHtml(tab: TabInfo): string {
+    // Host keeps `botView` off for TUI tabs.
     if (tab.botView) {
         return `<span class="tab-icon-robot">${ICON_ROBOT}</span>`;
     }
     if (tab.isStreaming) {
-        return '<span class="tab-chat-icon" aria-hidden="true"></span>';
+        return `<span class="tab-chat-icon${tab.tuiMode ? ' tab-chat-icon--terminal' : ''}" aria-hidden="true"></span>`;
     }
-    return tab.hasNotification
-        ? `<img class="tab-icon-img" src="${iconsBaseUri()}/notification.svg" alt="notification">`
-        : `<img class="tab-icon-img" src="${iconsBaseUri()}/chat.svg" alt="chat">`;
+    if (tab.hasNotification) {
+        return `<img class="tab-icon-img" src="${iconsBaseUri()}/notification.svg" alt="notification">`;
+    }
+    const icon = tab.tuiMode ? 'terminal' : 'chat';
+    return `<img class="tab-icon-img" src="${iconsBaseUri()}/${icon}.svg" alt="${icon}">`;
 }
 
 export function updateTabs(): void {
@@ -125,11 +128,16 @@ export function updateTabs(): void {
         tabEl.dataset.tabId = tab.id;
 
         // The icon toggles what the tab shows: its conversation (chat bubble) or the Bot view (robot).
+        // A tab showing its TUI has no Bot view: the icon marks the terminal and only selects the tab.
         const icon = el('button', 'tab-icon');
         icon.type = 'button';
         icon.dataset.tabId = tab.id;
-        icon.title = tab.botView ? 'Show the conversation' : 'Show the Bot view (voice agent conversation)';
-        icon.setAttribute('aria-pressed', String(tab.botView));
+        if (tab.tuiMode) {
+            icon.title = 'Terminal (TUI) view — switch it back to chat to open the Bot view';
+        } else {
+            icon.title = tab.botView ? 'Show the conversation' : 'Show the Bot view (voice agent conversation)';
+            icon.setAttribute('aria-pressed', String(tab.botView));
+        }
         icon.innerHTML = tabIconHtml(tab);
 
         const name = el('span', 'tab-name');

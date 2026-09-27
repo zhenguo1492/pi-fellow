@@ -4,6 +4,8 @@ import { HOST_TOOLS_COMMAND, type HostToolResultPayload } from './hostToolsProto
 import { attachJsonlLineReader, serializeJsonLine } from './jsonl';
 import { cliCommand, piCliChildEnv, resolvePiCliInvocation } from './piCliPaths';
 import { PiHostTools } from './piHostTools';
+import { PermissionGateFile } from './permissionGate';
+import type { PermissionGateState } from './permissionPolicy';
 import { isVscodeOnlySlash } from './slashCommandRouter';
 import type {
     PiAgentEvent,
@@ -47,6 +49,8 @@ export interface PiRpcBridgeOptions {
      * On pi a `--tools` allowlist in `extraArgs` must also name the host tools.
      */
     hostTools?: boolean;
+    /** Load the permission gate extension (tool calls checked against the tab's level; see setPermission). */
+    permission?: PermissionGateState;
 }
 
 /** omp `get_available_commands` source → the pi command sources the UI understands. */
@@ -72,6 +76,7 @@ export class PiRpcBridge {
     private _chunkAssembly: ChunkAssembly | undefined;
     /** pi with host tools only. */
     private _piHostTools: PiHostTools | undefined;
+    private _permissionGate: PermissionGateFile | undefined;
 
     get backend(): AgentBackend {
         return this._backend;
@@ -106,18 +111,23 @@ export class PiRpcBridge {
         const invocation = await resolvePiCliInvocation(preferredBackend);
         this._backend = invocation.backend;
         const args = ['--mode', 'rpc', ...extraArgs];
-        let hostToolsEnv: NodeJS.ProcessEnv = {};
-        if (options.hostTools && this._backend === 'pi') {
-            const hostTools = new PiHostTools();
-            this._piHostTools = hostTools;
-            try {
-                const launch = hostTools.launch();
+        const extensionEnv: NodeJS.ProcessEnv = {};
+        try {
+            if (options.hostTools && this._backend === 'pi') {
+                this._piHostTools = new PiHostTools();
+                const launch = this._piHostTools.launch();
                 args.push(...launch.args);
-                hostToolsEnv = launch.env;
-            } catch (err) {
-                this._disposePiHostTools();
-                throw err;
+                Object.assign(extensionEnv, launch.env);
             }
+            if (options.permission) {
+                this._permissionGate = new PermissionGateFile(options.permission);
+                const launch = this._permissionGate.launch();
+                args.push(...launch.args);
+                Object.assign(extensionEnv, launch.env);
+            }
+        } catch (err) {
+            this._disposeExtensionFiles();
+            throw err;
         }
 
         this._exitError = null;
@@ -126,7 +136,7 @@ export class PiRpcBridge {
             ...piCliChildEnv(invocation),
             PI_CURSOR_SETTING_SOURCES: 'none',
             PI_CURSOR_TOOL_MANIFEST: '0',
-            ...hostToolsEnv,
+            ...extensionEnv,
         };
 
 
@@ -148,7 +158,7 @@ export class PiRpcBridge {
                     `Pi RPC process exited (code=${code}, signal=${signal}). Stderr: ${this._stderr.slice(-2000)}`,
                 );
             }
-            this._disposePiHostTools();
+            this._disposeExtensionFiles();
             this._rejectPending(this._exitError ?? new Error('Pi RPC process exited'));
             for (const listener of this._exitListeners) {
                 listener(this._exitError);
@@ -157,7 +167,7 @@ export class PiRpcBridge {
 
         child.on('error', (error) => {
             this._exitError = new Error(`Pi RPC process error: ${error.message}`);
-            this._disposePiHostTools();
+            this._disposeExtensionFiles();
             this._rejectPending(this._exitError);
         });
 
@@ -274,14 +284,21 @@ export class PiRpcBridge {
             this._process = null;
         }
 
-        this._disposePiHostTools();
+        this._disposeExtensionFiles();
         this._pending.clear();
         this._listeners.clear();
     }
 
-    private _disposePiHostTools(): void {
+    private _disposeExtensionFiles(): void {
         this._piHostTools?.dispose();
         this._piHostTools = undefined;
+        this._permissionGate?.dispose();
+        this._permissionGate = undefined;
+    }
+
+    /** The worker's permission level for its next tool call (bridge started with the `permission` option). */
+    setPermission(state: PermissionGateState): void {
+        this._permissionGate?.write(state);
     }
 
     private _handleLine(line: string): void {

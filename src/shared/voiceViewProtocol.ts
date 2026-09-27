@@ -86,8 +86,8 @@ export interface VoiceLatency {
     cutOff?: number;
 }
 
-/** Why the voice agent spoke up on its own (design §5.9). */
-export type VoiceObservationKind = 'needs_input' | 'error' | 'done' | 'research' | 'progress';
+/** Why the voice agent spoke up on its own (design §5.9); `opening`: it speaks first as voice comes on. */
+export type VoiceObservationKind = 'approval' | 'needs_input' | 'error' | 'done' | 'research' | 'progress' | 'opening';
 
 /** One sentence of a spoken reply: queued for TTS, playing, fully played, or cut off before the user heard it all. */
 export interface VoiceSentence {

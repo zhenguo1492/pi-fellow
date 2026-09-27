@@ -8,6 +8,7 @@ import type {
     VoiceSettings,
 } from '../shared/protocol';
 import type { PiChatSession } from '../pi/slashCommands';
+import { readDefaultPermissionLevel } from '../pi/permissionGate';
 import {
     addPiExtensionPath,
     addPiPackage,
@@ -499,7 +500,7 @@ export class SettingsPanel {
             thinkingLevel: sync
                 ? (piSummary?.defaultThinkingLevel ?? 'off')
                 : config.get<string>('thinkingLevel', 'off'),
-            autoApproveTools: config.get<boolean>('autoApproveTools', false),
+            defaultPermissionLevel: readDefaultPermissionLevel(),
             allowedTools: config.get<string[]>('allowedTools', []),
             autoSaveSessions: config.get<boolean>('autoSaveSessions', true),
             sessionStoragePath: config.get<string>('sessionStoragePath', ''),

@@ -1,3 +1,4 @@
+import { escapeHtml } from '../shared/html';
 import type { ModelInfo } from '../shared/protocol';
 import { vscode } from './vscodeApi';
 
@@ -180,18 +181,10 @@ function renderList(): void {
             return `
                 <div class="${classes}" data-index="${index}" role="option" aria-selected="${active}">
                     <span class="model-item-check" aria-hidden="true">${active ? '✓' : ''}</span>
-                    <span class="model-item-name" title="${escHtml(modelKey(m))}">${escHtml(m.name || m.id)}</span>
-                    <span class="model-item-provider">${escHtml(m.provider)}</span>
+                    <span class="model-item-name" title="${escapeHtml(modelKey(m))}">${escapeHtml(m.name || m.id)}</span>
+                    <span class="model-item-provider">${escapeHtml(m.provider)}</span>
                 </div>`;
         })
         .join('');
     list.querySelector('.model-item.highlighted')?.scrollIntoView({ block: 'nearest' });
-}
-
-function escHtml(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
 }

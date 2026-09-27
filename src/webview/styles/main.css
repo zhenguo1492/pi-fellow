@@ -199,7 +199,7 @@ body {
     text-align: center;
 }
 
-/* Agent / Plan mode switch */
+/* pi plan ready: status dot + Implement (Plan itself is the composer's permission menu) */
 .mode-switch {
     flex-shrink: 0;
     padding: 0 4px;
@@ -210,47 +210,6 @@ body {
     align-items: center;
     gap: 6px;
     flex-wrap: nowrap;
-}
-
-.mode-segment {
-    display: inline-flex;
-    align-items: center;
-    gap: 1px;
-    padding: 2px;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
-    border: 1px solid color-mix(in srgb, var(--border) 85%, var(--fg) 8%);
-}
-
-.mode-segment-btn {
-    font-size: 10.5px;
-    font-weight: 500;
-    padding: 4px 10px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    transition: color 0.15s, background 0.15s, box-shadow 0.15s;
-    white-space: nowrap;
-}
-
-.mode-segment-btn:hover {
-    color: var(--fg);
-    background: color-mix(in srgb, var(--fg) 5%, transparent);
-}
-
-.mode-segment-btn.active {
-    color: var(--fg);
-    background: color-mix(in srgb, var(--fg) 8%, var(--card-bg));
-    box-shadow: 0 1px 2px color-mix(in srgb, #000 25%, transparent);
-}
-
-.mode-segment-label {
-    line-height: 1;
 }
 
 .mode-ready-dot {
@@ -278,12 +237,6 @@ body {
 .mode-action-btn:hover {
     background: color-mix(in srgb, var(--user-accent) 18%, transparent);
     border-color: color-mix(in srgb, var(--user-accent) 50%, var(--border));
-}
-
-.mode-switch--pending .mode-segment-btn,
-.mode-switch--pending .mode-action-btn {
-    opacity: 0.5;
-    pointer-events: none;
 }
 
 /* Legacy aliases */
@@ -688,6 +641,9 @@ body {
     flex-shrink: 0;
     overflow: hidden;
     mask: url('../../../media/icons/chat.svg') center / contain no-repeat;
+}
+.tab-chat-icon--terminal {
+    mask-image: url('../../../media/icons/terminal.svg');
 }
 .tab-chat-icon::before {
     content: '';
@@ -1814,12 +1770,14 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     min-width: 0;
     background: transparent;
     color: var(--input-fg);
-    border: none;
-    padding: 5px 0;
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    border-radius: 6px;
+    padding: 4px 8px;
     font-family: inherit;
     font-size: var(--chat-font);
     resize: none;
     outline: none;
+    transition: border-color 0.15s;
     min-height: 28px;
     max-height: 140px;
     line-height: var(--chat-line);
@@ -1828,6 +1786,7 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 #input::-webkit-scrollbar { display: none; }
 #input::placeholder { color: var(--muted); }
 #input { user-select: text; }
+#input:focus { border-color: color-mix(in srgb, var(--border) 80%, var(--fg) 20%); }
 
 /* The Bot view with the voice agent offline: the box takes nothing; the placeholder says why. */
 .input-area.is-locked .composer-toolbar {
@@ -1848,7 +1807,8 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 .composer-footer {
     display: flex;
     align-items: center;
-    margin-top: 2px;
+    /* Room between the mic/send buttons and the model / permission chips below them. */
+    margin-top: 8px;
     min-width: 0;
 }
 
@@ -2330,6 +2290,107 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     flex-shrink: 0;
 }
 
+/* Permission level (Ask / Plan / Auto): right end of the model row, the model chip's look plus an icon. */
+.composer-permission-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    padding-left: 5px;
+}
+
+/* While dictating, the status takes the free space and the chip follows it. */
+.dictation-status:not([hidden]) + .composer-permission-btn {
+    margin-left: 8px;
+}
+
+.composer-permission-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+/* Opens above the input box on the right, over the chip (the model picker opens on the left). */
+.permission-menu {
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    width: min(300px, 100%);
+    margin-bottom: 4px;
+    padding: 6px 0;
+    background: var(--vscode-menu-background, var(--card-bg));
+    color: var(--vscode-menu-foreground, var(--fg));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+}
+
+.permission-menu[hidden] {
+    display: none;
+}
+
+.permission-menu-title {
+    padding: 2px 12px 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.permission-list {
+    outline: none;
+}
+
+.permission-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+.permission-item:hover {
+    background: var(--vscode-list-hoverBackground, color-mix(in srgb, var(--fg) 6%, transparent));
+}
+.permission-item.highlighted {
+    background: var(
+        --vscode-menu-selectionBackground,
+        var(--vscode-list-activeSelectionBackground, color-mix(in srgb, var(--fg) 12%, transparent))
+    );
+    color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground, inherit));
+}
+
+.permission-item-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    margin-top: 1px;
+    opacity: 0.85;
+}
+
+.permission-item-text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.permission-item-label {
+    font-size: 12.5px;
+}
+
+/* The active mode: a checkmark at the right, as in Claude's menu. */
+.permission-item-check {
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 16px;
+    align-self: center;
+}
+
+.permission-item-desc {
+    font-size: 11px;
+    line-height: 1.35;
+    opacity: 0.7;
+}
+
 .composer-icon-btn {
     display: inline-flex;
     align-items: center;
@@ -2756,6 +2817,29 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     flex: 1;
 }
 
+/* A restored conversation loading (window startup), in place of the welcome. */
+.history-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 40px 20px;
+    flex: 1;
+    color: var(--muted);
+}
+.history-loading-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: connection-spin 0.8s linear infinite;
+}
+.history-loading-title {
+    font-size: 13px;
+}
+
 .welcome-icon {
     font-size: 48px;
     margin-bottom: 16px;
@@ -3178,6 +3262,14 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     padding: 8px 12px;
 }
 
+/* Voice-agent approvals sit at the top of the input box (visible in the chat and the Bot view). */
+.tool-approval-host:empty {
+    display: none;
+}
+.tool-approval-host .tool-approval-card {
+    margin: 8px 10px 0;
+}
+
 .approval-args {
     padding: 6px 12px;
     font-family: var(--font-mono);
@@ -3317,6 +3409,9 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     font-size: 12px;
     line-height: 1.4;
 }
+.connection-banner-connecting {
+    color: var(--muted);
+}
 .connection-banner-retrying {
     background: rgba(204, 167, 0, 0.08);
     color: var(--warning-fg);
@@ -3403,13 +3498,38 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 .pending-message--followup .pending-message-label {
     color: var(--muted);
 }
-.pending-message-text {
+.pending-message-body {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+.pending-message-text {
     color: var(--fg);
     opacity: 0.85;
     white-space: pre-wrap;
     word-break: break-word;
+}
+.pending-message-text--collapsed {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+}
+.pending-message-expand-toggle {
+    align-self: flex-start;
+    margin: 2px 0 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--link);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 500;
+    cursor: pointer;
+}
+.pending-message-expand-toggle:hover {
+    color: color-mix(in srgb, var(--link) 80%, var(--fg));
 }
 
 /* ── Steer toast (legacy, unused) ── */
@@ -3536,6 +3656,13 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 }
 .queued-item-btn:hover .queued-btn-icon {
     filter: brightness(0) invert(1);
+}
+.queued-btn-svg {
+    display: block;
+    color: var(--muted);
+}
+.queued-item-btn:hover .queued-btn-svg {
+    color: var(--fg);
 }
 
 /* Inline edit mode */
@@ -4476,9 +4603,27 @@ html.tree-panel-open .input-container {
 
 #app.tui-mode .messages,
 #app.tui-mode .scroll-btn-wrap,
-#app.tui-mode .input-container,
 #app.tui-mode #mode-switch {
     display: none;
+}
+
+/* The terminal is the composer; the input box keeps only the voice agent's bar and its approval cards. */
+#app.tui-mode .input-container > :not(.voice-bar, .tool-approval-host) {
+    display: none !important;
+}
+
+#app.tui-mode .voice-bar {
+    border-bottom: 0;
+    border-radius: calc(var(--radius-lg) - 1px);
+}
+
+/* A TUI tab has no Bot view. */
+#app.tui-mode .voice-bar [data-act='panel'] {
+    display: none;
+}
+
+#app.tui-mode .tool-approval-host .tool-approval-card {
+    margin-bottom: 8px;
 }
 
 .tui-pane {

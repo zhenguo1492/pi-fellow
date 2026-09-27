@@ -184,7 +184,8 @@ export function enrichPlanModeFromExtensionChrome(
     let statusLabel = planMode.statusLabel;
     let awaitingAction = planMode.awaitingAction;
 
-    if (status.includes('plan') && !status.includes('off') && !status.includes('disabled')) {
+    // pi-plan-mode: "plan active" / "plan ready" while on; "plan saved" / "plan implementing" after it was left.
+    if (status.includes('plan') && !/\b(off|disabled|saved|implementing)\b/.test(status)) {
         enabled = true;
     }
     if (status.includes('ready') || status.includes('awaiting') || status.includes('review')) {

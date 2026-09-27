@@ -258,10 +258,42 @@
           ],
           "description": "Default thinking level for Pi agent responses"
         },
+        "oh-my-pi-chater.defaultPermissionLevel": {
+          "type": "string",
+          "default": "ask",
+          "enum": [
+            "ask",
+            "edit",
+            "plan",
+            "auto"
+          ],
+          "enumItemLabels": [
+            "Manual",
+            "Edit automatically",
+            "Plan",
+            "Auto"
+          ],
+          "enumDescriptions": [
+            "File changes and commands wait for your approval in the chat; reading and searching run freely.",
+            "File edits run without asking; commands and deleting or moving files wait for your approval.",
+            "Read-only: agents may only read and search, and propose a plan. On pi this is pi's own plan mode.",
+            "Agents edit, delete files and run commands without asking."
+          ],
+          "description": "Permission mode of new chat tabs until you pick one in the menu next to the model chip under the chat input: new tabs then start in the last mode picked in this workspace, and a reopened conversation keeps its own. Changing this setting makes new tabs use it again. Applies to the worker agent and the voice agent."
+        },
+        "oh-my-pi-chater.allowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Manual and Edit automatically: tool names (e.g. bash) that run without asking. Plan still blocks them."
+        },
         "oh-my-pi-chater.autoApproveTools": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically approve tool executions without confirmation"
+          "description": "Legacy: when defaultPermissionLevel is not set, true starts new tabs in Auto.",
+          "deprecationMessage": "Use oh-my-pi-chater.defaultPermissionLevel."
         },
         "oh-my-pi-chater.showAllModels": {
           "type": "boolean",
@@ -363,7 +395,7 @@
             "all"
           ],
           "enumDescriptions": [
-            "Only speak when spoken to.",
+            "Only speak when spoken to, and about what the voice agent itself started: a request from a task it sent to the worker, and the outcome of its own approval cards.",
             "Speak up when the worker needs an answer, fails or finishes, and when research comes back.",
             "As important, plus progress updates while the worker is busy."
           ],
@@ -465,6 +497,7 @@
     "@vscode/test-electron": "^2.5.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.25.0",

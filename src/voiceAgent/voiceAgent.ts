@@ -1,11 +1,11 @@
-import { VOICE_MODE_LABEL, type VoiceCallUsage, type VoiceUsageTotals } from '../shared/voiceViewProtocol';
+import { VOICE_MODE_LABEL, type VoiceCallUsage, type VoiceObservationKind, type VoiceUsageTotals } from '../shared/voiceViewProtocol';
 import { AnchorStream, type CodeAnchor } from './codeAnchors';
-import { FloorArbiter, type ArbiterSettings, type ArbiterView, type Observation, type ObservationKind } from './floorArbiter';
+import { FloorArbiter, type ArbiterSettings, type ArbiterView, type Observation } from './floorArbiter';
 import { HostToolRouter, VOICE_HOST_TOOLS, type AgentMode, type EditorHands, type Proposal, type ToolResult, type ToolTurn } from './hostTools';
 import { readTarget, type FocusTarget } from './piFocus';
 import { ResearchRunner, type ResearchJob } from './research';
 import { VoiceLlm } from './voiceLlm';
-import { SilenceGate, VOICE_SYSTEM_PROMPT, buildTurnMessage, type EditorSnapshot, type TurnInput } from './voicePrompt';
+import { SilenceGate, VOICE_SYSTEM_PROMPT, buildTurnMessage, type EditorSnapshot, type OpeningReason, type TurnInput } from './voicePrompt';
 import { provisionalTaskKey, taskKey, type WorkerController, type WorkerTask } from './workerController';
 import { WorkerDigest, clip, type DigestEntry } from './workerDigest';
 
@@ -22,8 +22,8 @@ export interface VoiceAgentOptions {
     confirmBeforeDispatch: () => boolean;
     /** Read at every decision, so settings changes apply right away. */
     arbiter: () => ArbiterSettings;
-    /** A turn the agent starts on its own (§5.9) is about to be prompted: how to report and scope it. */
-    onProactiveTurn?: (kind: ObservationKind, task: WorkerTask) => ProactiveTurnHooks;
+    /** A turn the agent starts on its own (§5.9), or its opening line, is about to be prompted: how to report and scope it. */
+    onProactiveTurn?: (kind: VoiceObservationKind, task: WorkerTask) => ProactiveTurnHooks;
     /** Someone is talking or about to (voice mode): proactive turns wait. */
     floorBusy?: () => boolean;
     /** Stops the reply being spoken, if any (voice mode); the text reply is cut off either way. */
@@ -53,6 +53,15 @@ export interface ProactiveTurnHooks {
     listener: VoiceTurnListener;
     /** Aborting it cuts the turn off, like a new user message does. */
     signal?: AbortSignal;
+}
+
+/** Voice came on: the agent speaks first. */
+export interface Opening {
+    reason: OpeningReason;
+    /** Only while this tab is the active one (a resumed session); otherwise whatever task is active. */
+    tabId?: string;
+    /** For a voice context with no user words yet to go by (the speech recognition language). */
+    language?: string;
 }
 
 export interface SayOptions {
@@ -160,6 +169,8 @@ export class VoiceAgent {
     private _model: string | undefined;
     /** The loaded voice context's totals, refreshed after each turn and context switch. */
     private _usage: VoiceUsageTotals | undefined;
+    /** Voice came on and the agent has not spoken first yet; dropped once the user speaks. */
+    private _opening: Opening | undefined;
 
     constructor(private readonly _options: VoiceAgentOptions) {
         const { worker } = _options;
@@ -176,6 +187,11 @@ export class VoiceAgent {
                 this._options.onModeChange?.(mode);
             },
         );
+        // The user answered one of the voice agent's approval cards: say what came of it.
+        this._router.onApprovalSettled = () => {
+            this._options.onChange?.();
+            this._maybeProactive();
+        };
         this._lastTask = worker.activeTask();
         this._subscriptions = [
             worker.onTabEvent(({ tabId, event }) => {
@@ -189,6 +205,10 @@ export class VoiceAgent {
                 const last = this._lastTask;
                 this._lastTask = task;
                 this._arbiter.taskChanged(task?.tabId, task !== undefined && task.tabId === last?.tabId, Date.now());
+                // A resumed session's opening is about that session only.
+                if (this._opening?.tabId !== undefined && this._opening.tabId !== task?.tabId) {
+                    this._opening = undefined;
+                }
                 // Switching task cancels the reply about the old one (§5.12 rule 3).
                 if (this._turn && (!task || taskKey(task) !== this._turn.key)) {
                     this._turn.ctl.abort();
@@ -206,6 +226,8 @@ export class VoiceAgent {
     say(text: string, source: 'text' | 'stt', listener: VoiceTurnListener = {}, options: SayOptions = {}): Promise<VoiceTurnResult> {
         const userAt = Date.now();
         this._userWaiting++;
+        // The user spoke first: nothing to open with any more.
+        this._opening = undefined;
         this._turn?.ctl.abort();
         return this._enqueue(async () => {
             this._userWaiting--;
@@ -302,6 +324,16 @@ export class VoiceAgent {
         }
     }
 
+    /** Voice came on: the agent speaks first as soon as nobody is talking, unless the user speaks before. */
+    open(opening: Opening): void {
+        // A session resumed into a tab the user has already left: nothing to open about.
+        if (this._stopped || (opening.tabId !== undefined && opening.tabId !== this._options.worker.activeTask()?.tabId)) {
+            return;
+        }
+        this._opening = opening;
+        this._maybeProactive();
+    }
+
     /** Voice mode: the reply finished playing or the user finished speaking; quiet time starts now. */
     floorReleased(): void {
         this._arbiter.turnEnded(Date.now());
@@ -332,14 +364,14 @@ export class VoiceAgent {
         return run;
     }
 
-    /** Starts a proactive turn when nobody is talking and the arbiter has something (§7.7 maybeProactive). */
+    /** Starts a proactive turn when nobody is talking and there is an opening or the arbiter has something (§7.7 maybeProactive). */
     private _maybeProactive(): void {
         // Before the first user turn the voice agent is not on; after its process died it waits for the user.
         if (this._stopped || this._inFlight > 0 || !this._llm || this._options.floorBusy?.()) {
             return;
         }
         const task = this._options.worker.activeTask();
-        if (!task || !this._arbiter.next(this._view(task), Date.now())) {
+        if (!task || (!this._opening && !this._arbiter.next(this._view(task), Date.now()))) {
             return;
         }
         void this._enqueue(() => this._proactiveTurn()).catch((err: unknown) =>
@@ -375,6 +407,8 @@ export class VoiceAgent {
             requests,
             proposals: this._router.proposals(task.tabId),
             settledProposals: this._router.takeSettled(task.tabId),
+            heldApprovals: this._router.heldApprovals(task.tabId),
+            settledApprovals: this._router.takeSettledApprovals(task.tabId),
             pendingDelete: this._router.pendingDelete,
             research: context.research,
             editor: this._editorFor(context),
@@ -391,7 +425,10 @@ export class VoiceAgent {
         return this._runTurn(llm, key, message, { tabId: task.tabId, seq: ++this._userSeq, userAt }, listener, options.signal);
     }
 
-    /** One observation, re-picked now that the turn has the LLM; undefined when there is nothing to say. */
+    /**
+     * The opening line, else one observation, re-picked now that the turn has the LLM; undefined
+     * when there is nothing to say.
+     */
     private async _proactiveTurn(): Promise<VoiceTurnResult | undefined> {
         const { worker } = this._options;
         const task = worker.activeTask();
@@ -404,25 +441,39 @@ export class VoiceAgent {
         if (this._stopped || this._userWaiting > 0 || this._options.floorBusy?.()) {
             return undefined;
         }
-        const observation = this._arbiter.next(this._view(task), Date.now());
-        if (!observation) {
-            return undefined;
-        }
-        this._arbiter.consume(observation);
+        const opening = this._opening;
+        const observation = opening ? undefined : this._arbiter.next(this._view(task), Date.now());
         const context = this._contexts.get(key)!;
         const digest = this._digest(task.tabId);
-        // One observation per proactive turn (§7.7 invariant 4): other finished research waits for its own.
-        const research = context.research.filter(
-            (job) => job.status === 'running' || (observation.kind === 'research' && job.id === observation.jobId),
-        );
+        const requests = worker.pendingRequests(task.tabId);
+        let trigger: TurnInput['trigger'];
+        let research: ResearchJob[];
+        if (opening) {
+            this._opening = undefined;
+            trigger = { kind: 'opening', reason: opening.reason, language: opening.language };
+            // Like a user turn, the opening shows the task's whole state: nothing in it is news afterwards.
+            research = context.research;
+            this._arbiter.userTurn(task.tabId, requests.map((request) => request.id));
+        } else if (observation) {
+            this._arbiter.consume(observation);
+            trigger = { kind: 'proactive', observation: observation.kind, detail: this._describe(observation) };
+            // One observation per proactive turn (§7.7 invariant 4): other finished research waits for its own.
+            research = context.research.filter(
+                (job) => job.status === 'running' || (observation.kind === 'research' && job.id === observation.jobId),
+            );
+        } else {
+            return undefined;
+        }
         const message = buildTurnMessage({
-            trigger: { kind: 'proactive', observation: observation.kind, detail: this._describe(observation) },
+            trigger,
             status: worker.status(task.tabId),
             updates: digest.since(context.seenSeq),
             history: fresh ? { task, turns: worker.recentTurns(task.tabId, 3) } : undefined,
-            requests: worker.pendingRequests(task.tabId),
+            requests,
             proposals: this._router.proposals(task.tabId),
             settledProposals: this._router.takeSettled(task.tabId),
+            heldApprovals: this._router.heldApprovals(task.tabId),
+            settledApprovals: this._router.takeSettledApprovals(task.tabId),
             pendingDelete: this._router.pendingDelete,
             research,
             editor: this._editorFor(context),
@@ -431,7 +482,7 @@ export class VoiceAgent {
         });
         context.seenSeq = digest.lastSeq;
         context.research = context.research.filter((job) => job.status === 'running' || !research.includes(job));
-        const hooks = this._options.onProactiveTurn?.(observation.kind, task);
+        const hooks = this._options.onProactiveTurn?.(observation?.kind ?? 'opening', task);
         const listener = hooks?.listener ?? {};
         listener.onStart?.(task);
         const turn: ToolTurn = { tabId: task.tabId, seq: this._userSeq, userAt: this._lastUserAt, proactive: true };
@@ -466,8 +517,12 @@ export class VoiceAgent {
 
     private _describe(observation: Observation): string {
         switch (observation.kind) {
+            case 'approval':
+                return 'The user answered your approval card; the outcome is in <approval-settled> above. Tell them in a sentence what happened.';
             case 'needs_input':
-                return 'The worker is waiting on the request above.';
+                return this._options.worker.status(observation.tabId).fromVoice
+                    ? 'The task you sent is waiting on the request above. Remind the user: they answer it in the chat (Approve or Deny for a tool approval), or tell you their answer.'
+                    : 'The worker is waiting on the request above.';
             case 'error':
                 return `The worker stopped with an error: ${clip(observation.detail, 300)}`;
             case 'done': {
@@ -484,10 +539,13 @@ export class VoiceAgent {
     private _view(task: WorkerTask): ArbiterView {
         const { worker } = this._options;
         const context = this._contexts.get(taskKey(task)) ?? this._contexts.get(provisionalTaskKey(task.tabId));
+        const status = worker.status(task.tabId);
         return {
             tabId: task.tabId,
-            phase: worker.status(task.tabId).phase,
+            phase: status.phase,
             requestIds: worker.pendingRequests(task.tabId).map((request) => request.id),
+            fromVoice: status.fromVoice === true,
+            settledApprovals: this._router.settledApprovalCount(task.tabId),
             settledResearch: context?.research.filter((job) => job.status !== 'running').map((job) => job.id) ?? [],
             unseenUpdates: context ? this._digest(task.tabId).since(context.seenSeq).length : 0,
         };

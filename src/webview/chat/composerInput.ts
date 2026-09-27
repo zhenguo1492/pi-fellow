@@ -24,6 +24,11 @@ export function bindComposerInput(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
 
     input?.addEventListener('keydown', (e) => {
+        // Keys that confirm or cancel an IME composition (Chinese/Japanese input) are the IME's:
+        // Enter would send the half-composed text, Esc would stop the run.
+        if (e.isComposing || e.keyCode === 229) {
+            return;
+        }
         if (handleAtMenuKeydown(e)) {
             return;
         }
@@ -93,7 +98,9 @@ export function bindComposerInput(): void {
     input?.addEventListener('input', () => {
         if (!input) return;
         input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+        // border-box: scrollHeight excludes the border, so add it back or the text scrolls by 2px.
+        const border = input.offsetHeight - input.clientHeight;
+        input.style.height = Math.min(input.scrollHeight + border, 200) + 'px';
         updateComposerToolbar();
         updateAtMenu(input);
         // Slash commands are the worker's; the Bot view's text goes to the voice agent as is.

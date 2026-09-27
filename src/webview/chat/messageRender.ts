@@ -6,10 +6,11 @@ import {
 import { stripPlanContentForChatDisplay } from '../../shared/planMessageFilter';
 import { buildMessageAttachmentChips, cacheImagePreview, resolveImageOpenPath } from './attachments';
 import { buildDiffCard, findFileChangeForToolResult } from './diffCard';
-import { el, escHtml, formatTimestamp } from './helpers';
+import { el, formatTimestamp } from './helpers';
 import { renderMarkdown } from './markdown';
 import { buildMessageActions } from './messageActions';
 import { extractImages, extractText, extractThinking } from './messageContent';
+import { pendingMessageRowHtml } from './pendingMessages';
 import { state } from './state';
 import { buildThinkingBlock } from './thinking';
 import { buildToolResultCard } from './tools';
@@ -38,12 +39,11 @@ export function renderMessage(
     if (role === 'user' && msg.steering === true) {
         const steeringEl = el('div', 'pending-messages pending-messages--steering committed-steering');
         const { displayText } = parseUserMessageForDisplay(extractText(msg));
-        steeringEl.innerHTML = `<div class="pending-message pending-message--steer">
-            <span class="pending-message-indicator" aria-hidden="true"></span>
-            <span class="pending-message-label">Steering</span>
-            ${msg._fromVoice ? FROM_VOICE_TAG : ''}
-            <span class="pending-message-text">${escHtml(displayText || extractText(msg) || '(attachments)')}</span>
-        </div>`;
+        steeringEl.innerHTML = pendingMessageRowHtml(
+            'steer',
+            displayText || extractText(msg) || '(attachments)',
+            msg._fromVoice ? FROM_VOICE_TAG : '',
+        );
         return steeringEl;
     }
     if (role === 'user') {

@@ -15,6 +15,8 @@ import { updateAttachmentsStrip } from './composerChips';
 import { clearComposerEdit, getComposerEdit, updateInputArea } from './composer';
 import { updateTabs } from './tabs';
 import { updateModeSwitch, updatePlanPanel } from './plan';
+import { updatePermissionControl } from './permission';
+import { syncToolApprovalCards } from './toolApproval';
 import { isSkeletonBuilt, render, updateTuiToggle } from './layout';
 
 export function applyStateSync(s: SerializedAgentState): void {
@@ -59,15 +61,14 @@ export function applyStateSync(s: SerializedAgentState): void {
     state.pendingAttachments = s.pendingAttachments ?? [];
     state.planMode = s.planMode ?? state.planMode;
     state.piExtensionChrome = s.piExtensionChrome ?? state.piExtensionChrome;
-    document.getElementById('mode-switch')?.classList.remove('mode-switch--pending');
-    document.querySelectorAll('#mode-switch [data-mode]').forEach((b) => {
-        (b as HTMLButtonElement).disabled = false;
-    });
+    state.permissionLevel = s.permissionLevel ?? state.permissionLevel;
+    state.pendingToolApprovals = s.pendingToolApprovals ?? [];
     state.connectionStatus = s.connectionStatus ?? { phase: 'idle' };
+    state.restoringHistory = s.restoringHistory ?? false;
     if (s.activeBackend) {
         state.activeBackend = s.activeBackend;
     }
-    state.tuiMode = s.tuiMode ?? false;
+    state.tuiMode = state.tabs.some((t) => t.isActive && t.tuiMode);
     state.tuiAuthPrompt = s.tuiAuthPrompt;
     if (s.voiceReadiness) {
         setSttCheck(s.voiceReadiness.stt);
@@ -93,6 +94,8 @@ export function applyStateSync(s: SerializedAgentState): void {
         updateStreamingUI();
         updateMessages();
         updateInputArea();
+        updatePermissionControl();
+        syncToolApprovalCards();
         updateModeSwitch();
         updateChangedFiles();
         updateQueuedMessageBanner();
@@ -116,6 +119,6 @@ export function applyStateSync(s: SerializedAgentState): void {
     updateTuiAuthBanner();
     setPickerCurrentModel(state.model);
     updateTuiToggle();
-    syncTuiView(state.tuiMode, state.tabs.map((t) => t.id), state.activeTabId);
+    syncTuiView(state.tabs.filter((t) => t.tuiMode).map((t) => t.id), state.activeTabId);
     document.getElementById('app')?.classList.toggle('bot-mode', botView);
 }

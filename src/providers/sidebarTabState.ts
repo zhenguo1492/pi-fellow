@@ -4,7 +4,7 @@ import { enrichPlanModeFromExtensionChrome } from '../pi/planModeState';
 import { extractRpivTodoTasks, rpivTasksToPlanTodos } from '../pi/rpivTodoSync';
 import type { PiChatSession } from '../pi/slashCommands';
 import { DEFAULT_CONVERSATION_TITLE } from '../shared/conversationTitle';
-import type { ConnectionStatus, PlanModeInfo } from '../shared/protocol';
+import type { AgentBackend, ConnectionStatus, PermissionLevel, PlanModeInfo, ToolCallPendingInfo } from '../shared/protocol';
 import type { CheckpointManager } from './checkpoint';
 import type { DiffManager } from './diff';
 import { VoiceOriginTracker } from './voiceOrigin';
@@ -15,6 +15,7 @@ interface MessageMeta {
 }
 
 interface PendingApproval {
+    info: ToolCallPendingInfo;
     resolve: (approved: boolean) => void;
 }
 
@@ -38,6 +39,10 @@ export interface TabState {
     hasNotification: boolean;
     /** The tab shows the Bot view (the voice agent's conversation) instead of its chat. */
     botView: boolean;
+    /** The tab shows its CLI's TUI (a pseudo-terminal) instead of its chat; other tabs are unaffected. */
+    tuiMode: boolean;
+    /** The agent in the tab's TUI is working (followed from the session file the TUI appends to). */
+    tuiBusy: boolean;
     pendingApprovals: Map<string, PendingApproval>;
     queuedMessages: QueuedPrompt[];
     steeringMessages: string[];
@@ -48,10 +53,19 @@ export interface TabState {
     lastPlanEditorHash: string;
     connectionStatus: ConnectionStatus;
     planModeOverride?: 'agent' | 'plan';
+    /** Permission level outside Plan (the composer's permission menu). */
+    permissionBase: Exclude<PermissionLevel, 'plan'>;
+    /**
+     * Plan enforced by the permission gate: always on omp; on pi only until pi's own plan mode
+     * (pi-plan-mode) confirms it is on, after which pi owns the plan and its exit.
+     */
+    readOnlyPlan: boolean;
     /** Ignore streaming deltas until Pi confirms agent_end (Stop clicked). */
     abortInFlight: boolean;
     /** Skip auto-draining the queue (e.g. while interrupt-and-send is in flight). */
     suppressQueueDrain: boolean;
+    /** Loading a conversation into this tab (restored at window startup or resumed from the session panel); prompts wait for it (`tabReady`). Never rejects. */
+    restoring?: Promise<void>;
 }
 
 let tabIdCounter = 0;
@@ -64,6 +78,7 @@ export function makeTabState(
     session: PiChatSession,
     diffManager: DiffManager,
     checkpointManager: CheckpointManager,
+    permissionLevel: PermissionLevel = 'ask',
 ): TabState {
     return {
         id,
@@ -83,6 +98,8 @@ export function makeTabState(
         voiceOrigins: new VoiceOriginTracker(),
         hasNotification: false,
         botView: false,
+        tuiMode: false,
+        tuiBusy: false,
         pendingApprovals: new Map(),
         queuedMessages: [],
         steeringMessages: [],
@@ -92,6 +109,8 @@ export function makeTabState(
         queueDrainInFlight: false,
         lastPlanEditorHash: '',
         connectionStatus: { phase: 'idle' },
+        permissionBase: permissionLevel === 'plan' ? 'ask' : permissionLevel,
+        readOnlyPlan: permissionLevel === 'plan',
         abortInFlight: false,
         suppressQueueDrain: false,
     };
@@ -99,6 +118,20 @@ export function makeTabState(
 
 export function idleConnection(): ConnectionStatus {
     return { phase: 'idle' };
+}
+
+/** Resolves once the tab's worker has started and a conversation being restored into it has loaded; rejects when the worker failed to start. */
+export async function tabReady(tab: TabState): Promise<void> {
+    await tab.session.waitUntilReady();
+    await tab.restoring;
+}
+
+/** What the chat's banner shows: a retry or failure, else the tab's worker starting. A conversation being restored shows in the transcript (`restoringHistory`). */
+export function tabConnectionStatus(tab: TabState, backend: AgentBackend): ConnectionStatus {
+    if (tab.connectionStatus.phase === 'idle' && !tab.session.isReady) {
+        return { phase: 'connecting', message: `Starting ${backend}…` };
+    }
+    return tab.connectionStatus;
 }
 
 /** Live thinking/text belong to the assistant message being streamed, not the whole run. */

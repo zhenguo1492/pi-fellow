@@ -18,6 +18,8 @@ import { updateMessages } from './transcript';
 import { bindComposerChips, updateAttachmentsStrip, updateEditorContextBar } from './composerChips';
 import { updateInputArea } from './composer';
 import { bindComposerInput } from './composerInput';
+import { bindPermissionControl, createPermissionMenu, permissionControlHtml, updatePermissionControl } from './permission';
+import { syncToolApprovalCards } from './toolApproval';
 import { bindTabOverflow, initTabLayoutObserver, updateTabs } from './tabs';
 import { updateModeSwitch, updatePlanPanel } from './plan';
 
@@ -122,6 +124,10 @@ export function render(): void {
     extensionUiHost.id = 'extension-ui-host';
     extensionUiHost.style.display = 'none';
     inputContainer.appendChild(extensionUiHost);
+    // Voice-agent changes waiting for approval: in the input box, so the Bot view shows them too.
+    const toolApprovalHost = el('div', 'tool-approval-host');
+    toolApprovalHost.id = 'tool-approval-host';
+    inputContainer.appendChild(toolApprovalHost);
     const queuedSection = document.createElement('details');
     queuedSection.className = 'queued-section';
     queuedSection.id = 'queued-section';
@@ -141,6 +147,7 @@ export function render(): void {
     modelPicker.innerHTML =
         '<div id="model-list" class="model-list" role="listbox" aria-label="Favorite models" tabindex="-1"></div>';
     inputContainer.appendChild(modelPicker);
+    inputContainer.appendChild(createPermissionMenu());
     const dropShiftHint = el('div', 'drop-shift-hint');
     dropShiftHint.id = 'drop-shift-hint';
     dropShiftHint.hidden = true;
@@ -191,7 +198,7 @@ export function render(): void {
             <button id="btn-model" class="composer-model-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="composer-model-label" id="model-chip-label"></span>
                 <svg class="dropdown-chevron" width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 10.5l5-5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>${dictationStatusHtml}
+            </button>${dictationStatusHtml}${permissionControlHtml}
         </div>`;
     inputContainer.appendChild(area);
     app.appendChild(inputContainer);
@@ -217,6 +224,8 @@ export function render(): void {
     updatePlanPanel();
     updateMessages();
     updateInputArea();
+    updatePermissionControl();
+    syncToolApprovalCards();
     updateEditorContextBar();
     updateAttachmentsStrip();
     updateConnectionBanner();
@@ -250,6 +259,7 @@ function bindStableEvents(): void {
     bindFileMentionMenu();
     bindModelPicker();
     bindMicButton();
+    bindPermissionControl();
     bindVoiceBar();
 
     newTabBtn?.addEventListener('click', () =>

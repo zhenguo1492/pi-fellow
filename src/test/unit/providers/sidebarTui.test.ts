@@ -53,6 +53,9 @@ function setup() {
     const posted: TuiMessage[] = [];
     const log = vi.fn();
     const wanted = new Set(['tab-1', 'tab-2']);
+    /** Plays the session file: what it says about the run of the TUI launched on each file. */
+    const fileBusy = new Map<string, (busy: boolean) => void>();
+    const busy: [string, boolean][] = [];
     const tuis = new TabTuis({
         start: async (options) => {
             const proc = new FakeTui(options);
@@ -62,8 +65,13 @@ function setup() {
         post: (message) => posted.push(message),
         log,
         wanted: (tabId) => wanted.has(tabId),
+        watchSession: (sessionFile, onBusy) => {
+            fileBusy.set(sessionFile, onBusy);
+            return { dispose: () => fileBusy.delete(sessionFile) };
+        },
+        busyChanged: (tabId, value) => busy.push([tabId, value]),
     });
-    return { tuis, procs, posted, log, wanted };
+    return { tuis, procs, posted, log, wanted, fileBusy, busy };
 }
 
 describe('TabTuis', () => {
@@ -188,6 +196,8 @@ describe('TabTuis', () => {
             post: (message) => posted.push(message),
             log,
             wanted: () => true,
+            watchSession: () => ({ dispose: () => undefined }),
+            busyChanged: () => undefined,
         });
 
         await tuis.start('tab-1', launch());
@@ -196,5 +206,42 @@ describe('TabTuis', () => {
         expect(posted).toEqual([
             { type: 'tuiData', tabId: 'tab-1', data: '\r\n\x1b[31mTUI start failed: omp not found\x1b[0m\r\n' },
         ]);
+    });
+
+    it('reports a run while the file says so and the TUI redraws; an interrupt with no file entry ends when it goes quiet', async () => {
+        const { tuis, procs, fileBusy, busy } = setup();
+        await tuis.start('tab-1', launch());
+        const file = fileBusy.get('/s/a.jsonl')!;
+
+        procs[0].emit('spinner');
+        file(true);
+        expect(busy).toEqual([['tab-1', true]]);
+
+        // Spinner keeps it working past the quiet limit.
+        for (let i = 0; i < 10; i++) {
+            vi.advanceTimersByTime(1000);
+            procs[0].emit('spinner');
+        }
+        expect(busy).toEqual([['tab-1', true]]);
+
+        // Esc: the TUI stops drawing but the file never records the end.
+        vi.advanceTimersByTime(3000);
+        expect(busy).toEqual([['tab-1', true], ['tab-1', false]]);
+
+        // Drawing again while the file still shows the run: working again; the file's end ends it.
+        procs[0].emit('spinner');
+        file(false);
+        expect(busy).toEqual([['tab-1', true], ['tab-1', false], ['tab-1', true], ['tab-1', false]]);
+    });
+
+    it('ends the run and stops following the file when the TUI stops', async () => {
+        const { tuis, procs, fileBusy, busy } = setup();
+        await tuis.start('tab-1', launch());
+        procs[0].emit('spinner');
+        fileBusy.get('/s/a.jsonl')!(true);
+
+        await tuis.stop('tab-1');
+        expect(busy).toEqual([['tab-1', true], ['tab-1', false]]);
+        expect(fileBusy.size).toBe(0);
     });
 });

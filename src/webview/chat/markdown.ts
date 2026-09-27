@@ -1,5 +1,5 @@
+import { escapeHtml } from '../../shared/html';
 import { marked } from 'marked';
-import { escHtml } from './helpers';
 
 // ── Marked config ──
 
@@ -8,10 +8,10 @@ const renderer = new marked.Renderer();
 let codeBlockId = 0;
 renderer.code = function ({ text, lang }: { text: string; lang?: string | undefined }) {
     const id = `cb-${++codeBlockId}`;
-    const langLabel = lang ? `<span class="code-lang">${escHtml(lang)}</span>` : '';
+    const langLabel = lang ? `<span class="code-lang">${escapeHtml(lang)}</span>` : '';
     return `<div class="code-block-wrapper">
         <div class="code-block-header">${langLabel}<button class="copy-btn" data-code-id="${id}">Copy</button></div>
-        <pre class="code-block-pre" id="${id}"><code class="code-block-code">${escHtml(text)}</code></pre>
+        <pre class="code-block-pre" id="${id}"><code class="code-block-code">${escapeHtml(text)}</code></pre>
     </div>`;
 };
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { processPastedImages } from '../../../pi/fileAttachments';
-import { ensurePastedAttachmentsDir, savePastedFile } from '../../../pi/pastedAttachmentStore';
+import { pastedAttachmentsDir, savePastedFile } from '../../../pi/pastedAttachmentStore';
 
 describe('pastedAttachmentStore', () => {
     let baseDir = '';
@@ -19,8 +19,8 @@ describe('pastedAttachmentStore', () => {
         }
     });
 
-    it('savePastedFile writes bytes to storage', async () => {
-        const dir = await ensurePastedAttachmentsDir(baseDir);
+    it('savePastedFile creates the storage dir on first paste and writes bytes to it', async () => {
+        const dir = pastedAttachmentsDir(baseDir);
         const path = await savePastedFile(dir, 'clip.png', Buffer.from('png-bytes'));
         const onDisk = await readFile(path, 'utf8');
         expect(onDisk).toBe('png-bytes');
@@ -28,7 +28,7 @@ describe('pastedAttachmentStore', () => {
     });
 
     it('processPastedImages uses real paths when storage dir provided', async () => {
-        const dir = await ensurePastedAttachmentsDir(join(baseDir, 'proc'));
+        const dir = pastedAttachmentsDir(join(baseDir, 'proc'));
         const png1x1 =
             'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
         const [item] = await processPastedImages(

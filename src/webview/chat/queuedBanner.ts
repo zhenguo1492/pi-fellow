@@ -1,5 +1,5 @@
+import { escapeHtml } from '../../shared/html';
 import { vscode } from '../vscodeApi';
-import { escAttr, escHtml } from './helpers';
 import { iconsBaseUri } from './icons';
 import { state } from './state';
 
@@ -30,15 +30,16 @@ export function updateQueuedMessageBanner(): void {
                 if (i === queuedEditingIndex) {
                     return `<div class="queued-item queued-item-editing" data-index="${i}">
                         <span class="queued-item-icon">&#9675;</span>
-                        <input class="queued-edit-input" data-index="${i}" type="text" value="${escAttr(msg)}">
+                        <input class="queued-edit-input" data-index="${i}" type="text" value="${escapeHtml(msg)}">
                         <button class="queued-edit-save" data-index="${i}" title="Save">&#10003;</button>
                         <button class="queued-edit-cancel" data-index="${i}" title="Cancel">&#10005;</button>
                     </div>`;
                 }
                 return `<div class="queued-item" data-index="${i}">
                     <span class="queued-item-icon">&#9675;</span>
-                    <span class="queued-item-text">${escHtml(msg)}</span>
+                    <span class="queued-item-text">${escapeHtml(msg)}</span>
                     <span class="queued-item-actions">
+                        <button class="queued-item-btn queued-item-steer" data-index="${i}" title="Steer now" aria-label="Steer now"><svg class="queued-btn-svg" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                         <button class="queued-item-btn queued-item-edit" data-index="${i}" title="Edit"><img class="queued-btn-icon" src="${iconsBaseUri()}/pencil.svg" alt="edit"></button>
                         <button class="queued-item-btn queued-item-delete" data-index="${i}" title="Remove"><img class="queued-btn-icon" src="${iconsBaseUri()}/trash.svg" alt="remove"></button>
                     </span>
@@ -59,6 +60,18 @@ function bindQueuedItemEvents(section: HTMLElement): void {
                 if (queuedEditingIndex === idx) queuedEditingIndex = -1;
                 else if (queuedEditingIndex > idx) queuedEditingIndex--;
                 vscode.postMessage({ type: 'removeQueuedMessage', index: idx });
+            }
+        });
+    });
+
+    section.querySelectorAll('.queued-item-steer').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const idx = parseInt((btn as HTMLElement).dataset.index ?? '-1', 10);
+            if (idx >= 0) {
+                if (queuedEditingIndex === idx) queuedEditingIndex = -1;
+                else if (queuedEditingIndex > idx) queuedEditingIndex--;
+                vscode.postMessage({ type: 'steerQueuedMessage', index: idx });
             }
         });
     });

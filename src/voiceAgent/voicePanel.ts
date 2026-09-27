@@ -28,7 +28,7 @@ export interface BotViewSurface {
     isBotViewVisible(): boolean;
     postVoice(message: VoiceViewHostMessage): void;
     /** Shows the Bot view in the active tab and reveals the chat. */
-    showBotView(preserveFocus: boolean): Promise<void>;
+    showBotView(preserveFocus: boolean, options?: { onlyIfWorkerUnused?: boolean }): Promise<void>;
 }
 
 /**

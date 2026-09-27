@@ -4,7 +4,7 @@ import { el, truncate } from './helpers';
 import { scrollToBottom } from './scroll';
 import { state } from './state';
 
-/** Banner heading: reconnect progress (with the attempt counter when known) or failure. */
+/** Banner heading: startup progress, reconnect progress (with the attempt counter when known), or failure. */
 export function connectionBannerTitle(cs: ConnectionStatus): string {
     const attemptLabel =
         cs.phase === 'retrying' && cs.attempt != null && cs.maxAttempts != null
@@ -13,6 +13,9 @@ export function connectionBannerTitle(cs: ConnectionStatus): string {
               ? ` (attempt ${cs.attempt})`
               : '';
 
+    if (cs.phase === 'connecting') {
+        return cs.message ?? 'Starting…';
+    }
     return cs.phase === 'retrying'
         ? `Reconnecting${attemptLabel}…`
         : 'Connection failed';
@@ -52,12 +55,13 @@ export function updateConnectionBanner(): void {
 
     banner.replaceChildren();
 
-    if (cs.phase === 'retrying') {
+    if (cs.phase === 'connecting' || cs.phase === 'retrying') {
         banner.append(
             el('span', 'connection-banner-spinner'),
             Object.assign(el('span', 'connection-banner-title'), { textContent: title }),
         );
-        if (detailText) {
+        // While connecting, the message is the title.
+        if (detailText && cs.phase === 'retrying') {
             const detailEl = el('span', 'connection-banner-detail');
             detailEl.textContent = detailText;
             banner.append(detailEl);

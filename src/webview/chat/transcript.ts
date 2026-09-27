@@ -1,13 +1,14 @@
+import { escapeHtml } from '../../shared/html';
 import { shouldHideMessageInChat } from '../../shared/planMessageFilter';
 import { bindAttachmentOpenClicks } from './attachments';
 import { updateTuiAuthBanner } from './banners';
 import { bindDiffButtons } from './diffCard';
-import { el, escAttr, escHtml } from './helpers';
+import { el } from './helpers';
 import { bindCopyButtons, resetCodeBlockIds } from './markdown';
 import { bindCheckpointButtons, bindMessageActionButtons, bindRedoButtons } from './messageActions';
 import { extractText, isTurnPrompt, messageFingerprint } from './messageContent';
 import { renderMessage } from './messageRender';
-import { updatePendingMessagesInChat } from './pendingMessages';
+import { bindPendingMessageClamps, updatePendingMessagesInChat } from './pendingMessages';
 import { hasUserScrolled, isNearBottom, jumpMessagesScroll, scrollToBottom } from './scroll';
 import { state } from './state';
 import { captureThinkingViewState, restoreThinkingScroll } from './thinking';
@@ -53,8 +54,7 @@ function appendChatMessageDom(msg: any, index: number): void {
     if (!container || !streamingEl || shouldHideMessageInChat(msg)) {
         return;
     }
-    const welcome = container.querySelector('.welcome');
-    welcome?.remove();
+    container.querySelector('.welcome, .history-loading')?.remove();
     let userMsgCount = 0;
     for (let i = 0; i <= index && i < state.messages.length; i++) {
         if (isTurnPrompt(state.messages[i])) {
@@ -95,6 +95,7 @@ function appendChatMessageDom(msg: any, index: number): void {
         updatePendingMessagesInChat();
     }
     bindUserPromptStickyCollapse();
+    bindPendingMessageClamps();
     bindCopyButtons();
     bindCheckpointButtons();
     bindRedoButtons();
@@ -135,7 +136,7 @@ export function updateMessages(): void {
     let liveThinkKey: string | null = null;
 
     if (state.messages.length === 0 && !state.isStreaming) {
-        container.insertBefore(buildWelcome(), streamingEl);
+        container.insertBefore(state.restoringHistory ? buildHistoryLoading() : buildWelcome(), streamingEl);
     } else {
         let userMsgCount = 0;
         const rollbackUserIdx = state.rollbackPoint;
@@ -262,17 +263,27 @@ export function updateMessages(): void {
     updateTuiAuthBanner();
 }
 
+/** In place of the welcome while a conversation restored at window startup loads. */
+function buildHistoryLoading(): HTMLElement {
+    const w = el('div', 'history-loading');
+    w.append(
+        el('span', 'history-loading-spinner'),
+        Object.assign(el('div', 'history-loading-title'), { textContent: 'Loading conversation history…' }),
+    );
+    return w;
+}
+
 function buildWelcome(): HTMLElement {
     const w = el('div', 'welcome');
     const isOmp = state.activeBackend === 'omp';
     const backendLabel = isOmp ? 'OMP' : 'Pi';
     const planHint = isOmp
-        ? '<div class="welcome-hint">Plan mode is TUI-only on OMP: run <kbd>omp</kbd> in a terminal, then <kbd>Alt+Shift+P</kbd></div>'
+        ? '<div class="welcome-hint">Plan (read-only) is in the menu next to the model; omp\'s own plan workflow is TUI-only: <kbd>Alt+Shift+P</kbd> in <kbd>omp</kbd></div>'
         : '';
     const model = state.model;
-    const modelName = model ? escHtml(model.name || model.id) : '<span class="welcome-meta-empty">Not set</span>';
-    const modelTitle = model ? ` title="${escAttr(model.id)}"` : '';
-    const provider = model?.provider ? escHtml(model.provider) : '<span class="welcome-meta-empty">—</span>';
+    const modelName = model ? escapeHtml(model.name || model.id) : '<span class="welcome-meta-empty">Not set</span>';
+    const modelTitle = model ? ` title="${escapeHtml(model.id)}"` : '';
+    const provider = model?.provider ? escapeHtml(model.provider) : '<span class="welcome-meta-empty">—</span>';
     w.innerHTML = `
         <div class="welcome-icon">&pi;</div>
         <div class="welcome-title">Oh My Pi Chater</div>

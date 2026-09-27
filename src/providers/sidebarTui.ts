@@ -34,6 +34,26 @@ export interface TabTuisHost {
     log(line: string): void;
     /** Still in TUI mode with the tab open: a TUI that finished starting after either changed is dropped. */
     wanted(tabId: string): boolean;
+    /** Follow the session file the TUI appends to; `onBusy` reports whether its agent is working per the file. */
+    watchSession(sessionFile: string, onBusy: (busy: boolean) => void): { dispose(): void };
+    /** The agent in the tab's TUI started or stopped working. */
+    busyChanged(tabId: string, busy: boolean): void;
+}
+
+/**
+ * A working TUI redraws its spinner many times a second and an idle one draws nothing, so this much
+ * silence ends a run the session file still shows as on.
+ */
+const TUI_QUIET_MS = 3000;
+
+interface TuiActivity {
+    watch?: { dispose(): void };
+    /** The session file's last word: a run is on. */
+    fileBusy: boolean;
+    /** Last state reported to the host. */
+    busy: boolean;
+    lastOutputAt: number;
+    quietTimer?: NodeJS.Timeout;
 }
 
 /**
@@ -50,6 +70,8 @@ export class TabTuis {
     private readonly _exitCodes = new Map<string, number>();
     /** Keys to type into a tab's TUI once it starts (the banner's /login or /logout). */
     private readonly _pendingInput = new Map<string, string>();
+    /** Working state of the running TUIs. */
+    private readonly _activity = new Map<string, TuiActivity>();
 
     constructor(private readonly _host: TabTuisHost) {}
 
@@ -85,6 +107,7 @@ export class TabTuis {
                     // Stopped on purpose (mode off, tab closed) → already unregistered, nothing to report.
                     if (this._processes.get(tabId) !== proc) return;
                     this._processes.delete(tabId);
+                    this._endActivity(tabId);
                     this._exitCodes.set(tabId, exitCode);
                     this._host.post({ type: 'tuiExit', tabId, exitCode });
                 },
@@ -94,6 +117,14 @@ export class TabTuis {
                 return;
             }
             this._processes.set(tabId, proc);
+            if (proc.sessionFile) {
+                const activity: TuiActivity = { fileBusy: false, busy: false, lastOutputAt: 0 };
+                activity.watch = this._host.watchSession(proc.sessionFile, (busy) => {
+                    activity.fileBusy = busy;
+                    this._refreshBusy(tabId);
+                });
+                this._activity.set(tabId, activity);
+            }
             const pending = this._pendingInput.get(tabId);
             if (pending) {
                 this._pendingInput.delete(tabId);
@@ -113,6 +144,7 @@ export class TabTuis {
         const proc = this._processes.get(tabId);
         if (!proc) return;
         this._processes.delete(tabId);
+        this._endActivity(tabId);
         await proc.dispose();
     }
 
@@ -155,6 +187,42 @@ export class TabTuis {
     private _queueOutput(tabId: string, data: string): void {
         this._output.set(tabId, (this._output.get(tabId) ?? '') + data);
         this._flushTimer ??= setTimeout(() => this._flushOutput(), 4);
+        const activity = this._activity.get(tabId);
+        if (activity) {
+            activity.lastOutputAt = Date.now();
+            // Redrawing again after a quiet spell (an answered prompt): working again if the file still says so.
+            if (activity.fileBusy && !activity.busy) this._refreshBusy(tabId);
+        }
+    }
+
+    /**
+     * Working = the session file says a run is on AND the TUI is redrawing (its spinner). An interrupted
+     * run does not always end with an entry in the file; the TUI going quiet ends it then.
+     */
+    private _refreshBusy(tabId: string): void {
+        const activity = this._activity.get(tabId);
+        if (!activity) return;
+        clearTimeout(activity.quietTimer);
+        activity.quietTimer = undefined;
+        const quietFor = Date.now() - activity.lastOutputAt;
+        const busy = activity.fileBusy && quietFor < TUI_QUIET_MS;
+        if (busy) {
+            activity.quietTimer = setTimeout(() => this._refreshBusy(tabId), TUI_QUIET_MS - quietFor);
+        }
+        if (busy !== activity.busy) {
+            activity.busy = busy;
+            this._host.busyChanged(tabId, busy);
+        }
+    }
+
+    /** The TUI stopped or exited: stop following its session; a run it was on is over. */
+    private _endActivity(tabId: string): void {
+        const activity = this._activity.get(tabId);
+        if (!activity) return;
+        this._activity.delete(tabId);
+        activity.watch?.dispose();
+        clearTimeout(activity.quietTimer);
+        if (activity.busy) this._host.busyChanged(tabId, false);
     }
 
     private _flushOutput(): void {

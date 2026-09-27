@@ -112,14 +112,16 @@ export function submitWhileStreaming(mode: 'queue' | 'interrupt'): void {
     updateAttachmentsStrip();
     if (slashOnly) {
         vscode.postMessage({ type: 'slashCommand', text });
+    } else if (mode === 'queue') {
+        // A queued message belongs in the Queued list (where it can be edited, steered or removed),
+        // not in the transcript: it only becomes a chat message once it runs.
+        const suffix = attachmentCount > 0 ? ` [+${attachmentCount} attachment(s)]` : '';
+        state.queuedMessages = [...state.queuedMessages, `${text}${suffix}`];
+        updateQueuedMessageBanner();
+        vscode.postMessage({ type: 'queueMessage', text });
     } else {
-        if (text || attachmentCount > 0) {
-            appendOptimisticUserMessage(text, attachmentCount);
-        }
-        vscode.postMessage({
-            type: mode === 'interrupt' ? 'interruptAndSend' : 'queueMessage',
-            text,
-        });
+        appendOptimisticUserMessage(text, attachmentCount);
+        vscode.postMessage({ type: 'interruptAndSend', text });
     }
     if (input) {
         input.value = '';

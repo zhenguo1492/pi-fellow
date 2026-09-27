@@ -5,6 +5,7 @@ vi.mock('vscode', () => ({
     workspace: {
         getConfiguration: () => ({
             get: (_key: string, def: any) => def,
+            inspect: () => undefined,
         }),
     },
 }));

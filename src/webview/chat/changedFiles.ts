@@ -1,7 +1,8 @@
+import { escapeHtml } from '../../shared/html';
 import type { FileChangeInfo } from '../../shared/protocol';
 import { vscode } from '../vscodeApi';
 import { buildDiffCard, bindDiffButtons } from './diffCard';
-import { el, escHtml } from './helpers';
+import { el } from './helpers';
 import { isTurnPrompt } from './messageContent';
 import { scrollIfFollowing } from './scroll';
 import { state } from './state';
@@ -68,7 +69,7 @@ function buildChangedFilesSection(): HTMLElement {
 
         item.innerHTML = `
             <span class="cf-icon">${getFileIcon(change.filePath)}</span>
-            <span class="cf-name">${escHtml(fileName)}</span>
+            <span class="cf-name">${escapeHtml(fileName)}</span>
             <span class="cf-stats">${statsHtml}</span>
         `;
         list.appendChild(item);

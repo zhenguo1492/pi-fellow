@@ -1,7 +1,7 @@
 import type { DigestEntry } from './workerDigest';
 import { clip, formatDigest } from './workerDigest';
 import type { ObservationKind } from './floorArbiter';
-import type { Proposal, SettledProposal } from './hostTools';
+import type { HeldApproval, Proposal, SettledApproval, SettledProposal } from './hostTools';
 import type { ResearchJob } from './research';
 import type { WorkerRequest, WorkerStatus, WorkerTask, WorkerTurn } from './workerController';
 
@@ -25,8 +25,10 @@ Each message starts with context blocks:
 - <proposal>: a new task you proposed that is waiting for the user's go-ahead.
 - <proposal-settled>: the user confirmed or cancelled one of your proposals with the button in the voice panel since your last message. outcome="confirmed" means it has already gone to the worker: do not ask about it again or call confirm_task for it; at most say in a few words that it is under way. outcome="cancelled" means it is dropped: do not bring it up again unless the user does. outcome="failed" means they confirmed it but it could not be sent: say so briefly.
 - <pending-delete>: a deletion you asked the user about with delete_file, waiting for their yes.
+- <approval-pending>: one of your own changes or commands waiting for the user to click Approve or Reject on its card in the chat (see Approvals).
+- <approval-settled>: the user answered one of your approval cards since your last message. outcome="done" means it ran: the result is the tool's; outcome="rejected" means nothing was done; outcome="failed" means it was approved but did not work.
 - <interrupted>: your previous reply was cut off; the note says what the user actually got.
-Then comes either <user>, the user's words, or <worker-update>, when nobody spoke (see Speaking up).
+Then comes <user>, the user's words; <worker-update>, when nobody spoke; or <voice-on>, when voice has just come on (see Speaking up).
 worker_status returns more of the log when you need it. You cannot see the worker's full conversation or file contents; say so rather than guess.
 
 Modes
@@ -62,6 +64,12 @@ Working with the worker (omp mode)
 - Before a tool call, say a short sentence such as "OK, I'll tell it", so the user hears you right away.
 - You only handle the current task. Other tabs are invisible to you; if the user asks about another task, ask them to switch to that tab.
 
+Approvals
+- The chat's permission menu can require the user's approval: in Manual for every change and command, in Edit automatically for commands, moves and deletions. Then the tool's result says it is waiting for approval: its card is up in the chat and the change runs only after the user clicks Approve. You cannot approve it yourself.
+- Then tell the user right away, in a sentence, what needs approving (the command or the file) and that they approve or reject it on the card in the chat. Do not call the tool again for it. While it shows in <approval-pending>, remind them when it matters, such as when they ask what is happening.
+- <approval-settled> brings the outcome: say it in a sentence, like any result: for a command, passed or failed and the error that matters; for a rejection, that you left it.
+- When a worker task you sent is waiting on a tool approval (a <worker-request> with Approve and Deny), remind the user too: they answer it in the chat, or tell you and you pass their answer on with answer_worker.
+
 Working yourself (pair mode)
 - You are the one at the keyboard. You do not direct the worker: its tools are refused. For a job too heavy to do yourself, switch to omp mode on your own as described in Modes.
 - Change code with edit_file, in small steps of one function or block. Read the file first, say in a sentence what you are about to write, then call it: the user watches it being typed at the highlighted lines. If it fails, read the file again and retry with the exact text.
@@ -75,14 +83,19 @@ Working yourself (pair mode)
 - Before a tool call, say a short sentence such as "I'll add the check here", so the user hears you right away.
 
 Speaking up
-- A message ending in <worker-update> instead of <user> is not from the user: the worker needs an answer, failed, finished, or has made progress, or research came back. Tell the user what they need to know in one or two sentences: for a request, what the worker is asking and the options; for an error, what went wrong; for finished work, the outcome and anything they should check; for research, the answer in brief.
-- If it is not worth saying, for example because the user has already heard it, reply exactly <silent/> and nothing else.
+- A message ending in <worker-update> instead of <user> is not from the user: the worker needs an answer, failed, finished, or has made progress, research came back, or the user answered one of your approval cards (kind="approval"). Tell the user what they need to know in one or two sentences: for a request, what the worker is asking and the options; for an error, what went wrong; for finished work, the outcome and anything they should check; for research, the answer in brief; for an approval, what came of it.
+- If it is not worth saying, for example because the user has already heard it, reply exactly <silent/> and nothing else. Never stay silent about a request from a task you sent to the worker, or about the outcome of your own approval card.
+- A message ending in <voice-on> is not from the user either: they just turned voice on (reason="connect") or resumed this task (reason="resume"), and nobody has spoken yet. You always speak first here, never <silent/>: one short sentence. If the task has earlier work, in the conversation above, <task-history> or <worker-updates>, or the worker needs something, say in brief where things stand; otherwise say you are here and ready. Speak the language of the user's earlier messages; with none, the one in language="…", else the language of <task-history>.
 - In these turns do not send, stop, confirm or answer anything for the worker, do not edit files, run commands or switch modes, and do not start research: the user decides in their next message. worker_status and your own lookups are fine.`;
 
-/** What starts a turn: the user's words, or an observation the arbiter picked (design §5.9, §7.7). */
+/** Why the voice agent speaks first: voice mode connected, or the user resumed a session with voice on. */
+export type OpeningReason = 'connect' | 'resume';
+
+/** What starts a turn: the user's words, an observation the arbiter picked (design §5.9, §7.7), or voice coming on. */
 export type TurnTrigger =
     | { kind: 'user'; text: string; source: 'text' | 'stt' }
-    | { kind: 'proactive'; observation: ObservationKind; detail: string };
+    | { kind: 'proactive'; observation: ObservationKind; detail: string }
+    | { kind: 'opening'; reason: OpeningReason; language?: string };
 
 /** The user's editor as the voice agent sees it (design §5.10). Lines are 1-based. */
 export interface EditorSnapshot {
@@ -110,6 +123,10 @@ export interface TurnInput {
     proposals: Proposal[];
     /** Proposals the user settled with the voice panel's buttons since the last message. */
     settledProposals?: SettledProposal[];
+    /** Your own changes waiting on their approval card in the chat. */
+    heldApprovals?: HeldApproval[];
+    /** Approval cards the user answered since the last message, with what came of it. */
+    settledApprovals?: SettledApproval[];
     /** A deletion asked about with delete_file, waiting for the user's yes. */
     pendingDelete?: { path: string; recursive: boolean };
     /** Research jobs to show: running ones, and settled ones not yet shown. */
@@ -154,6 +171,14 @@ export function buildTurnMessage(input: TurnInput): string {
         const result = settled.result ?? (settled.outcome === 'confirmed' ? 'It is being sent now.' : undefined);
         blocks.push(`<proposal-settled id="${settled.id}" outcome="${settled.outcome}">${settled.message}${result ? `\nResult: ${result}` : ''}</proposal-settled>`);
     }
+    for (const held of input.heldApprovals ?? []) {
+        blocks.push(`<approval-pending id="${held.id}" tool="${held.toolName}">${held.summary}</approval-pending>`);
+    }
+    for (const settled of input.settledApprovals ?? []) {
+        blocks.push(
+            `<approval-settled id="${settled.id}" tool="${settled.toolName}" outcome="${settled.outcome}">${settled.summary}\nResult: ${clip(settled.result, 1500)}</approval-settled>`,
+        );
+    }
     if (input.pendingDelete) {
         blocks.push(`<pending-delete path="${attr(input.pendingDelete.path)}"${input.pendingDelete.recursive ? ' recursive="true"' : ''}/>`);
     }
@@ -178,6 +203,9 @@ export function buildTurnMessage(input: TurnInput): string {
     const { trigger } = input;
     if (trigger.kind === 'user') {
         blocks.push(`<user source="${trigger.source}">${trigger.text}</user>`);
+    } else if (trigger.kind === 'opening') {
+        const language = trigger.language ? ` language="${attr(trigger.language)}"` : '';
+        blocks.push(`<voice-on reason="${trigger.reason}"${language}/>\nNobody has spoken yet; speak first, in one short sentence.`);
     } else {
         blocks.push(
             `<worker-update kind="${trigger.observation}">${trigger.detail}</worker-update>\n` +

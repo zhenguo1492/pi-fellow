@@ -42,13 +42,14 @@ const settingsWebviewConfig = {
 };
 
 /**
- * Loaded by Pi (not VS Code) for host tools on the pi backend (src/piExtension/hostTools.ts).
+ * Loaded by Pi/omp (not VS Code): host tools on the pi backend (src/piExtension/hostTools.ts) and the
+ * permission gate of every chat worker (src/piExtension/permissionGate.ts).
  * ESM: Pi's loader rejects a CommonJS `exports.default` as "not a valid factory function".
  */
-const piHostToolsConfig = {
-    entryPoints: ['src/piExtension/hostTools.ts'],
+const piExtensionConfig = {
+    entryPoints: ['src/piExtension/hostTools.ts', 'src/piExtension/permissionGate.ts'],
     bundle: true,
-    outfile: 'out/pi-extension/hostTools.js',
+    outdir: 'out/pi-extension',
     format: 'esm',
     platform: 'node',
     target: 'node20',
@@ -85,14 +86,14 @@ async function build() {
         const extCtx = await esbuild.context(extensionConfig);
         const webCtx = await esbuild.context(webviewConfig);
         const settingsCtx = await esbuild.context(settingsWebviewConfig);
-        const piHostToolsCtx = await esbuild.context(piHostToolsConfig);
-        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), piHostToolsCtx.watch()]);
+        const piExtensionCtx = await esbuild.context(piExtensionConfig);
+        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), piExtensionCtx.watch()]);
         console.log('Watching for changes...');
     } else {
         await esbuild.build(extensionConfig);
         await esbuild.build(webviewConfig);
         await esbuild.build(settingsWebviewConfig);
-        await esbuild.build(piHostToolsConfig);
+        await esbuild.build(piExtensionConfig);
         await Promise.all([copyStyles(), copyOrtRuntime()]);
         console.log('Build complete.');
     }

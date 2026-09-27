@@ -28,6 +28,21 @@ export interface SettledProposal {
     result?: string;
 }
 
+/** One of the voice agent's own changes waiting on the approval card in the chat (Manual, or a command, move or deletion in Edit automatically). */
+export interface HeldApproval {
+    id: string;
+    tabId: string;
+    toolName: string;
+    /** The command, path or move it would do. */
+    summary: string;
+}
+
+/** The user answered an approval card: done (with the tool's result), rejected, or approved but it failed. */
+export interface SettledApproval extends HeldApproval {
+    outcome: 'done' | 'rejected' | 'failed';
+    result: string;
+}
+
 /** The voice turn a tool call belongs to: its bound tab (§5.12 rule 4) and when the user spoke. */
 export interface ToolTurn {
     tabId: string;
@@ -422,6 +437,21 @@ const PAIR_ONLY: Record<string, true> = {
 };
 /** Pair tools that write the workspace's files: not while the worker may be writing them too. */
 const FILE_CHANGING: Record<string, true> = { edit_file: true, create_file: true, rename_file: true, delete_file: true };
+/**
+ * Pair tools governed by the tab's permission level. `write` changes file contents: runs unasked in
+ * Edit automatically. `exec` runs things, or deletes or moves files (as the worker's gate treats
+ * `rm` / `mv` and omp edit's REM / MV): asks there too. Plan refuses both; Manual asks for both.
+ */
+const PERMISSION_TIER: Record<string, 'write' | 'exec'> = {
+    edit_file: 'write',
+    create_file: 'write',
+    create_folder: 'write',
+    rename_file: 'exec',
+    save_file: 'write',
+    delete_file: 'exec',
+    run_in_terminal: 'exec',
+    debug_start: 'exec',
+};
 const DEFAULT_TERMINAL_TIMEOUT_SECS = 30;
 const DEFAULT_DEBUG_START_SECS = 15;
 const DEFAULT_DEBUG_STEP_SECS = 10;
@@ -451,6 +481,13 @@ export class HostToolRouter {
     private _autoSwitchedFromPair = false;
     /** A deletion asked about in `turn`; the same delete_file in a later user turn carries it out. */
     private _pendingDelete: { path: string; recursive: boolean; turn: number } | undefined;
+    /** Own changes waiting on their approval card, by id. */
+    private readonly _held = new Map<string, HeldApproval>();
+    /** Approval cards the user answered, not yet told to the model, per tab. */
+    private readonly _unseenApprovals = new Map<string, SettledApproval[]>();
+    private _nextApproval = 1;
+    /** The user answered an approval card and the change ran or was dropped: the voice agent should say the outcome. */
+    onApprovalSettled: (() => void) | undefined;
 
     constructor(
         private readonly _worker: WorkerController,
@@ -462,6 +499,23 @@ export class HostToolRouter {
         private readonly _hands?: EditorHands,
         private readonly _onModeChange?: (mode: AgentMode) => void,
     ) {}
+
+    /** Own changes waiting on the approval card, shown on every turn so the model keeps reminding the user. */
+    heldApprovals(tabId: string): HeldApproval[] {
+        return [...this._held.values()].filter((held) => held.tabId === tabId);
+    }
+
+    /** How many answered approvals the model has not been told about (the arbiter's `approval` observation). */
+    settledApprovalCount(tabId: string): number {
+        return this._unseenApprovals.get(tabId)?.length ?? 0;
+    }
+
+    /** Answered approvals for the next turn's message; each is handed out once. */
+    takeSettledApprovals(tabId: string): SettledApproval[] {
+        const settled = this._unseenApprovals.get(tabId) ?? [];
+        this._unseenApprovals.delete(tabId);
+        return settled;
+    }
 
     get mode(): AgentMode {
         return this._mode;
@@ -541,6 +595,23 @@ export class HostToolRouter {
         if (FILE_CHANGING[toolName] && this._worker.status(tabId).phase === 'working') {
             throw new Error('The worker is still running a task and may be writing files. Wait for it to finish, or ask the user to stop it from the chat.');
         }
+        if (Object.hasOwn(PERMISSION_TIER, toolName)) {
+            if (this._worker.permissionLevel(tabId) === 'plan') {
+                throw new Error(
+                    'Not done: this task is in read-only Plan mode (the permission menu under the chat input), so you may not change files or run commands. Tell the user what you would do, or ask them to leave Plan mode.',
+                );
+            }
+            // delete_file asks the user in words first; its approval card comes when it would actually delete.
+            if (toolName !== 'delete_file' && this._needsApproval(tabId, toolName)) {
+                return this._holdForApproval(tabId, toolName, args, () => this._act(toolName, args, turn));
+            }
+        }
+        return this._act(toolName, args, turn);
+    }
+
+    /** Carries out a call that passed the mode and permission checks. */
+    private async _act(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<string> {
+        const { tabId } = turn;
         switch (toolName) {
             case 'set_mode': {
                 const mode = args.mode === 'pair' ? 'pair' : 'omp';
@@ -594,7 +665,11 @@ export class HostToolRouter {
                     return `Not deleted yet. Tell the user it deletes ${what}, and ask them to confirm. Call delete_file again with the same path and recursive only after they agree in their next message.`;
                 }
                 this._pendingDelete = undefined;
-                return this._requireHands().deletePath(target, recursive);
+                const hands = this._requireHands();
+                if (this._needsApproval(tabId, toolName)) {
+                    return this._holdForApproval(tabId, toolName, args, () => hands.deletePath(target, recursive));
+                }
+                return hands.deletePath(target, recursive);
             }
             case 'save_file':
                 return this._requireHands().saveFiles(optionalString(args, 'path'));
@@ -781,6 +856,53 @@ export class HostToolRouter {
             throw err;
         }
         return settled.result;
+    }
+
+    /** Manual asks for every change and command; Edit automatically only for commands, moves and deletions. */
+    private _needsApproval(tabId: string, toolName: string): boolean {
+        const level = this._worker.permissionLevel(tabId);
+        return level === 'ask' || (level === 'edit' && PERMISSION_TIER[toolName] === 'exec');
+    }
+
+    /**
+     * Puts up the approval card and returns at once, so the voice agent can tell the user to answer
+     * it (it cannot speak while a tool call is open). Approved, `act` runs; either way the outcome
+     * comes back as a settled approval, and `onApprovalSettled` asks for a turn to say it.
+     */
+    private _holdForApproval(tabId: string, toolName: string, args: Record<string, unknown>, act: () => Promise<string>): string {
+        const id = `a${this._nextApproval++}`;
+        const command = typeof args.command === 'string' ? args.command : undefined;
+        const target = typeof args.path === 'string' ? args.path : undefined;
+        const move = typeof args.from === 'string' ? `${args.from} -> ${String(args.to)}` : undefined;
+        const held: HeldApproval = { id, tabId, toolName, summary: command ?? move ?? target ?? '' };
+        // Throws for a closed tab: the call fails like any other.
+        const decision = this._worker.requestToolApproval(tabId, toolName, args);
+        this._held.set(id, held);
+        void decision
+            .then(async (approved): Promise<Pick<SettledApproval, 'outcome' | 'result'>> => {
+                if (!approved) {
+                    return { outcome: 'rejected', result: 'The user rejected it on the approval card; nothing was done.' };
+                }
+                // Rechecked: the mode or the worker may have changed while the card waited.
+                if (this._worker.permissionLevel(tabId) === 'plan') {
+                    return { outcome: 'failed', result: 'Not done: the task was switched to read-only Plan mode before it was approved.' };
+                }
+                if (FILE_CHANGING[toolName] && this._worker.status(tabId).phase === 'working') {
+                    return { outcome: 'failed', result: 'Not done: the worker started a task that may be writing files before it was approved.' };
+                }
+                return { outcome: 'done', result: await act() };
+            })
+            .catch((err: unknown) => ({ outcome: 'failed' as const, result: err instanceof Error ? err.message : String(err) }))
+            .then((outcome) => {
+                this._held.delete(id);
+                this._unseenApprovals.set(tabId, [...(this._unseenApprovals.get(tabId) ?? []), { ...held, ...outcome }]);
+                this.onApprovalSettled?.();
+            });
+        return (
+            `Waiting for the user's approval (${id}): ${toolName} runs only after they click Approve on its card in the chat. ` +
+            'Tell the user now, in a sentence, what needs approving and to approve or reject it there. ' +
+            `Do not call ${toolName} again for this; the outcome arrives as <approval-settled id="${id}">.`
+        );
     }
 
     private _requireHands(): EditorHands {

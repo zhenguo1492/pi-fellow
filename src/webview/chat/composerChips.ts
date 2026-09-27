@@ -2,7 +2,7 @@ import type { EditorContextInfo } from '../../shared/editorContext';
 import { renderComposerAttachmentChip, renderEditorContextChip } from '../attachmentChipHtml';
 import { vscode } from '../vscodeApi';
 import { requestImagePreview } from './attachments';
-import { el, escAttr, escHtml } from './helpers';
+import { el } from './helpers';
 import { state } from './state';
 
 /** Active editor file/selection pushed by the extension; shown as a toggle chip in the composer. */
@@ -69,7 +69,7 @@ export function updateAttachmentsStrip(): void {
     } else {
         strip.style.display = '';
         strip.innerHTML = state.pendingAttachments
-            .map((a) => renderComposerAttachmentChip(a, a.id === previewedAttachmentId, escHtml, escAttr))
+            .map((a) => renderComposerAttachmentChip(a, a.id === previewedAttachmentId))
             .join('');
     }
     updateComposerChipRow();
@@ -152,7 +152,7 @@ export function updateEditorContextBar(): void {
         bar.innerHTML = '';
     } else {
         bar.style.display = '';
-        bar.innerHTML = renderEditorContextChip(context, enabled, escHtml, escAttr);
+        bar.innerHTML = renderEditorContextChip(context, enabled);
     }
     updateComposerChipRow();
 }

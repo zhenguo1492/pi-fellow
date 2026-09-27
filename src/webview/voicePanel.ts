@@ -6,6 +6,7 @@
  * the transcript is updated per entry id and per part, keeping scroll position, open folds and
  * running CSS animations intact.
  */
+import { escapeHtml } from '../shared/html';
 import type { ClientMessage } from '../shared/protocol';
 import {
     VOICE_MODE_LABEL,
@@ -55,10 +56,6 @@ const AVATAR: Record<'user' | 'bot' | 'narr' | 'sys', string> = {
 
 function post(message: VoiceViewClientMessage): void {
     vscode.postMessage({ type: 'voice', message } satisfies ClientMessage);
-}
-
-function esc(text: string): string {
-    return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
 function mmss(ms: number): string {
@@ -164,7 +161,7 @@ document.addEventListener('keydown', (e) => {
 // ── Header: engines, context window, tokens ──
 
 function row(key: string, value: string, title = ''): string {
-    return `<div class="vp-row"${title ? ` title="${esc(title)}"` : ''}><span class="vp-k">${esc(key)}</span><span class="vp-v">${value}</span></div>`;
+    return `<div class="vp-row"${title ? ` title="${escapeHtml(title)}"` : ''}><span class="vp-k">${escapeHtml(key)}</span><span class="vp-v">${value}</span></div>`;
 }
 
 function renderHead(s: VoiceViewState): void {
@@ -173,13 +170,13 @@ function renderHead(s: VoiceViewState): void {
     const rows = [
         row(
             'LLM',
-            [esc(llm.model ?? 'the chat tab’s model'), `thinking ${esc(llm.thinking)}`, `${VOICE_MODE_LABEL[s.mode]} mode`].join(sep),
+            [escapeHtml(llm.model ?? 'the chat tab’s model'), `thinking ${escapeHtml(llm.thinking)}`, `${VOICE_MODE_LABEL[s.mode]} mode`].join(sep),
             'oh-my-pi-chater.voiceAgent.model / thinking',
         ),
-        row('STT', [esc(shortUrl(stt.url)), esc(stt.model), `language ${esc(stt.language)}`].join(sep), 'oh-my-pi-chater.voice.*'),
+        row('STT', [escapeHtml(shortUrl(stt.url)), escapeHtml(stt.model), `language ${escapeHtml(stt.language)}`].join(sep), 'oh-my-pi-chater.voice.*'),
         row(
             'TTS',
-            [esc(tts.provider), esc(shortUrl(tts.url)), esc(tts.model), `voice ${esc(tts.voice)}`, `speed ${tts.speed}`, `language: ${esc(tts.language)}`].join(sep),
+            [escapeHtml(tts.provider), escapeHtml(shortUrl(tts.url)), escapeHtml(tts.model), `voice ${escapeHtml(tts.voice)}`, `speed ${tts.speed}`, `language: ${escapeHtml(tts.language)}`].join(sep),
             'oh-my-pi-chater.voiceAgent.tts.*',
         ),
     ];
@@ -220,9 +217,9 @@ function renderHead(s: VoiceViewState): void {
     setHtml(
         sumEl,
         [
-            brief('LLM', esc(llm.model ?? 'chat tab’s model')),
-            brief('STT', esc(shortUrl(stt.url))),
-            brief('TTS', esc(tts.provider)),
+            brief('LLM', escapeHtml(llm.model ?? 'chat tab’s model')),
+            brief('STT', escapeHtml(shortUrl(stt.url))),
+            brief('TTS', escapeHtml(tts.provider)),
             ...(u ? [brief('Tokens', `${formatTokenCount(u.input + u.output)}${sep}${cost(u.cost)}`)] : calls.length ? [brief('Tokens', `${calls.length} call${calls.length === 1 ? '' : 's'}`)] : []),
         ].join(sep),
     );
@@ -235,7 +232,7 @@ function callsTable(calls: Array<{ u: VoiceCallUsage; who: string }>): string {
     const body = calls
         .map(
             ({ u, who }) =>
-                `<tr><td>${new Date(u.at).toLocaleTimeString()}</td><td>${esc(who)}</td><td>${formatTokenCount(u.input)}</td><td>${formatTokenCount(u.cacheRead)}</td><td>${formatTokenCount(u.cacheWrite)}</td><td>${formatTokenCount(u.output)}</td><td>${cost(u.cost)}</td></tr>`,
+                `<tr><td>${new Date(u.at).toLocaleTimeString()}</td><td>${escapeHtml(who)}</td><td>${formatTokenCount(u.input)}</td><td>${formatTokenCount(u.cacheRead)}</td><td>${formatTokenCount(u.cacheWrite)}</td><td>${formatTokenCount(u.output)}</td><td>${cost(u.cost)}</td></tr>`,
         )
         .join('');
     return `<table><thead><tr><th>Time</th><th>For</th><th>In</th><th>Cache read</th><th>Cache write</th><th>Out</th><th>Cost</th></tr></thead><tbody>${body}</tbody></table>`;
@@ -406,8 +403,8 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     view.el.className = `vp-turn ${kind}${entry.silent ? ' silent' : ''}`;
     setHtml(view.avatar, AVATAR[kind]);
     setHtml(view.who, `${entry.proactive ? 'Update' : 'Bot'}<span class="vp-badge">AI</span>`);
-    setHtml(view.attach, debug && entry.input ? esc(entry.input) : '');
-    setHtml(view.pre, entry.proactive ? `<span class="vp-kind ${esc(entry.proactive)}">${esc(entry.proactive)}</span>` : '');
+    setHtml(view.attach, debug && entry.input ? escapeHtml(entry.input) : '');
+    setHtml(view.pre, entry.proactive ? `<span class="vp-kind ${escapeHtml(entry.proactive)}">${escapeHtml(entry.proactive)}</span>` : '');
 
     const sentences = entry.sentences ?? [];
     const cut = sentences.some((x) => x.state === 'cut');
@@ -588,9 +585,9 @@ function toolChip(tool: VoiceToolEntry): { cls: string; label: string; title: st
 }
 
 function chipHtml(label: string, title: string, rawName: string | undefined, status: [string, string] | undefined, body: string): string {
-    const st = status ? `<span class="${status[0]}">${esc(status[1])}</span>` : '';
-    const tn = `<span class="vp-tn"${rawName ? ` title="${esc(rawName)}"` : ''}>${esc(label)}</span>`;
-    return `<summary><span class="vp-car">▶</span>${tn}<span class="vp-t">${esc(title)}</span>${st}</summary>${body ? `<div class="vp-chip-body">${body}</div>` : ''}`;
+    const st = status ? `<span class="${status[0]}">${escapeHtml(status[1])}</span>` : '';
+    const tn = `<span class="vp-tn"${rawName ? ` title="${escapeHtml(rawName)}"` : ''}>${escapeHtml(label)}</span>`;
+    return `<summary><span class="vp-car">▶</span>${tn}<span class="vp-t">${escapeHtml(title)}</span>${st}</summary>${body ? `<div class="vp-chip-body">${body}</div>` : ''}`;
 }
 
 function renderChips(container: HTMLElement, entryId: string, tools: VoiceToolEntry[], lookups: string[]): void {
@@ -599,10 +596,10 @@ function renderChips(container: HTMLElement, entryId: string, tools: VoiceToolEn
         const status: [string, string] | undefined = tool.isError ? ['vp-st-no', '✗'] : c.status;
         const parts: string[] = [];
         if (c.detail) {
-            parts.push(esc(c.detail));
+            parts.push(escapeHtml(c.detail));
         }
         if (tool.result) {
-            parts.push(`<span class="vp-res">${esc(tool.result)}</span>`);
+            parts.push(`<span class="vp-res">${escapeHtml(tool.result)}</span>`);
         }
         return {
             key: `${entryId}:t${i}`,
@@ -615,7 +612,7 @@ function renderChips(container: HTMLElement, entryId: string, tools: VoiceToolEn
         chips.push({
             key: `${entryId}:lookups`,
             cls: 'vp-chip read',
-            html: chipHtml('Looked up', title, undefined, undefined, esc(lookups.join('\n'))),
+            html: chipHtml('Looked up', title, undefined, undefined, escapeHtml(lookups.join('\n'))),
         });
     }
     const existing = container.children;
@@ -724,8 +721,8 @@ function renderCards(s: VoiceViewState): void {
 function proposalCardHtml(p: VoiceProposalCard): string {
     return `<div class="vp-card vp-ask" title="It changes files, so it needs your go-ahead. Say “go ahead” or “cancel”.">
         <span class="vp-card-h">Confirm task</span>
-        <span class="vp-q" title="${esc(p.message)}">${esc(p.message)}</span>
-        <span class="vp-card-btns"><button type="button" class="vp-pbtn" data-act="proposal" data-action="confirm" data-id="${esc(p.id)}">Confirm</button><button type="button" class="vp-pbtn sec" data-act="proposal" data-action="cancel" data-id="${esc(p.id)}">Cancel</button></span>
+        <span class="vp-q" title="${escapeHtml(p.message)}">${escapeHtml(p.message)}</span>
+        <span class="vp-card-btns"><button type="button" class="vp-pbtn" data-act="proposal" data-action="confirm" data-id="${escapeHtml(p.id)}">Confirm</button><button type="button" class="vp-pbtn sec" data-act="proposal" data-action="cancel" data-id="${escapeHtml(p.id)}">Cancel</button></span>
     </div>`;
 }
 
@@ -743,7 +740,7 @@ function researchCardHtml(research: VoiceResearchCard[]): string {
             : `<span class="vp-m">${r.status === 'failed' ? 'failed · ' : ''}${mmss((r.finishedAt ?? r.startedAt) - r.startedAt)}</span>`;
     const more = research.length > 1 ? `<span class="vp-m">+${research.length - 1}</span>` : '';
     return `<div class="vp-card vp-research ${r.status}">
-        <span class="vp-card-h">Research</span>${glyph}<span class="vp-q" title="${esc(r.question)}">${esc(r.question)}</span>${time}${more}
+        <span class="vp-card-h">Research</span>${glyph}<span class="vp-q" title="${escapeHtml(r.question)}">${escapeHtml(r.question)}</span>${time}${more}
     </div>`;
 }
 

@@ -14,10 +14,10 @@ import { WorkerFocusTracker } from './workerFocus';
 import { formatAnchor, type CodeAnchor } from './codeAnchors';
 import { editorSnapshot } from './editorSnapshot';
 import type { Metrics, Phase } from './conversation';
-import type { VoiceAgentAction, VoiceEngines, VoicePhase, VoiceStatus } from '../shared/voiceViewProtocol';
+import type { VoiceAgentAction, VoiceEngines, VoiceObservationKind, VoicePhase, VoiceStatus } from '../shared/voiceViewProtocol';
 import type { VoiceLevelSource } from '../shared/protocol';
 import { ActiveVoiceWindow } from './activeWindow';
-import type { ArbiterSettings, Narration, ObservationKind } from './floorArbiter';
+import type { ArbiterSettings, Narration } from './floorArbiter';
 import { VoiceAgent, type VoiceTurnListener, type VoiceTurnResult } from './voiceAgent';
 import { TTS_LANGUAGE_HANDLING, TTS_PROVIDER_DEFAULTS } from './tts';
 import { VoiceMode } from './voiceMode';
@@ -28,7 +28,7 @@ import type { VoiceHistory, WorkerController } from './workerController';
 
 /** A turn the voice agent started on its own, as reported to scripts. */
 export interface ProactiveTurnRecord {
-    kind: ObservationKind;
+    kind: VoiceObservationKind;
     task: string;
     result: VoiceTurnResult;
 }
@@ -239,7 +239,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         };
     };
 
-    const proactiveListener = (kind: ObservationKind, task: { name: string }, reply: VoiceTurnListener): VoiceTurnListener => {
+    const proactiveListener = (kind: VoiceObservationKind, task: { name: string }, reply: VoiceTurnListener): VoiceTurnListener => {
         let started = false;
         // Printed on first output, so a silent turn is one short line.
         const begin = () => {
@@ -425,6 +425,9 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 return;
             }
             voiceMode = mode;
+            voiceAgent.open({ reason: 'connect', language: voice.language });
+            // A tab the worker has not touched yet belongs to the voice agent: show its Bot view.
+            void chat.showBotView(true, { onlyIfWorkerUnused: true });
             // Focus may have moved to another voice window while this one was starting.
             voiceMode.setActive(activeWindow.active);
             log('Voice mode on: talk any time; speaking over a reply cuts it off.');
@@ -456,6 +459,11 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         hands,
         debug,
         outputs,
+        worker.onSessionResumed((tabId) => {
+            if (voiceMode) {
+                agent?.open({ reason: 'resume', tabId, language: readVoiceSettings().language });
+            }
+        }),
         chat.onVoiceAction((action) => {
             switch (action.type) {
                 case 'start':

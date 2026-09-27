@@ -1,3 +1,4 @@
+import { escapeHtml } from '../shared/html';
 import { vscode } from './vscodeApi';
 
 export interface WorkspaceFileMatch {
@@ -110,7 +111,7 @@ function renderAtMenu(menu: HTMLElement): void {
         .map((item, i) => {
             const active = i === menuIndex ? ' at-item-active' : '';
             return `<div class="at-item${active}" data-index="${i}">
-            <span class="at-item-path">${escHtml(item.relativePath)}</span>
+            <span class="at-item-path">${escapeHtml(item.relativePath)}</span>
         </div>`;
         })
         .join('');
@@ -156,12 +157,4 @@ export function hideAtMenu(): void {
     }
     menuItems = [];
     menuIndex = 0;
-}
-
-function escHtml(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
 }

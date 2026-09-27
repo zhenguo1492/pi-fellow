@@ -23,7 +23,8 @@ import { readPlanModeInfoFromContext } from './planModeState';
 import { tryHandleBashPrefix } from './slashCommands';
 import { isVscodeOnlySlash, tryHandleSlashCommand } from './slashCommandRouter';
 import { buildImplementPlanPrompt } from './planModeState';
-import type { ToolApprovalHandler } from './types';
+import { readAllowedTools, readDefaultPermissionLevel } from './permissionGate';
+import type { PermissionGateState } from './permissionPolicy';
 import {
     enrichUserMessagesWithForkEntryIds,
     findPrecedingUserMessageIndex,
@@ -47,6 +48,9 @@ const RPC_BUILTIN_SLASH: ReadonlyArray<{ name: string; description: string }> = 
     { name: 'resume', description: 'Resume another session' },
     { name: 'session', description: 'Show session info' },
 ];
+
+/** Last model/skill list per backend + folder: a new worker shows it until its own list has loaded. */
+const catalogByWorkspace = new Map<string, { models: ModelInfo[]; skills: SkillInfo[] }>();
 
 export class RpcSessionShim {
     isStreaming = false;
@@ -86,13 +90,28 @@ export class PiRpcSessionManager {
     private _messages: any[] = [];
     private _cachedModels: ModelInfo[] = [];
     private _cachedSkills: SkillInfo[] = [];
-    private _cachedCommands: SlashCommandListItem[] = [];
+    /** `_cachedModels` + `_cachedSkills` as last announced to `onDidChangeCatalog` listeners. */
+    private _catalogSnapshot = '';
+    private readonly _catalogListeners = new Set<() => void>();
+    /** Backend + folder: workers sharing it list the same models and skills (`catalogByWorkspace`). */
+    private _catalogKey = '';
     private _sessionStats: SessionTokenStats | undefined;
     private _postChatError: ((message: string) => void) | undefined;
     private _onOpenSessionTree: (() => Promise<void> | void) | undefined;
+    /** What the permission gate enforces in this worker; survives CLI restarts. */
+    private _permission: PermissionGateState = { level: readDefaultPermissionLevel(), allowedTools: readAllowedTools() };
 
     constructor(outputChannel: vscode.OutputChannel) {
         this._outputChannel = outputChannel;
+        this._rpcUi.autoApproveTools = this._permission.level === 'auto';
+    }
+
+    /** The tab's permission level, applied from the worker's next tool call on. */
+    setPermission(state: PermissionGateState): void {
+        this._permission = state;
+        this._bridge.setPermission(state);
+        // Auto also answers omp's own approval prompts (tools.approvalMode other than yolo).
+        this._rpcUi.autoApproveTools = state.level === 'auto';
     }
 
     get session(): RpcSessionShim | undefined {
@@ -144,12 +163,6 @@ export class PiRpcSessionManager {
         this._postChatError?.(message);
     }
 
-    setToolApprovalHandler(_handler: ToolApprovalHandler | undefined): void {
-        this._outputChannel.appendLine(
-            'Tool approval is handled inside the Pi CLI process (oh-my-pi-chater.autoApproveTools / Pi settings).',
-        );
-    }
-
     getExtensionLoadIssues() {
         return [];
     }
@@ -184,18 +197,25 @@ export class PiRpcSessionManager {
         this._outputChannel.appendLine(
             `Starting ${invocation.backend} in RPC mode (--mode rpc) — ${describeCliInvocation(invocation)}`,
         );
-        await this._bridge.start(cwd, args, preferredBackend);
+        await this._bridge.start(cwd, args, preferredBackend, { permission: this._permission });
         this._rpcUi.setChrome(this.extensionChrome);
 
         this._unsubscribe = this._bridge.on((event) => {
             this._onBridgeEvent(event);
         });
 
+        // The model list waits on the CLI's provider discovery (local servers + network, ~0.5s or far more):
+        // it loads in the background. Until then the tab shows the list another worker here last loaded.
+        this._catalogKey = `${this.backend}\0${cwd}`;
+        const cached = catalogByWorkspace.get(this._catalogKey);
+        if (cached) {
+            this._setCatalog(cached.models, cached.skills);
+        }
+        void this._refreshModelsAndSkills();
         await Promise.all([
             this._applyRpcModesFromSettings(),
             this._refreshState(),
             this._refreshMessages(),
-            this._refreshModelsAndSkills(),
             this._refreshSessionStats(),
         ]);
         try {
@@ -277,13 +297,13 @@ export class PiRpcSessionManager {
         }
     }
 
-    /** Refresh messages + session state from Pi RPC (await before UI stateSync). */
+    /** Refresh messages + session state from Pi RPC (await before UI stateSync). The model and skill lists follow in the background (`onDidChangeCatalog`). */
     async syncFromRpc(): Promise<void> {
+        void this._refreshModelsAndSkills();
         await Promise.all([
             this._refreshMessages(),
             this._refreshState(),
             this._refreshSessionStats(),
-            this._refreshModelsAndSkills(),
         ]);
     }
 
@@ -504,7 +524,7 @@ export class PiRpcSessionManager {
     async reloadPiAgentResources(): Promise<void> {
         const cwd = this._shim?.cwd ?? process.cwd();
         await this._bridge.stop();
-        await this._bridge.start(cwd, []);
+        await this._bridge.start(cwd, [], undefined, { permission: this._permission });
         await this._applyRpcModesFromSettings();
         await this._refreshState();
         await this._refreshMessages();
@@ -695,32 +715,53 @@ export class PiRpcSessionManager {
         return this._cachedModels;
     }
 
+    /** Fires when the model or skill list changed; they load in the background after startup and on every sync. */
+    onDidChangeCatalog(listener: () => void): () => void {
+        this._catalogListeners.add(listener);
+        return () => this._catalogListeners.delete(listener);
+    }
+
+    private _setCatalog(models: ModelInfo[], skills: SkillInfo[]): void {
+        this._cachedModels = models;
+        this._cachedSkills = skills;
+        const snapshot = JSON.stringify([models, skills]);
+        if (snapshot === this._catalogSnapshot) {
+            return;
+        }
+        this._catalogSnapshot = snapshot;
+        if (models.length > 0) {
+            catalogByWorkspace.set(this._catalogKey, { models, skills });
+        }
+        for (const listener of this._catalogListeners) {
+            listener();
+        }
+    }
+
+    /** Never rejects: a list that fails to load is left empty. */
     private async _refreshModelsAndSkills(): Promise<void> {
+        let models: ModelInfo[] = [];
         try {
-            const models = await this._bridge.getAvailableModels();
+            const available = await this._bridge.getAvailableModels();
             const loggedIn = vscode.workspace.getConfiguration('oh-my-pi-chater').get<boolean>('showAllModels', false)
                 ? undefined
                 : await this._loggedInProviders();
-            const visible = loggedIn ? models.filter((m) => loggedIn.has(m.provider)) : models;
+            const visible = loggedIn ? available.filter((m) => loggedIn.has(m.provider)) : available;
             // No stored login at all (env-var / models.json keys only): don't leave the picker empty.
-            this._cachedModels = (visible.length > 0 ? visible : models).map((m) => ({
+            models = (visible.length > 0 ? visible : available).map((m) => ({
                 provider: m.provider,
                 id: m.id,
                 name: m.id,
             }));
         } catch {
-            this._cachedModels = [];
+            /* left empty */
         }
+        let skills: SkillInfo[] = [];
         try {
-            this._cachedSkills = await this.getSkillsAsync();
+            skills = await this.getSkillsAsync();
         } catch {
-            this._cachedSkills = [];
+            /* left empty */
         }
-        try {
-            this._cachedCommands = await this.listSlashCommands();
-        } catch {
-            this._cachedCommands = [];
-        }
+        this._setCatalog(models, skills);
     }
 
     /** Stored `/login` credentials; omp on runtimes without `node:sqlite` falls back to RPC auth status. */
@@ -771,10 +812,6 @@ export class PiRpcSessionManager {
 
     getThinkingLevel(): string | undefined {
         return this._shim?.thinkingLevel;
-    }
-
-    getAutoApproveTools(): boolean {
-        return vscode.workspace.getConfiguration('oh-my-pi-chater').get<boolean>('autoApproveTools', false);
     }
 
     getSkills(): SkillInfo[] {

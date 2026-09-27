@@ -1,6 +1,7 @@
 import type { AgentBackend } from '../pi/agentBackend';
 import type { VoiceSessionSummary } from '../pi/sessionCatalog';
 import type { ExtensionUiMethod } from '../shared/extensionUi';
+import type { PermissionLevel } from '../shared/protocol';
 
 /**
  * Task-level control of the worker session in one sidebar tab: the only way the voice agent
@@ -15,6 +16,8 @@ export interface WorkerController {
      * switches worker session (resume, /new). Not fired for a session file appearing on a new tab.
      */
     onActiveTaskChanged(listener: (task: WorkerTask | undefined) => void): { dispose(): void };
+    /** The user resumed a session from the resume list; it is now loaded in `tabId`, the active tab. */
+    onSessionResumed(listener: (tabId: string) => void): { dispose(): void };
     /** Raw agent events of every tab in the current backend workspace, for the activity log (§5.8). */
     onTabEvent(listener: (event: { tabId: string; event: WorkerEvent }) => void): { dispose(): void };
     /** A tab's pending requests changed: one arrived, was answered (here or in the editor), or timed out. */
@@ -41,6 +44,10 @@ export interface WorkerController {
      * the session already has a name (the user's, or omp's own title) or the tab moved to another session.
      */
     nameTask(tabId: string, sessionFile: string, name: string): Promise<boolean>;
+    /** The tab's permission level (the composer's menu); it governs the voice agent's own changes too. */
+    permissionLevel(tabId: string): PermissionLevel;
+    /** Manual (and Edit automatically, for commands and deletions): resolves true once the user approved the voice agent's change in the tab, false when they rejected it or the tab closed. */
+    requestToolApproval(tabId: string, toolName: string, args: Record<string, unknown>): Promise<boolean>;
 }
 
 export interface WorkerTask {
@@ -91,6 +98,8 @@ export interface WorkerStatus {
     /** Messages waiting in the tab's send queue. */
     queued: number;
     error?: string;
+    /** While awaiting: the instruction the worker is on (its latest user message) was sent by the voice agent. */
+    fromVoice?: boolean;
 }
 
 export interface WorkerRequest {

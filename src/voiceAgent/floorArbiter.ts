@@ -7,16 +7,21 @@ import type { WorkerEvent, WorkerStatus } from './workerController';
  */
 
 /** Highest priority first. */
-export type ObservationKind = 'needs_input' | 'error' | 'done' | 'research' | 'progress';
+export type ObservationKind = 'approval' | 'needs_input' | 'error' | 'done' | 'research' | 'progress';
 
 export type Observation =
+    | { kind: 'approval'; tabId: string }
     | { kind: 'needs_input'; tabId: string; requestIds: string[] }
     | { kind: 'error'; tabId: string; detail: string }
     | { kind: 'done'; tabId: string }
     | { kind: 'research'; tabId: string; jobId: string }
     | { kind: 'progress'; tabId: string };
 
-/** `important`: requests, errors, finished work and research; `all` adds progress; `off` never speaks up. */
+/**
+ * `important`: requests, errors, finished work and research; `all` adds progress; `off` speaks up only
+ * about what the voice agent itself set going: the user's answer to one of its approval cards, and a
+ * request from a worker task it sent.
+ */
 export type Narration = 'off' | 'important' | 'all';
 
 export interface ArbiterSettings {
@@ -33,6 +38,10 @@ export interface ArbiterView {
     phase: WorkerStatus['phase'];
     /** Requests the worker is waiting on, oldest first. */
     requestIds: string[];
+    /** The worker's instruction came from the voice agent: its requests are the voice agent's to relay. */
+    fromVoice: boolean;
+    /** The user approved or rejected the voice agent's own changes, and it has not said the outcome yet. */
+    settledApprovals: number;
     /** Research jobs of the task's voice context that settled and have not been shown. */
     settledResearch: string[];
     /** Activity-log entries the task's voice context has not seen. */
@@ -102,9 +111,6 @@ export class FloorArbiter {
     /** The most urgent observation worth a proactive turn now, or undefined. Does not consume it. */
     next(view: ArbiterView, now: number): Observation | undefined {
         const settings = this._settings();
-        if (settings.narration === 'off') {
-            return undefined;
-        }
         const { tabId } = view;
         const watch = this._watch(tabId);
         for (const id of watch.told) {
@@ -112,9 +118,17 @@ export class FloorArbiter {
                 watch.told.delete(id);
             }
         }
+        // The outcome of a change the user was asked to approve answers them: it never waits.
+        if (view.settledApprovals > 0) {
+            return { kind: 'approval', tabId };
+        }
         // Requests and errors cannot wait for a quiet gap: a request may time out, an error stops the work.
-        if (view.requestIds.some((id) => !watch.told.has(id))) {
+        // A task the voice agent sent is its to follow up, whatever the narration setting.
+        if (view.requestIds.some((id) => !watch.told.has(id)) && (settings.narration !== 'off' || view.fromVoice)) {
             return { kind: 'needs_input', tabId, requestIds: view.requestIds };
+        }
+        if (settings.narration === 'off') {
+            return undefined;
         }
         if (watch.error !== undefined) {
             return { kind: 'error', tabId, detail: watch.error };
