@@ -45,9 +45,4 @@ export class EventRouter {
         this._handlers.clear();
         this._globalHandlers.clear();
     }
-
-    /** Compatibility shim for tests that mimic AgentSession.subscribe(). */
-    asSessionListener(): (event: PiAgentEvent) => void {
-        return (event) => this.dispatch(event);
-    }
 }

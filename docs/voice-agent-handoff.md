@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-**可以对着麦克风说话，由语音智能体指挥侧边栏里的 worker，并用语音回答。** 它会主动播报 worker 的进展，支持插嘴打断，多个 VS Code 窗口之间不会抢麦克风。开关和状态在会话输入框上方的机器人状态条，对话、引擎和 token 用量在底部面板的 “Bot” 标签里。
+**可以对着麦克风说话，由语音智能体指挥侧边栏里的 worker，并用语音回答。** 它会主动播报 worker 的进展，支持插嘴打断，多个 VS Code 窗口之间不会抢麦克风。开关和状态在会话输入框上方的机器人状态条，对话、引擎和 token 用量在会话 tab 的 “Bot” 视图里（点 tab 标题左边的图标切换）。
 
 | 步骤 | 内容 | 状态（实测数据见设计文档 §14.1） |
 |---|---|---|
@@ -64,7 +64,7 @@
 | `activeWindow.ts` | 多窗口之间决定谁拥有语音 |
 | `voiceAgentCommands.ts` | 命令、输出面板日志；经 `VoiceChatControls` 驱动会话里的机器人状态条和麦克风、接收它们的操作；接起 Bot 视图、对话记录和语音模式 |
 | `transcriptStore.ts` | `VoiceTranscriptStore`：Bot 视图的对话记录，按任务分组，记下每句的朗读状态、每次 LLM 调用的 token 和每轮的 Timing，存进 `workspaceState` |
-| `voicePanel.ts`、`voicePanelView.ts` | 底部面板的 Bot 视图：快照（引擎、上下文占比、token、卡片、对话）、卡片动作、历史 QuickPick |
+| `voicePanel.ts` | 会话 tab 里的 Bot 视图（经 `BotViewSurface` 画在侧边栏）：快照（引擎、上下文占比、token、卡片、对话）、卡片动作、历史 QuickPick |
 | `workerControlCommands.ts` | 调试命令（直接控制 worker，不经过语音模型） |
 
 ### 修改的已有文件
@@ -80,10 +80,10 @@
 | `src/voice/voiceInput.ts`、`src/webview/dictation.ts`、`src/shared/protocol.ts` | 听写和语音模式互斥：`VoiceInput.setBlocked`；语音模式开着时输入框的麦克风显示语音智能体麦克风的电平、点击静音 |
 | `src/voice/micLevel.ts`（新增）、`src/voice/dictation.ts` | 麦克风电平（dBFS → 0..1、峰值保持）抽成共用的 `MicLevelMeter`，听写和语音模式共用；每次上报还带这 64 ms 的真实波形（`wavePoints`：160 个带符号峰值，固定增益，机器人回复的波形也用它），输入框顶栏的示波器线（`src/webview/voiceWave.ts`）照原样绘制，报告之间只做短交叉淡入 |
 | `src/shared/voiceViewProtocol.ts`（新增） | Bot 视图的消息和快照类型，以及会话用的 `VoiceStatus`、`VoiceAgentAction` |
-| `src/webview/voiceBar.ts`（新增） | 输入框上方的机器人状态条，和输入框发给语音智能体还是 omp 的判断（“To worker” 勾选框） |
-| `src/webview/voicePanel.ts`、`src/webview/styles/voice.css`（新增） | Bot 视图的前端：引擎、上下文、token 明细、卡片、对话流；`src/webview/voiceView.ts` 是入口（`out/webview/voiceView.js`，`esbuild.js`） |
+| `src/webview/voiceBar.ts`（新增） | 输入框上方的机器人状态条，和输入框发给语音智能体还是 omp 的判断（按当前 tab 显示会话还是 Bot 视图） |
+| `src/webview/voicePanel.ts`、`src/webview/styles/voice.css`（新增） | Bot 视图的前端：引擎、上下文、token 明细、卡片、对话流；由 `main.ts` 挂进会话 tab（`.bot-host`，tab 图标切换） |
 | `src/webview/main.ts`、`src/webview/styles/main.css` | 会话里语音派发的消息显示"🎙 From voice"标记；机器人状态条、麦克风两种状态、输入框路由到语音智能体 |
-| `package.json`、`package-lock.json` | 新增命令、设置项（`historySessions`、`debugTranscript`）；底部面板 `Bot` 视图（标题栏历史按钮）；Ctrl+Alt+M 语音模式下是静音、否则是听写；新依赖 `ws`（开发依赖 `@types/ws`） |
+| `package.json`、`package-lock.json` | 新增命令、设置项（`historySessions`、`debugTranscript`）；Ctrl+Alt+M 语音模式下是静音、否则是听写；新依赖 `ws`（开发依赖 `@types/ws`） |
 | `.vscode/launch.json` | F5 启动的开发窗口直接打开 `../voice-agent-playground` |
 | `docs/voice-agent-design.md`、`AGENT.md` | 实测结论、设计更新、实施进度、文件索引 |
 | `src/test/unit/voiceAgent/` | 新增单元测试 |
@@ -108,8 +108,8 @@
 2. 在侧边栏给 worker 一个任务，比如 `运行 npm test，告诉我结果`。
 3. 开启语音模式：点会话输入框上方的**机器人**，或运行命令 **Voice Agent — Start Voice Mode**。机器人旁边显示状态：Listening / Hearing you / Transcribing（蓝）、Thinking（黄）、Synthesizing（橙，回答的第一句还在合成）、Speaking（绿）；另一个窗口占着麦克风时显示 `Standby`，静音时显示 `Muted`。
 4. **直接说话**，停顿 1.2 s 算说完。它回答时你可以插嘴打断。输入框里的麦克风这时显示你的麦克风电平，点一下（或 Ctrl+Alt+M）静音 / 取消静音。状态条上的喇叭按钮停下正在念的回答，模式按钮切换模式（委派图标：交给 worker 做；握手图标：Pair，自己动手）。
-5. 不方便说话时，直接在会话输入框里打字：默认发给语音智能体，效果和说话一样，也会打断正在进行的回复。要发给 omp，勾上页脚的 **To worker**；斜杠命令和带附件的消息总是发给 omp。
-6. 底部面板的 **Bot** 标签：上面是 LLM / STT / TTS 实际用的模型、声音和语言，当前语音上下文占了多少上下文窗口，token 汇总（点开看每次调用的明细）；下面是对话，逐句显示朗读进度，被打断没念出的部分加删除线，每条回复有收起的 “Timing”。标题栏的 🕘 回看过去的会话。
+5. 不方便说话时，切到 Bot 视图（见下一条）在输入框里打字：发给语音智能体，效果和说话一样，也会打断正在进行的回复。显示会话时输入框发给 omp。语音智能体离线时 Bot 视图的输入框置灰，提示 “The voice agent must be online to send messages”。
+6. 会话 tab 的 **Bot** 视图（点 tab 标题左边的聊天图标，变成机器人即打开，再点换回会话）：上面是 LLM / STT / TTS 实际用的模型、声音和语言，当前语音上下文占了多少上下文窗口，token 汇总（点开看每次调用的明细）；下面是对话，逐句显示朗读进度，被打断没念出的部分加删除线，每条回复有收起的 “Timing”。摘要行右边的 🕘 回看过去的会话。
 7. 结束时再点机器人，或运行 **Voice Agent — Stop**。隐藏 Chrome 会退出，临时文件会删除；Bot 视图里的对话保留为只读记录。不开语音模式时，"Type a Message" 命令就是纯打字对话，回复只显示文字。
 8. 想绕过语音模型、直接控制 worker：**Voice Agent — Debug Worker Control**。
 

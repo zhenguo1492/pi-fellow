@@ -1,6 +1,7 @@
 import type { EditorContextInfo } from './editorContext';
 import type { VoiceAgentAction, VoiceStatus, VoiceViewClientMessage, VoiceViewHostMessage } from './voiceViewProtocol';
 import type { TtsConfig } from '../voiceAgent/tts';
+import type { StatusBarLimit, UsageAccountDetail } from '../pi/providerUsage';
 
 export interface ContextUsageInfo {
     tokens: number | null;
@@ -17,6 +18,23 @@ export interface SessionTokenStats {
     cacheRead: number;
     cacheWrite: number;
     cost: number;
+}
+
+/** The line over the active tab's conversation: model, context use and the provider's plan limits. */
+export interface ModelStatusInfo {
+    /** Display name; absent when no model is selected. */
+    model?: string;
+    activity: 'idle' | 'streaming' | 'retrying';
+    /** Reconnect attempt while retrying, else 0. */
+    retryAttempt: number;
+    context?: ContextUsageInfo;
+    tokens?: SessionTokenStats;
+    thinking?: string;
+    /** Limits that gate the model, shortest window first: the summary line. */
+    limits: StatusBarLimit[];
+    /** Every window per account: the details. */
+    usage: UsageAccountDetail[];
+    usageError?: string;
 }
 
 export interface PiAuthProviderInfo {
@@ -106,7 +124,8 @@ export interface PiAgentConfigData {
 
 export interface SettingsData {
     backend: AgentBackend;
-    availableBackends?: AgentBackend[];
+    /** Installed CLIs; the settings backend picker offers only these. */
+    availableBackends: AgentBackend[];
     extensionVersion: string;
     syncWithPiCli: boolean;
     piAgentDir: string;
@@ -201,6 +220,8 @@ export interface TabInfo {
     isActive: boolean;
     isStreaming: boolean;
     hasNotification: boolean;
+    /** The tab shows the Bot view (the voice agent's conversation) instead of its chat. */
+    botView: boolean;
 }
 
 export interface PlanTodoItem {
@@ -264,8 +285,6 @@ export interface SerializedAgentState {
     connectionStatus?: ConnectionStatus;
     /** Active backend ('omp' or 'pi') of the current tab or workspace preference. */
     activeBackend?: AgentBackend;
-    /** Backends detected on this machine. */
-    availableBackends?: AgentBackend[];
     /** Every tab shows the agent CLI's TUI in an embedded terminal instead of the chat UI. */
     tuiMode?: boolean;
     /** omp /login or /logout was requested: chat shows a banner that finishes it in the TUI. */
@@ -320,6 +339,8 @@ export interface SessionInfo {
     turnCount?: number;
     /** Session file size on disk. */
     sizeBytes?: number;
+    /** User turns spoken (or typed) to the voice agent about this session; its only content when no task went to the worker. */
+    voiceTurns?: number;
     firstMessage?: string;
 }
 
@@ -376,10 +397,12 @@ export type ClientMessage =
     | { type: 'prompt'; text: string; attachments?: any[] }
     | { type: 'slashCommand'; text: string }
     | { type: 'steer'; text: string }
-    /** From the Bot view in the bottom panel. */
+    /** From the Bot view a chat tab shows in place of its conversation. */
     | { type: 'voice'; message: VoiceViewClientMessage }
     /** From the chat's robot status line, composer mic and composer, for the voice agent. */
     | { type: 'voiceAgent'; action: VoiceAgentAction }
+    /** The model status line's switch button: the model QuickPick (favorites are starred there). */
+    | { type: 'selectModel' }
     | { type: 'pickAttachments' }
     | { type: 'addPastedImages'; items: { mimeType: string; dataBase64: string; name?: string }[] }
     | { type: 'addDroppedTextFiles'; files: { name: string; text: string }[] }
@@ -414,9 +437,10 @@ export type ClientMessage =
     | { type: 'redoCheckpoint' }
     | { type: 'confirmAction'; action: string; message: string; payload?: any }
     | { type: 'createTab'; backend?: AgentBackend }
-    | { type: 'setBackend'; backend: AgentBackend }
     | { type: 'closeTab'; tabId: string }
     | { type: 'switchTab'; tabId: string }
+    /** The tab icon or the robot status line's log button; no `tabId`: the active tab. Switches to the tab. */
+    | { type: 'toggleBotView'; tabId?: string }
     /** `section`: scroll the settings to it (`voice`, `mcp`, …). */
     | { type: 'openSettings'; section?: string }
     | { type: 'getSkills' }
@@ -498,6 +522,7 @@ export type ServerMessage =
     | { type: 'ready' }
     | { type: 'stateSync'; state: SerializedAgentState }
     | { type: 'agentEvent'; event: any }
+    | { type: 'modelStatus'; status: ModelStatusInfo }
     | {
           type: 'models';
           models: ModelInfo[];
@@ -546,7 +571,7 @@ export type ServerMessage =
     | { type: 'tuiExit'; tabId: string; exitCode: number }
     /** Active editor file/selection the next prompt carries; `enabled` is the user's include toggle. */
     | { type: 'editorContext'; context: EditorContextInfo | null; enabled: boolean }
-    /** For the Bot view in the bottom panel. */
+    /** For the Bot view a chat tab shows in place of its conversation. */
     | { type: 'voice'; message: VoiceViewHostMessage }
     /** The voice agent's state changed: robot status line and composer mic. */
     | { type: 'voiceStatus'; status: VoiceStatus }

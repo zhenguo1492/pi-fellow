@@ -14,6 +14,8 @@ const omp = vi.hoisted(() => ({
     created: [] as string[],
     switched: [] as string[],
     failSwitch: false,
+    /** Set: VoiceLlm.start rejects with it, like pi exiting on an unknown model. */
+    failStart: '',
 }));
 
 vi.mock('../../../voiceAgent/voiceLlm', async () => {
@@ -45,7 +47,16 @@ vi.mock('../../../voiceAgent/voiceLlm', async () => {
         },
         async stop() {},
     };
-    return { VoiceLlm: { start: async () => llm } };
+    return {
+        VoiceLlm: {
+            start: async () => {
+                if (omp.failStart) {
+                    throw new Error(omp.failStart);
+                }
+                return llm;
+            },
+        },
+    };
 });
 
 // Research runs omp itself (and reads VS Code settings to find it); these tests start none.
@@ -92,6 +103,9 @@ class FakeWorker implements WorkerController {
     }
     recentTurns() {
         return [{ instruction: 'Make average handle empty lists', reply: 'Done' }];
+    }
+    async nameTask() {
+        return false;
     }
 }
 
@@ -147,6 +161,7 @@ beforeEach(() => {
     omp.created = [];
     omp.switched = [];
     omp.failSwitch = false;
+    omp.failStart = '';
 });
 
 afterEach(() => {
@@ -260,5 +275,19 @@ describe('VoiceAgent: resuming a task’s voice conversation', () => {
         await window.store.pruneContexts(omp.dir);
         expect(existsSync(omp.created[0])).toBe(true);
         expect(existsSync(unused)).toBe(false);
+    });
+});
+
+describe('VoiceAgent: a turn that cannot run', () => {
+    it('ends the reply with the error instead of leaving it pending when the agent fails to start', async () => {
+        omp.failStart = 'Pi RPC process exited (code=1). Error: Model "antigravity/gemini-3.8-flash" not found.';
+        const window = openWindow(new FakeWorker(), memento());
+        await window.say('Hello');
+        expect(window.store.current()?.entries.at(-1)).toMatchObject({
+            kind: 'assistant',
+            done: true,
+            error: expect.stringContaining('Model "antigravity/gemini-3.8-flash" not found'),
+        });
+        await window.stopVoice();
     });
 });

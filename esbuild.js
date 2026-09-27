@@ -41,11 +41,19 @@ const settingsWebviewConfig = {
     minify: false,
 };
 
-/** The voice panel in its own view in the bottom panel (src/voiceAgent/voicePanelView.ts). */
-const voiceViewConfig = {
-    ...settingsWebviewConfig,
-    entryPoints: ['src/webview/voiceView.ts'],
-    outfile: 'out/webview/voiceView.js',
+/**
+ * Loaded by Pi (not VS Code) for host tools on the pi backend (src/piExtension/hostTools.ts).
+ * ESM: Pi's loader rejects a CommonJS `exports.default` as "not a valid factory function".
+ */
+const piHostToolsConfig = {
+    entryPoints: ['src/piExtension/hostTools.ts'],
+    bundle: true,
+    outfile: 'out/pi-extension/hostTools.js',
+    format: 'esm',
+    platform: 'node',
+    target: 'node20',
+    sourcemap: false,
+    minify: false,
 };
 
 async function copyStyles() {
@@ -77,14 +85,14 @@ async function build() {
         const extCtx = await esbuild.context(extensionConfig);
         const webCtx = await esbuild.context(webviewConfig);
         const settingsCtx = await esbuild.context(settingsWebviewConfig);
-        const voiceCtx = await esbuild.context(voiceViewConfig);
-        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), voiceCtx.watch()]);
+        const piHostToolsCtx = await esbuild.context(piHostToolsConfig);
+        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), piHostToolsCtx.watch()]);
         console.log('Watching for changes...');
     } else {
         await esbuild.build(extensionConfig);
         await esbuild.build(webviewConfig);
         await esbuild.build(settingsWebviewConfig);
-        await esbuild.build(voiceViewConfig);
+        await esbuild.build(piHostToolsConfig);
         await Promise.all([copyStyles(), copyOrtRuntime()]);
         console.log('Build complete.');
     }

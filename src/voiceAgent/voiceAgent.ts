@@ -26,13 +26,15 @@ export interface VoiceAgentOptions {
     onProactiveTurn?: (kind: ObservationKind, task: WorkerTask) => ProactiveTurnHooks;
     /** Someone is talking or about to (voice mode): proactive turns wait. */
     floorBusy?: () => boolean;
+    /** Stops the reply being spoken, if any (voice mode); the text reply is cut off either way. */
+    hush?: () => void;
     /** Proposals or research changed (voice panel cards). */
     onChange?: () => void;
     /** The user's editor, attached to every turn; without it the agent does not see the editor. */
     editor?: () => EditorSnapshot | undefined;
     /** The agent reads this file itself (Pi focus). */
     onRead?: (target: FocusTarget) => void;
-    /** Its hands in the user's VS Code: open_file and read_output, and in pair mode editing and managing files, the terminal and the debugger. */
+    /** Its hands in the user's VS Code: open_file, list_viewers, open_with and read_output, and in pair mode editing and managing files, the terminal and the debugger. */
     hands?: EditorHands;
     /** Switched between omp and pair mode, by a tool call or setMode. */
     onModeChange?: (mode: AgentMode) => void;
@@ -73,7 +75,7 @@ export interface VoiceTurnListener {
     /** The reply points at code here, between the text before and after it. */
     onAnchor?(anchor: CodeAnchor): void;
     onToolCall?(name: string, args: Record<string, unknown>, result: ToolResult): void;
-    /** The voice agent is reading the project itself (read, grep, glob). */
+    /** The voice agent is looking something up itself (read, grep, glob, web_search). */
     onLookup?(description: string): void;
     /** One LLM call of the turn finished (several when it uses tools). */
     onUsage?(usage: VoiceCallUsage): void;
@@ -108,6 +110,15 @@ interface VoiceContext {
     editorKey?: string;
 }
 
+interface RunningTurn {
+    /** The voice context it runs in. */
+    key: string;
+    ctl: AbortController;
+    turn: ToolTurn;
+    /** Why it is being cut off, when not by a new message or a task switch; goes into `<interrupted>`. */
+    cause?: string;
+}
+
 /** How often the arbiter is asked when nothing else prompts it (§7.7 Tick). */
 const TICK_MS = 1000;
 /** Research jobs kept per tab for the voice panel. */
@@ -139,9 +150,11 @@ export class VoiceAgent {
     private _inFlight = 0;
     /** User turns queued behind the running one: a proactive turn yields to them. */
     private _userWaiting = 0;
-    private _turn: { key: string; ctl: AbortController } | undefined;
+    private _turn: RunningTurn | undefined;
+    /** The turn started last, running or not: its reply may still be playing. */
+    private _lastTurn: ToolTurn | undefined;
     /** Left by a reply that was cut off, for the next turn's `<interrupted>` (§5.4). */
-    private _cutOff: { reply: string; effects: string } | undefined;
+    private _cutOff: { reply: string; effects: string; cause?: string } | undefined;
     private _stopped = false;
     /** `provider/id` of the running omp process, once it is up. */
     private _model: string | undefined;
@@ -185,14 +198,31 @@ export class VoiceAgent {
         this._tick = setInterval(() => this._maybeProactive(), TICK_MS);
     }
 
-    /** A user turn. A reply still running is cut off: the user always wins. */
+    /**
+     * A user turn. A reply still running is cut off: the user always wins. Never rejects: a turn that
+     * cannot run (the agent process failed to start, no chat tab, …) ends through `listener.onEnd`
+     * with `error` set, like a failed reply, so the transcript shows it instead of a pending reply.
+     */
     say(text: string, source: 'text' | 'stt', listener: VoiceTurnListener = {}, options: SayOptions = {}): Promise<VoiceTurnResult> {
         const userAt = Date.now();
         this._userWaiting++;
         this._turn?.ctl.abort();
-        return this._enqueue(() => {
+        return this._enqueue(async () => {
             this._userWaiting--;
-            return this._userTurn(text, source, userAt, listener, options);
+            try {
+                return await this._userTurn(text, source, userAt, listener, options);
+            } catch (err: unknown) {
+                const result: VoiceTurnResult = {
+                    reply: '',
+                    silent: false,
+                    toolCalls: [],
+                    lookups: [],
+                    interrupted: false,
+                    error: err instanceof Error ? err.message : String(err),
+                };
+                listener.onEnd?.(result);
+                return result;
+            }
         });
     }
 
@@ -233,15 +263,35 @@ export class VoiceAgent {
 
     /** The user agreed to a proposal in the voice panel: send it as confirm_task would. */
     async confirmProposal(id: string): Promise<string> {
-        const text = await this._router.confirmProposal(id);
+        this._cutAsking(id);
+        const sending = this._router.confirmProposal(id);
         this._options.onChange?.();
-        return text;
+        return sending;
     }
 
     /** The user turned a proposal down in the voice panel. */
     cancelProposal(id: string): void {
-        this._router.dropProposal(id);
+        this._cutAsking(id);
+        this._router.cancelProposal(id);
         this._options.onChange?.();
+    }
+
+    /**
+     * A proposal was settled with a button while the reply that made it may still be asking for it:
+     * that reply is cut off, spoken or not. The model hears what happened on its next turn.
+     */
+    private _cutAsking(id: string): void {
+        const last = this._lastTurn;
+        const proposal = last && this._router.proposals(last.tabId).find((p) => p.id === id);
+        // With a newer user message queued, the reply being spoken, or about to be, is not the one asking.
+        if (!last || last.proactive || !proposal || proposal.createdTurn !== last.seq || this._userWaiting > 0) {
+            return;
+        }
+        if (this._turn?.turn === last) {
+            this._turn.cause = 'You proposed a task and the user answered it with the button in the voice panel, which cut off your reply';
+            this._turn.ctl.abort();
+        }
+        this._options.hush?.();
     }
 
     /** Starts the omp process for the current task ahead of the first turn, so proactive turns can happen. */
@@ -324,6 +374,7 @@ export class VoiceAgent {
             history: fresh ? { task, turns: worker.recentTurns(task.tabId, 3) } : undefined,
             requests,
             proposals: this._router.proposals(task.tabId),
+            settledProposals: this._router.takeSettled(task.tabId),
             pendingDelete: this._router.pendingDelete,
             research: context.research,
             editor: this._editorFor(context),
@@ -371,6 +422,7 @@ export class VoiceAgent {
             history: fresh ? { task, turns: worker.recentTurns(task.tabId, 3) } : undefined,
             requests: worker.pendingRequests(task.tabId),
             proposals: this._router.proposals(task.tabId),
+            settledProposals: this._router.takeSettled(task.tabId),
             pendingDelete: this._router.pendingDelete,
             research,
             editor: this._editorFor(context),
@@ -391,10 +443,11 @@ export class VoiceAgent {
         const cut = this._cutOff;
         this._cutOff = undefined;
         const effects = cut?.effects ? ` Tool calls from that reply still took effect: ${cut.effects}` : '';
+        const cause = cut?.cause ? `${cut.cause}. ` : '';
         if (heard) {
-            return heard + effects;
+            return cause + heard + effects;
         }
-        return cut && `A new message cut off your previous reply; the user saw only: "${cut.reply.trim()}".${effects}`;
+        return cut && `${cut.cause ?? 'A new message cut off your previous reply'}; the user saw only: "${cut.reply.trim()}".${effects}`;
     }
 
     /** The editor for this context's next message: in full only when it changed since the context last saw it. */
@@ -449,7 +502,9 @@ export class VoiceAgent {
         signal?: AbortSignal,
     ): Promise<VoiceTurnResult> {
         const ctl = new AbortController();
-        this._turn = { key, ctl };
+        const current: RunningTurn = { key, ctl, turn };
+        this._turn = current;
+        this._lastTurn = turn;
         const cutOff = () => ctl.abort();
         signal?.addEventListener('abort', cutOff, { once: true });
         /** What the user was shown: the reply without `<silent/>` and without anchors. */
@@ -509,7 +564,7 @@ export class VoiceAgent {
         // A cancelled run can settle while a tool call is still executing; it still takes effect.
         await Promise.all(executing);
         signal?.removeEventListener('abort', cutOff);
-        if (this._turn?.ctl === ctl) {
+        if (this._turn === current) {
             this._turn = undefined;
         }
         this._arbiter.turnEnded(Date.now());
@@ -522,7 +577,7 @@ export class VoiceAgent {
         const { silent } = gate;
         const interrupted = ctl.signal.aborted;
         if (interrupted) {
-            this._cutOff = { reply, effects: toolCalls.map((call) => `${call.name}: ${call.result.text}`).join(' ') };
+            this._cutOff = { reply, effects: toolCalls.map((call) => `${call.name}: ${call.result.text}`).join(' '), cause: current.cause };
         }
         const result: VoiceTurnResult = { reply, silent, toolCalls, lookups, interrupted, error: interrupted ? undefined : error };
         listener.onEnd?.(result);

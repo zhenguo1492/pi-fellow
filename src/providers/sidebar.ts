@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { PiRpcSessionManager } from '../pi/rpcSession';
 import type { PiChatSession } from '../pi/slashCommands';
@@ -16,11 +18,9 @@ import { FileEditorTracker, selectedLineRange } from '../utils/fileEditor';
 import {
     clearCliTargetCache,
     getAgentLayout,
-    getAvailableBackends,
     onDidChangeWindowBackend,
     resolveCliTarget,
     resolvePiWorkspaceCwd,
-    setWindowBackend,
 } from '../pi/piCliPaths';
 import { readFavoriteModels } from '../pi/favoriteModels';
 import type { AgentLayout } from '../pi/agentBackend';
@@ -31,14 +31,17 @@ import {
     buildSessionListRows,
     canonicalizeSessionPath,
     clearSessionInfoCache,
+    getSessionDirForCwd,
     getSessionDisplayTitle,
     invalidateSessionInfoPath,
     listPiSessionsForCwdAsync,
+    withVoiceSessions,
+    type VoiceSessionSummary,
 } from '../pi/sessionCatalog';
 import { appendSessionDisplayName, deleteSessionFile } from '../pi/sessionFileOps';
 import { DiffManager } from './diff';
 import { CheckpointManager } from './checkpoint';
-import type { StatusBarManager } from './status-bar';
+import type { ModelStatusTracker } from './model-status';
 import { openPlanDocument, type PlanDocumentProvider } from './plan-document';
 import { enrichPlanModeFromExtensionChrome } from '../pi/planModeState';
 import { mergePlanWithRpivTodos } from '../pi/planDocumentMerge';
@@ -68,6 +71,7 @@ import { VoiceInput } from '../voice/voiceInput';
 import { SettingsPanel } from './settings-panel';
 import { onVoiceReadinessChange, voiceReadiness } from '../voice/voiceSettings';
 import type {
+    VoiceHistory,
     WorkerAnswer,
     WorkerController,
     WorkerEvent,
@@ -79,7 +83,15 @@ import type {
     WorkerTurn,
 } from '../voiceAgent/workerController';
 import type { VoiceChatControls } from '../voiceAgent/voiceAgentCommands';
-import type { VoiceAgentAction, VoiceStatus } from '../shared/voiceViewProtocol';
+import {
+    VOICE_OFFLINE_SEND_HINT,
+    voiceIsOn,
+    type VoiceAgentAction,
+    type VoiceStatus,
+    type VoiceViewClientMessage,
+    type VoiceViewHostMessage,
+} from '../shared/voiceViewProtocol';
+import { routeComposerSend } from './composerRoute';
 import { VoiceOriginTracker } from './voiceOrigin';
 
 interface MessageMeta {
@@ -125,6 +137,8 @@ interface TabState {
     messageMeta: Map<number, MessageMeta>;
     voiceOrigins: VoiceOriginTracker;
     hasNotification: boolean;
+    /** The tab shows the Bot view (the voice agent's conversation) instead of its chat. */
+    botView: boolean;
     pendingApprovals: Map<string, PendingApproval>;
     queuedMessages: QueuedPrompt[];
     steeringMessages: string[];
@@ -177,6 +191,7 @@ function makeTabState(
         messageMeta: new Map(),
         voiceOrigins: new VoiceOriginTracker(),
         hasNotification: false,
+        botView: false,
         pendingApprovals: new Map(),
         queuedMessages: [],
         steeringMessages: [],
@@ -237,6 +252,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private readonly _voiceActions = new vscode.EventEmitter<VoiceAgentAction>();
     /** The robot status line, the composer mic and the composer ask the voice agent for something. */
     readonly onVoiceAction = this._voiceActions.event;
+    private readonly _voiceViewMessages = new vscode.EventEmitter<VoiceViewClientMessage>();
+    /** Card buttons and history in the Bot view a tab shows. */
+    readonly onDidReceiveVoiceMessage = this._voiceViewMessages.event;
+    private readonly _botViewVisibility = new vscode.EventEmitter<void>();
+    readonly onDidChangeBotViewVisibility = this._botViewVisibility.event;
+    /** `isBotViewVisible()` when last checked; a change fires `onDidChangeBotViewVisibility`. */
+    private _botViewShown = false;
     private _extensionUri: vscode.Uri;
     private _outputChannel: vscode.OutputChannel;
 
@@ -281,7 +303,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private _sessionListGeneration = 0;
     private _sessionPanelQuery = '';
     private _currentBackend: AgentBackend = 'pi';
-    private _statusBar?: StatusBarManager;
+    private _modelStatus?: ModelStatusTracker;
     /** All tabs show the CLI's TUI (one pseudo-terminal per tab) instead of the chat UI. */
     private _tuiMode = false;
     private readonly _tuiProcesses = new Map<string, TuiProcess>();
@@ -323,14 +345,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         planDocument: PlanDocumentProvider,
         pastedStorageDir: string,
         workspaceState: vscode.Memento,
-        statusBar?: StatusBarManager,
+        modelStatus?: ModelStatusTracker,
     ) {
         this._planDocument = planDocument;
         this._extensionUri = extensionUri;
         this._outputChannel = outputChannel;
         this._pastedStorageDir = pastedStorageDir;
         this._workspaceState = workspaceState;
-        this._statusBar = statusBar;
+        this._modelStatus = modelStatus;
+        modelStatus?.onDidChange((status) => this._post({ type: 'modelStatus', status }));
         this.voiceInput = new VoiceInput(extensionUri, (message) => this._post(message), outputChannel);
         onVoiceReadinessChange(() => {
             this.sendStateSync();
@@ -352,14 +375,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 this.postModelFooter();
             }
         });
-        onDidChangeWindowBackend((backend) => {
-            if (this._currentBackend !== backend) {
-                this._currentBackend = backend;
-                clearCliTargetCache();
-                this.invalidateSessionListCache();
-                this.sendStateSync();
-            }
-        });
+        // The settings panel is the only backend picker; it switches the window backend.
+        onDidChangeWindowBackend((backend) => void this._switchBackend(backend));
 
         const id = nextTabId();
         const tab = makeTabState(id, initialSession, initialDiffManager, initialCheckpointManager);
@@ -554,7 +571,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                         continue;
                     }
                     this._resetTabUiState(tab);
-                    const info = buildSessionInfoFromFile(sessionPath);
+                    await this._adoptVoiceTitle(tab);
+                    // Only talked to the voice agent: open on that conversation; any worker message keeps the worker's.
+                    tab.botView = tab.session.messages.length === 0 && this._voiceSessionFor(sessionPath) !== undefined;
+                    const info = this._sessionInfo(sessionPath);
                     tab.name = info
                         ? getSessionDisplayTitle(info)
                         : DEFAULT_CONVERSATION_TITLE;
@@ -654,15 +674,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             }
         }
 
-        webviewView.webview.onDidReceiveMessage((msg: ClientMessage) => {
+        webviewView.webview.onDidReceiveMessage((received: ClientMessage) => {
+            const route = routeComposerSend(
+                received,
+                this._showsBotView(),
+                voiceIsOn(this._voiceStatus),
+            );
+            if ('refuse' in route) {
+                this._post({ type: 'toast', message: route.refuse, variant: 'error' });
+                void this.pushStateSync();
+                return;
+            }
+            const msg = route.deliver;
             if (msg.type === 'voiceAgent') {
                 this._voiceActions.fire(msg.action);
+                return;
+            }
+            if (msg.type === 'voice') {
+                this._voiceViewMessages.fire(msg.message);
                 return;
             }
             this._handleMessage(msg);
         });
 
         webviewView.onDidChangeVisibility(() => {
+            this._syncBotViewVisibility();
             if (!webviewView.visible) return;
             this._view = webviewView;
             this._refreshVisibleWebview();
@@ -675,6 +711,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             // webview lifecycle. Clearing them here makes hidden conversations stop syncing.
             if (this._view === webviewView) {
                 this._view = undefined;
+                this._syncBotViewVisibility();
             }
         });
 
@@ -689,6 +726,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             void this.loadSessionListForPanel('');
         }
         this._postEditorContext();
+        if (this._modelStatus) {
+            this._post({ type: 'modelStatus', status: this._modelStatus.status });
+        }
         void this.pushStateSync().then(() => this.postModelFooter());
     }
 
@@ -1002,6 +1042,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             name: tab.name,
             backend: tab.session.backend,
             sessionFile: tab.session.session?.sessionFile,
+            sessionName: tab.session.session?.sessionName?.trim() || undefined,
             model: model && `${model.provider}/${model.id}`,
         };
     }
@@ -1029,6 +1070,65 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             }
         }
         return turns.slice(-count);
+    }
+
+    async nameTask(tabId: string, sessionFile: string, name: string): Promise<boolean> {
+        const tab = this._tabs.get(tabId);
+        const session = tab?.session.session;
+        // A TUI owns its tab's session file; the idle RPC session must not write to it.
+        if (
+            !tab ||
+            !session ||
+            this._tuiMode ||
+            session.sessionName?.trim() ||
+            canonicalizeSessionPath(session.sessionFile) !== canonicalizeSessionPath(sessionFile)
+        ) {
+            return false;
+        }
+        await tab.session.setSessionName(name);
+        invalidateSessionInfoPath(sessionFile);
+        if (this._updateTabName(tab)) {
+            await this.pushStateSync();
+        }
+        return true;
+    }
+
+    // ---- Voice conversations in the resume list ----
+
+    private _voiceHistory: VoiceHistory | undefined;
+
+    /** The voice transcript store: sessions the user only talked to the voice agent about get resumable. */
+    setVoiceHistory(history: VoiceHistory): void {
+        this._voiceHistory = history;
+    }
+
+    private _voiceSessionFor(sessionPath: string): VoiceSessionSummary | undefined {
+        const canon = canonicalizeSessionPath(sessionPath);
+        return this._voiceHistory?.voiceSessions().find((v) => canonicalizeSessionPath(v.sessionFile) === canon);
+    }
+
+    /** A session as the resume list shows it: its file's metadata with its voice conversation, or only the latter. */
+    private _sessionInfo(sessionPath: string): SessionInfo | null {
+        const info = buildSessionInfoFromFile(sessionPath);
+        const voice = this._voiceSessionFor(sessionPath);
+        return voice ? withVoiceSessions(info ? [info] : [], [voice], path.dirname(voice.sessionFile))[0] : info;
+    }
+
+    /**
+     * The worker forgot the name its voice conversation gave the session: pi writes nothing before the
+     * worker's first reply, so a voice-only session comes back unnamed.
+     */
+    private async _adoptVoiceTitle(tab: TabState): Promise<void> {
+        const session = tab.session.session;
+        const title = session?.sessionFile && !session.sessionName?.trim() ? this._voiceSessionFor(session.sessionFile)?.title : undefined;
+        if (!title) {
+            return;
+        }
+        try {
+            await tab.session.setSessionName(title);
+        } catch (err: unknown) {
+            this._outputChannel.appendLine(`Restoring the voice session name failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
     }
 
     async send(tabId: string, text: string, options: WorkerSendOptions): Promise<WorkerSendOutcome> {
@@ -1541,7 +1641,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         progress?: { loaded: number; total: number },
         error?: string,
     ): void {
-        const items = loading ? [] : buildSessionListRows(sessions, query, target.currentSessionPath);
+        const items = loading
+            ? []
+            : buildSessionListRows(
+                  withVoiceSessions(sessions, this._voiceHistory?.voiceSessions() ?? [], getSessionDirForCwd(target.cwd, target.layout)),
+                  query,
+                  target.currentSessionPath,
+              );
         this._post({
             type: 'sessionList',
             data: {
@@ -1600,7 +1706,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return;
         }
 
-        const { canonicalizeSessionPath, buildSessionInfoFromFile, getSessionDisplayTitle } = await import('../pi/sessionCatalog');
         const currentPath = tab.session.session?.sessionFile;
         if (
             currentPath &&
@@ -1611,9 +1716,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
 
         this.closeSessionPanel();
+        // Two worker processes must not hold one session: pi's first write of a new session file fails when it exists.
+        const holder = this._tuiMode
+            ? undefined
+            : [...this._tabs.values()].find(
+                  (other) => other !== tab && canonicalizeSessionPath(other.session.session?.sessionFile) === canonicalizeSessionPath(sessionPath),
+              );
+        if (holder) {
+            this._switchTab(holder.id);
+            return;
+        }
         this._post({ type: 'toast', message: 'Resuming session…', variant: 'info' });
 
-        const sessionInfo = buildSessionInfoFromFile(sessionPath);
+        const sessionInfo = this._sessionInfo(sessionPath);
         const targetBackend: AgentBackend =
             sessionPath.includes('/.omp/agent/') || sessionPath.includes('\\.omp\\agent\\')
                 ? 'omp'
@@ -1678,6 +1793,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 return;
             }
 
+            await this._adoptVoiceTitle(tab);
             this.invalidateSessionListCache();
             void this.warmSessionListCache();
             tab.diffManager.clearAll();
@@ -1753,6 +1869,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
 
         this.removeSessionFromListCache(sessionPath);
+        const voice = this._voiceSessionFor(sessionPath);
+        if (voice) {
+            this._voiceHistory?.forgetTask(voice.sessionFile);
+        }
         const msg = result.method === 'trash' ? 'Session moved to trash' : 'Session deleted';
         this._post({ type: 'toast', message: msg, variant: 'info' });
         await this.loadSessionListForPanel(this._sessionPanelQuery);
@@ -1775,6 +1895,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             !!currentPath &&
             canonicalizeSessionPath(currentPath) === canonicalizeSessionPath(sessionPath);
 
+        const voice = this._voiceSessionFor(sessionPath);
         try {
             if (isCurrent) {
                 await tab.session.setSessionName(trimmed);
@@ -1783,8 +1904,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 }
                 this._updateTabName(tab);
                 await this.pushStateSync();
-            } else {
+            } else if (!voice || fs.existsSync(sessionPath)) {
+                // A voice-only pi session has no file yet: its name lives with its voice conversation.
                 appendSessionDisplayName(sessionPath, trimmed);
+            }
+            if (voice) {
+                this._voiceHistory?.nameTask(voice.sessionFile, trimmed, 'user');
             }
             invalidateSessionInfoPath(sessionPath);
             this.invalidateSessionListCache();
@@ -1894,19 +2019,83 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             }
         }
         state.activeBackend = this._currentBackend;
-        state.availableBackends = getAvailableBackends();
         state.voiceReadiness = voiceReadiness();
         state.voice = this._voiceStatus;
         this._post({ type: 'stateSync', state });
-        this._statusBar?.setSession(tab.session);
+        this._modelStatus?.setSession(tab.session);
         this._schedulePersistOpenTabs();
         this._maybeDrainQueuedMessages(tab, true);
+        this._syncBotViewVisibility();
+        // Dictation types into the composer: it ends when the composer locks.
+        if (this._composerLocked() && this.voiceInput.isRecording) {
+            void this.voiceInput.toggle();
+        }
+    }
+
+    /** The active tab shows the Bot view (never in TUI mode). */
+    private _showsBotView(): boolean {
+        return !this._tuiMode && !!this._tabs.get(this._activeTabId)?.botView;
+    }
+
+    /** The Bot view with the voice agent offline: the composer takes no text, typed or dictated. */
+    private _composerLocked(): boolean {
+        return this._showsBotView() && !voiceIsOn(this._voiceStatus);
+    }
+
+    /** The mic button and Ctrl+Alt+M: no new dictation while the composer is locked; stopping always works. */
+    async toggleDictation(): Promise<void> {
+        if (!this.voiceInput.isRecording && this._composerLocked()) {
+            this._post({ type: 'toast', message: VOICE_OFFLINE_SEND_HINT, variant: 'error' });
+            return;
+        }
+        await this.voiceInput.toggle();
+    }
+
+    isBotViewVisible(): boolean {
+        return !!this._view?.visible && this._showsBotView();
+    }
+
+    postVoice(message: VoiceViewHostMessage): void {
+        this._post({ type: 'voice', message });
+    }
+
+    async showBotView(preserveFocus: boolean): Promise<void> {
+        const tab = this._activeTab;
+        if (tab && !tab.botView) {
+            tab.botView = true;
+            this.sendStateSync();
+        }
+        if (this._view) {
+            this._view.show(preserveFocus);
+        } else {
+            // Not resolved yet (never shown this window): focusing it resolves it.
+            await vscode.commands.executeCommand('oh-my-pi-chater.chat.focus');
+        }
+    }
+
+    private _toggleBotView(tabId: string): void {
+        const tab = this._tabs.get(tabId);
+        if (!tab) return;
+        tab.botView = !tab.botView;
+        if (tabId === this._activeTabId) {
+            this.sendStateSync();
+        } else {
+            this._switchTab(tabId);
+        }
+    }
+
+    private _syncBotViewVisibility(): void {
+        const shown = this.isBotViewVisible();
+        if (shown !== this._botViewShown) {
+            this._botViewShown = shown;
+            this._botViewVisibility.fire();
+        }
     }
 
     /** Voice mode owns the microphone while on or starting: stop dictation; the composer mic shows its level instead. */
     setVoiceStatus(status: VoiceStatus): void {
-        const wasOn = this._voiceStatus !== undefined && (this._voiceStatus.phase !== 'off' || this._voiceStatus.starting);
-        const on = status.phase !== 'off' || status.starting;
+        const wasOn = voiceIsOn(this._voiceStatus);
+        const on = voiceIsOn(status);
         this._voiceStatus = status;
         if (on !== wasOn) {
             void this.voiceInput.setBlocked(on);
@@ -2042,6 +2231,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             isActive: id === this._activeTabId,
             isStreaming: tab.isStreaming,
             hasNotification: tab.hasNotification,
+            botView: tab.botView,
         }));
     }
 
@@ -2302,6 +2492,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 case 'abort':
                     await this._abortActiveTab(tab);
                     break;
+                case 'selectModel':
+                    await vscode.commands.executeCommand('oh-my-pi-chater.selectModel');
+                    break;
                 case 'getModels':
                     this.postModelFooter(tab);
                     break;
@@ -2442,7 +2635,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'toggleDictation':
-                    await this.voiceInput.toggle();
+                    await this.toggleDictation();
                     break;
                 case 'readImageFile': {
                     const { readFile } = await import('node:fs/promises');
@@ -2592,14 +2785,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 case 'createTab':
                     await this._createTab(msg.backend);
                     break;
-                case 'setBackend':
-                    await this._handleSetBackend(msg.backend);
-                    break;
                 case 'closeTab':
                     await this._closeTab(msg.tabId);
                     break;
                 case 'switchTab':
                     this._switchTab(msg.tabId);
+                    break;
+                case 'toggleBotView':
+                    this._toggleBotView(msg.tabId ?? this._activeTabId);
                     break;
                 case 'openSettings':
                     if (msg.section) {
@@ -2713,11 +2906,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
     }
 
-    private async _handleSetBackend(backend: AgentBackend): Promise<void> {
-        if (this._currentBackend === backend) {
-            this.sendStateSync();
-            return;
-        }
+    private async _switchBackend(backend: AgentBackend): Promise<void> {
+        if (this._currentBackend === backend) return;
 
         this._currentBackend = backend;
         clearCliTargetCache();
@@ -2728,8 +2918,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             void old.session.dispose();
         }
         this._schedulePrewarmSession(500);
-
-        setWindowBackend(backend);
 
         this.invalidateSessionListCache();
 
@@ -2748,7 +2936,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         await this.pushStateSync();
         this.postModelFooter();
         if (this._activeTab) {
-            this._statusBar?.setSession(this._activeTab.session);
+            this._modelStatus?.setSession(this._activeTab.session);
         }
 
         if (this._tuiMode) {
@@ -2757,8 +2945,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 await this._startTui(tab.id, 80, 24);
             }
         }
-
-        this._post({ type: 'toast', message: `Switched to ${backend} workspace`, variant: 'info' });
     }
 
     private async _createTab(preferredBackend?: AgentBackend): Promise<void> {
@@ -2795,7 +2981,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
         this.sendStateSync();
         this.postModelFooter(tab);
-        this._statusBar?.setSession(tab.session);
+        this._modelStatus?.setSession(tab.session);
     }
 
     /** omp only logs in from its TUI: show a chat banner that switches there and runs the command. */
@@ -3000,6 +3186,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         const xtermStyleUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'out', 'webview', 'styles', 'xterm.css')
         );
+        const voiceStyleUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, 'out', 'webview', 'styles', 'voice.css')
+        );
         const iconsUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'media', 'icons')
         );
@@ -3014,6 +3203,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
           content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} data: blob:; script-src 'nonce-${nonce}';">
     <link rel="stylesheet" href="${styleUri}">
     <link rel="stylesheet" href="${xtermStyleUri}">
+    <link rel="stylesheet" href="${voiceStyleUri}">
     <title>Oh My Pi Chater</title>
 </head>
 <body>

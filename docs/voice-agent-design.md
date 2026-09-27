@@ -30,7 +30,8 @@
 ### 1.2 非目标（首版）
 
 - worker 不直接发声。
-- 在委派模式（默认）下，语音智能体不直接修改文件，所有写操作都经 worker 执行。例外是结对模式：用户明确要求并确认后，它自己改文件、在终端里跑命令，这时不再指挥 worker。见 `voice-pair-agent-cursor.md` §11。界面上两个模式叫“委派”和“结对”（英文界面 Delegate / Pair）；代码、设置、`set_mode` 工具参数和每轮的 `<mode name="…"/>` 里仍是 `omp` / `pair`，不改，免得打断已保存的状态和语音模型的工具调用。
+- 结对模式是默认模式：语音智能体自己改文件、在终端里跑命令，不指挥 worker。委派模式下，它不直接修改文件，所有写操作都经 worker 执行。见 `voice-pair-agent-cursor.md` §11。界面上两个模式叫“委派”和“结对”（英文界面 Delegate / Pair）；代码、设置、`set_mode` 工具参数和每轮的 `<mode name="…"/>` 里仍是 `omp` / `pair`，不改，免得打断已保存的状态和语音模型的工具调用。
+- 模式按任务选（`hostTools.ts` 的 `set_mode`）：在结对模式里，用户交代一件事时语音智能体先判断轻重。小而快的改动（一个函数或几块代码，一两个文件）它当场自己做；重活（改很多文件、大重构、长时间跑测试、适合多个子智能体并行的事）它自己切到委派（`set_mode` 带 `auto=true`），简短说一句，把任务交给 worker（worker 可以自己开子智能体），做完再切回结对。切到委派总是立即生效。切回结对通常要用户在之后一轮里确认（两次调用）；唯一例外是语音智能体自己从结对切到委派的那一次，活干完后它可以直接切回结对，不用确认。这个“自己切走的”标记在用户用界面切换模式、或切回结对时清除；用户要求（口头或界面）切到委派的，切回结对仍要确认。
 - 不做远程通话（WebRTC/电话）；只支持本机麦克风和扬声器。
 - 首版不做回声消除（AEC），见 §12。
 
@@ -64,7 +65,15 @@ omp --mode rpc --no-tools --no-skills --no-rules --no-extensions --no-lsp \
 - 语音智能体的 LLM **直接复用 omp 的登录凭据、provider 和模型体系**，扩展不需要自己实现 LLM 客户端。
 - `--no-tools` 不影响 host tools 的注册与调用。
 - 流式文本来自 `message_update.assistantMessageEvent.text_delta`，一轮结束以 `agent_end` 为准。
-- host tools 属于 omp 的 RPC 扩展，pi 的 RPC 没有（见 omp `rpc.md`「Pi-family adapter」一节）。因此**语音智能体进程始终用 omp**；worker 可以是 omp，也可以是 pi。
+- host tools 属于 omp 的 RPC 扩展，pi 的 RPC 没有（见 omp `rpc.md`「Pi-family adapter」一节）。最初因此语音智能体进程始终用 omp。
+- **2026-09-26 起 pi 也可以**：语音进程跟随当前后端。后端是 pi 时，`PiRpcBridge` 用 `--extension` 加载扩展自带的 Pi 扩展（`src/piExtension/hostTools.ts`，打包为 `out/pi-extension/hostTools.js`，用户不用装任何东西），模拟 host tools，协议见 `src/pi/hostToolsProtocol.ts`：
+  - 工具定义写进临时 JSON 文件，路径经环境变量传给 Pi 扩展；扩展加载时注册，所以 `new_session` / `switch_session` 重建扩展运行时后工具仍在。之后改工具集时重写文件，再发 `/vscode-host-tools` 让它重读（先用 `get_commands` 确认命令存在，免得这行字当成 prompt 发给模型）。
+  - 工具调用 = 标题为 `vscode-host-tool-call` 的 `input` 对话框，参数在 `placeholder` 里；bridge 把它翻译成 `host_tool_call`，`host_tool_result` 则翻译成 `extension_ui_response`。取消 = 键为 `vscode-host-tool-cancel` 的 `setStatus`，翻译成 `host_tool_cancel`。这些帧不会到达 `RpcExtensionUiHandler`。
+  - pi 的 `--tools` 白名单同时过滤扩展工具，所以语音进程的白名单要带上宿主工具名；只读内置工具是 `read,grep,find`（pi 没有 `glob`，`--append-system-prompt` 告诉模型 find 就是 glob）。pi 的 `agent_end` 之后还可能重试，一轮以 `agent_settled` 结束。
+  - pi 的语音进程和 research **不加 `--no-extensions`**（omp 照旧加）：pi 的模型 provider 可以来自 pi 包（如 `pi-provider-antigravity`），不加载扩展时 `--model antigravity/…` 直接以 "Model not found" 退出，语音一句话都答不了（2026-09-26 实测）。用户扩展的工具仍被 `--tools` 白名单挡在外面，它们弹出的阻塞对话框由 VoiceLlm 自动取消。
+  - pi 上另加 `--no-context-files`，相当于 omp 的 `--no-rules`：`AGENTS.md` / `CLAUDE.md` 是给写代码的智能体的指令，语音智能体读到会照做并念出来（2026-09-26 实测：用户 `~/AGENTS.md` 的英文纠错规则让每句英文回复都以 `[英文没问题]` 开头）。
+  - 一轮跑不起来时（语音进程启动失败、没有会话 tab 等），`VoiceAgent.say` 不抛错，而是用带 `error` 的结果走 `onEnd`：Bot 视图里这条回复显示 ⚠ 错误，不会一直停在“…”。
+  - 实测（2026-09-26，pi 0.87.1，`openai-codex/gpt-5.5`）：宿主工具调用、错误结果、`new_session` 与 `switch_session` 之后再调用、打断时 `host_tool_cancel` 都正常；普通会话（不带 hostTools 选项）不加载该扩展。
 
 ### 2.2 `omp say`：不能直接作为中文实时 TTS
 
@@ -503,8 +512,8 @@ interface WorkerController {
 | `stop_worker` | — | worker `abort` | "已叫停" |
 | `answer_worker` | `requestId`、`answer` | 回答 worker 的 `extension_ui_request`（select / confirm / input / editor），omp 的工具审批也在其中（§2.4） | "已回复" / "该请求已被回答或已超时" |
 | `worker_status` | — | worker 状态 + 当前 digest | 状态摘要文本 |
-| `research` | `question` | 后台起一次性 omp（`omp -p`，只开 read、grep、glob，不保存会话，最长 5 分钟），同时最多 3 个；问题从 stdin 传入。实现：`research.ts` | "已在后台开始 r1"。之后每轮附 `<research status="running">`；做完后附一次 `<research-result>`（总结不超过 250 词），语音输出面板同时提示"r1 完成，问一下就能听到结果" |
-| `read` / `grep` / `glob` | — | omp 内置只读工具（§5.4），不经过 HostToolRouter | 文件内容 / 匹配 / 路径 |
+| `research` | `question` | 后台起一次性只读进程（当前后端：`omp -p` 只开 read、grep、glob；`pi -p` 只开 read、grep、find、ls，超时由扩展杀进程），不保存会话，最长 5 分钟，同时最多 3 个；问题从 stdin 传入。实现：`research.ts` | "已在后台开始 r1"。之后每轮附 `<research status="running">`；做完后附一次 `<research-result>`（总结不超过 250 词），语音输出面板同时提示"r1 完成，问一下就能听到结果" |
+| `read` / `grep` / `glob`（pi 上是 `find`） | — | 后端内置只读工具（§5.4），不经过 HostToolRouter | 文件内容 / 匹配 / 路径 |
 | `worker_transcript` | `turn?`（默认最近一轮）、`detail?: 'summary' \| 'full'` | 取 worker 某一轮的用户指令、工具调用和最终回复，按 `detail` 截断 | 该轮记录。**未实现**：目前由 `worker_status` 返回最近两轮的指令和结论 |
 | `worker_diff` | `path?` | 本 tab `diffManager` 记录的改动统计；指定 `path` 时返回该文件 diff（截断） | diff 文本。**未实现** |
 | `diagnostics` | `path?` | VS Code `languages.getDiagnostics`，默认取当前文件 | 错误/警告列表 |
@@ -525,7 +534,8 @@ interface WorkerController {
 1. `tell_worker` 的路由结果是"新任务"、不是只读、并且需要确认时，宿主不发送，而是保存提案 `{proposalId, instruction, turnId}`，在面板上显示待确认卡片，工具返回"需用户确认，提案 p3"。
 2. 模型口头复述计划并询问。
 3. 只有在提案之后**出现过新的用户轮次**时，`confirm_task(p3)` 才会成功（宿主比较 turnId）。"用户确实回应过"由结构保证；"回应算不算同意"由模型判断。
-4. 出现新的提案，或者切换了语音上下文，旧提案作废。面板卡片上的"派出"按钮等价于 `confirm_task`。
+4. 出现新的提案，或者切换了语音上下文，旧提案作废。面板卡片上的"派出"按钮等价于 `confirm_task`，"取消"按钮作废提案。
+5. 用按钮确认或取消后，模型下一轮（用户轮次或主动轮次）的消息里带 `<proposal-settled id="p3" outcome="confirmed|cancelled|failed">`，每条只出现一次，模型据此不再追问。如果提出该提案的回复就是最新一轮，还在生成或播放，就把它打断（语音模式下同时 hush），`<interrupted>` 说明是按钮打断的。之后再对该提案调用 `confirm_task`：已派出时返回非错误的"用户已用按钮派出，不要再问"，已取消时返回错误并说明已被取消（2026-09-26 用户反馈：按钮确认后模型仍会再问一次）。
 
 `confirmBeforeDispatch = false` 时，新任务直接派出。插话、排队、叫停不需要确认：它们只在 worker 忙时发生，本身就是用户的即时指令。
 
@@ -664,8 +674,9 @@ maybeProactive():
 
 1. 身份：你是用户的语音结对搭档，旁边有一个程序员智能体（worker）负责动手。
 2. 输出适合朗读：短句、口语；不输出代码块、Markdown、URL、长列表；数字和路径用口语化表达（"stt 点 ts"）。
+   语言：用用户最近一句话（`<user>`）的语言回答。用户换了语言（比如从中文换成英文），就跟着换，并一直用新语言，直到用户再换。只有用户自己的话算数：没人说话的轮次（`<worker-update>`）、调研结果、worker 的英文汇报和工具结果都不改变语言，继续用用户上一次的语言。很短或含糊的一句（比如语音识别可能把一个词错转成另一种语言）不单独触发切换，以用户明确在说的语言为准。
 3. 默认一到三句话，除非用户要求详细讲解。
-4. 分工：需要改代码、跑命令时交给 worker；讨论、解释、评审自己来，需要时用 `read` / `grep` / `glob` 查看代码；重型调研先征得同意再交给 worker（§7.4）。
+4. 分工：默认在结对模式里自己动手；每个任务先判断轻重，小改动自己做，重活自己切到委派（`set_mode auto=true`）交给 worker，做完切回结对（§1.2）。讨论、解释、评审自己来，需要时用 `read` / `grep` / `glob` 查看代码；重型调研先征得同意再交给 worker（§7.4）。
 5. 派活：用 `tell_worker` 把用户意图改写成清楚、可验证的 worker 指令，包括范围和验收方式；worker 忙时按用户的意思选择 `when`（马上插话，还是做完再做）；需要确认时先复述计划，用户回应后再 `confirm_task`（§6）。
 6. 播报：收到 `<worker-update>` 时，只说用户关心的部分；不值得说就回复 `<silent/>`。
 7. 被打断：遵循 `<interrupted>` 提示，不要假设用户听到了没念出的内容。
@@ -718,26 +729,26 @@ stateDiagram-v2
 
 设计稿：[`mockups/voice-panel.html`](./mockups/voice-panel.html)（早先的独立视图方案；现在的布局见 §11.1）。
 
-### 11.1 放在哪里：输入框里的控制，底部面板的 Bot 视图（2026-09-26 改）
+### 11.1 放在哪里：输入框里的控制，会话 tab 里的 Bot 视图（2026-09-26 改）
 
-之前的方案（2026-09-25）是：状态栏右下的 `$(mic) Voice` 项加一个 ▴ 开关，面板盖在会话输入框的位置上，或者移到底部面板。现在改成：
+之前的方案（2026-09-25）是：状态栏右下的 `$(mic) Voice` 项加一个 ▴ 开关，面板盖在会话输入框的位置上，或者移到底部面板。后来一度放在底部面板的 Bot 标签里（同日删除）。现在改成：
 
 | 位置 | 内容 |
 |---|---|
-| 输入框顶部的机器人工具条（`src/webview/voiceBar.ts`） | 输入框卡片的头部：在最上面，横跨整个卡片，带浅底色和分隔线，文件上下文、附件、编辑横幅都排在它下面；在线时底色和分隔线带状态色。语音智能体离线时只有机器人按钮和 “Voice agent” 字样，点机器人上线。离线且 STT 或 TTS 没通过检查（`GET {base}/models` 返回 200；TTS 还要求列表里有请求会用的模型）时机器人是红底，悬停显示每个服务不能用的原因，点击打开 Settings → Voice。在线时机器人和状态文字按状态着色：Listening / Hearing you / Transcribing（蓝）、Thinking（黄）、Synthesizing（语音橙）、Speaking（绿）、Standby（灰），启动中显示 “Starting…”。静音不算一种状态：机器人保持在线的颜色，旁边多一个灰色的 “Muted” 标签；静音且空闲时状态文字是 “Online”，静音时机器人照样会显示 Thinking、Speaking。点机器人下线。右边依次是模式按钮（委派模式显示委派图标：人把活交给 worker；结对模式显示握手图标，两个图标同色同大小；点击切换）、停止发言按钮（只在合成中和说话时出现）、打开 Bot 视图的按钮 |
-| 输入框里的麦克风（`src/webview/dictation.ts`） | 离线时是听写：说话转成文字插入输入框，和以前一样；STT 没通过检查时是红底，悬停显示原因，点击提示原因并打开 Settings → Voice。在线时语音智能体占着麦克风，按钮显示麦克风的输入电平（5 根条，规则同听写），点击静音或取消静音（Ctrl+Alt+M 同样）；静音时显示带斜线的麦克风、不显示电平条；启动中和待命时置灰 |
-| 输入框 | 在线时默认发给语音智能体，占位文字变成 “Talk to the voice agent…”，效果和说话一样（会打断正在播的回复），记录只进 Bot 视图，不进会话。页脚右侧有 “To worker” 勾选框，勾上就发给 omp worker；每次上线重置为不勾。斜杠命令和带附件的消息始终发给 omp。发给语音智能体时，Ctrl+Enter 插队按钮隐藏，发送按钮也不会打断 omp |
-| 底部面板的 **Bot** 标签（`VoicePanelView`，前端 `src/webview/voiceView.ts` + `voicePanel.ts`） | 一直在，和 Terminal、Output 同一排。只显示，不能输入：上面是引擎和 token 用量，下面是卡片和对话记录（§11.2）。标题栏有历史按钮 |
+| 输入框顶部的机器人工具条（`src/webview/voiceBar.ts`） | 输入框卡片的头部：在最上面，横跨整个卡片，带浅底色和分隔线，文件上下文、附件、编辑横幅都排在它下面；在线时底色和分隔线带状态色。语音智能体离线时只有机器人按钮和 “Voice agent” 字样，机器人和旁边的状态文字是同一个按钮：离线时点它上线，在线时点它下线（启动中不响应）；工具条其余空白处不响应点击。离线且 STT 或 TTS 没通过检查（`GET {base}/models` 返回 200；TTS 还要求列表里有请求会用的模型）时机器人是红底，悬停显示每个服务不能用的原因，点击打开 Settings → Voice。在线时机器人和状态文字按状态着色：Listening / Hearing you / Transcribing（蓝）、Thinking（黄）、Synthesizing（语音橙）、Speaking（绿）、Standby（灰），启动中显示 “Starting…”。静音不算一种状态：机器人保持在线的颜色，旁边多一个灰色的 “Muted” 标签；静音且空闲时状态文字是 “Online”，静音时机器人照样会显示 Thinking、Speaking。点机器人下线。右边依次是模式按钮（委派模式显示委派图标：人把活交给 worker；结对模式显示握手图标，两个图标同色同大小；点击切换）、停止发言按钮（只在合成中和说话时出现）、日志按钮（把当前 tab 的正文在 worker 会话和语音智能体的对话之间切换，和 tab 图标同一个开关；显示 Bot 视图时变成橙色的聊天气泡，点它回到 worker 会话） |
+| 输入框里的麦克风（`src/webview/dictation.ts`） | 离线时是听写：说话转成文字插入输入框，和以前一样；STT 没通过检查时是红底，悬停显示原因，点击提示原因并打开 Settings → Voice。在线时语音智能体占着麦克风，按钮显示麦克风的输入电平（5 根条，规则同听写），点击静音或取消静音（Ctrl+Alt+M 同样）；静音时显示带斜线的麦克风、不显示电平条；启动中和待命时置灰。Bot 视图且语音智能体离线时（输入框锁定）麦克风也禁用，Ctrl+Alt+M 不开始听写；正在听写时切过去会自动停止 |
+| 输入框 | 发给哪边由当前 tab 显示的视图决定：显示会话时发给 omp worker；显示 Bot 视图时发给语音智能体，占位文字是 “Talk to the voice agent…”，效果和说话一样（会打断正在播的回复），记录只进 Bot 视图，不进会话。Bot 视图里只发文字：附件按钮置灰、不粘贴图片、不弹斜杠菜单，Ctrl+Enter 插队按钮隐藏，发送按钮不会打断 omp（输入框为空且 worker 在跑时仍是停止按钮）。语音智能体不在线时 Bot 视图的输入框置灰禁用，占位文字 “The voice agent must be online to send messages”；上线或切回会话后自动恢复。扩展端同样按 `TabState.botView` 路由（`SidebarProvider._routeComposerSend`），离线时拒收 |
+| 会话 tab 的 **Bot** 视图（前端 `src/webview/voicePanel.ts`，挂在 `main.ts` 的 `.bot-host` 里） | tab 标题左边的图标是按钮：聊天气泡 = 显示会话，点一下变成（语音橙的）机器人，tab 正文从会话记录换成 Bot 视图，再点换回来。每个 tab 各自记住（`TabState.botView`，经 `TabInfo.botView` 同步），点没激活 tab 的图标会同时切过去；机器人工具条上的日志按钮切换当前 tab。`botView` 不存盘：重启后恢复的 tab 若只有语音对话、没有 worker 消息就打开 Bot 视图，否则显示会话。只显示：上面是引擎和 token 用量，摘要行右边是历史按钮，下面是卡片和对话记录（§11.2） |
 
 实现要点：
 
 - 状态栏项、`media/voice-level.ttf` 图标字体和生成它的脚本、播放电平都删掉了。原先会话 webview 里的面板位置（`VoicePanelPlace`、`move` / `hide` 消息、拖动调高度、`voicePanelInBottom` / `voiceViewVisible` 上下文键）也删了。
-- 宿主：`registerVoiceAgentCommands` 通过 `VoiceChatControls`（`SidebarProvider` 实现）和会话通信：`setVoiceStatus({ phase, starting, muted, mode })` 发 `voiceStatus` 消息，并放进 stateSync 的 `voice` 字段，供 webview 重载时恢复；`postVoiceLevel` 发 `voiceLevel`（电平 0..1，加上这段声音的波形点：每 64 ms 96 个、-1..1，按桶取离零最远的采样；麦克风和机器人一样；状态条按每毫秒 1.5 个点滚动画出真实波形，收不到波形点时退回按电平画的正弦）；会话发回来的 `voiceAgent` 消息（`start`、`stop`、`mute`、`hush`、`mode`、`showPanel`、`send`）经 `onVoiceAction` 处理。语音模式开着或正在启动时，`SidebarProvider` 暂停听写（`voiceInput.setBlocked`）。
-- `VoicePanel`（`src/voiceAgent/voicePanel.ts`）只剩 Bot 视图一个位置。视图显示时发快照（隐藏的 webview 会丢消息），消息只有 `ready` 和卡片按钮的 `proposal`。命令：`oh-my-pi-chater.voiceView.show`（打开 Bot 视图）、`history`、`state`（脚本读快照）。
+- 宿主：`registerVoiceAgentCommands` 通过 `VoiceChatControls`（`SidebarProvider` 实现）和会话通信：`setVoiceStatus({ phase, starting, muted, mode })` 发 `voiceStatus` 消息，并放进 stateSync 的 `voice` 字段，供 webview 重载时恢复；`postVoiceLevel` 发 `voiceLevel`（电平 0..1，加上这段声音的波形点：每 64 ms 96 个、-1..1，按桶取离零最远的采样；麦克风和机器人一样；状态条按每毫秒 1.5 个点滚动画出真实波形，收不到波形点时退回按电平画的正弦）；会话发回来的 `voiceAgent` 消息（`start`、`stop`、`mute`、`hush`、`mode`、`send`）经 `onVoiceAction` 处理。语音模式开着或正在启动时，`SidebarProvider` 暂停听写（`voiceInput.setBlocked`）。
+- `VoicePanel`（`src/voiceAgent/voicePanel.ts`）画在 `BotViewSurface` 上（`VoiceChatControls` 继承它，`SidebarProvider` 实现）：侧边栏可见、不在 TUI 模式、当前 tab 开着 Bot 视图时才算可见，可见性变化（切 tab、切换、侧边栏显示/隐藏）时发快照（隐藏的 webview 会丢消息）。视图的消息只有 `ready`、卡片按钮的 `proposal` 和历史按钮的 `history`。命令：`oh-my-pi-chater.voiceView.show`（在当前 tab 打开 Bot 视图并显示侧边栏）、`history`、`state`（脚本读快照）。
 - 对话用 VS Code 界面字号（`--vscode-font-size`，和会话消息差不多），行高 1.6；标签、提示、工具标签小 1.5px。每句话单独一行：左边一条颜色竖线和角色标签（你 = 蓝紫、语音 = 橙、主动汇报 = 黄、系统 = 灰），正文也按说话人上色，不用底色区分；深色主题用浅色字，浅色主题用深色字（`voice.css` 按 `body.vscode-light` / 高对比度各给一组）。时间放在标签的悬停提示里。
 - 卡片区只留“待确认的任务”和“后台研究”，各占一行；worker 卡片和 worker 的请求不重复显示，会话本身就有。
 - Bot 视图顶边有一条状态色细线，思考、合成、说话时流动。
-- 视图用 `retainContextWhenHidden`，切走后记录和朗读进度不丢。按宽度（container query）收掉次要内容：≤360px 卡片不显示标题，≤260px 角色标签和正文改成上下排。
+- Bot 视图的节点在 `render()` 重建的骨架之外（同 TUI 终端），切 tab 时记录、滚动位置和展开状态不丢；会话 webview 用 `retainContextWhenHidden`。按宽度（container query）收掉次要内容：≤360px 卡片不显示标题，≤260px 角色标签和正文改成上下排。
 
 ### 11.2 Bot 视图内容
 
@@ -775,6 +786,8 @@ stateDiagram-v2
 - 没有一条内容的对话记录（加载了语音上下文，主动播报最后又没说话）在语音模式关闭时丢弃，它的语音会话文件随后删除。
 - 按工作区存入 `workspaceState`，保留最近 `historySessions` 次语音会话，每次记录都有条数上限。Bot 视图标题栏的“历史”按钮可以切换查看过去的会话，当前任务的排在前面。
 - **续聊与只读回看**：每个任务最近一次对话在语音智能体重新启动后自动续上（§5.12 规则 2），记录接着往下写；更早的对话只读，不恢复语音上下文。
+- **只跟语音智能体说过话的会话（2026-09-27）**：worker 在 tab 建立时就报告会话文件路径，所以对话记录一开始就挂在会话文件上，关掉 tab、重启扩展后仍然对得上。但 worker 没有消息时 pi 不写会话文件（omp 只写文件头），聊天侧栏的恢复列表因此把有语音对话记录的会话也算作有内容：列表合并 `VoiceTranscriptStore.voiceSessions()`，磁盘上没有文件的直接补一行，标题用语音对话起的名字，没有名字时用用户说的第一句，元信息显示语音轮数。恢复时照常 `switch_session` 到那个路径（pi 和 omp 都保留显式路径），Bot 视图随之接上原来的语音记录；会话没有名字时把语音对话起的名字交给 worker（`set_session_name`）。在列表里删除会话时一并删掉它的语音对话记录；重命名没有文件的会话时只改语音对话记录上的名字。别的 tab 正开着的会话，恢复时切到那个 tab，避免两个 worker 进程同时持有一个会话文件。
+- **自动起名**：一个会话的语音对话里用户说到第 `TITLE_AFTER_TURNS`（2）句、而 worker 会话还没有名字（用户起的，或 omp 自己生成的标题）时，用语音智能体的模型跑一次无工具的 `-p`，按用户说的语言起一个 2～6 个词的标题；模型失败就用用户说的第一句截短。名字记在对话记录上（`named: 'auto' | 'user'`，之后的对话继承它），同时通过 `WorkerController.nameTask` 设为 worker 会话名；自动起的名字不会覆盖用户起的。
 - 快捷键：Ctrl+Alt+M 在语音模式下静音 / 取消静音（关着时是听写）。
 
 ## 12. 延迟预算（估算，尚未整体实测）
@@ -795,7 +808,7 @@ stateDiagram-v2
 | R2 | `omp say` 没有中文音色、不能流式输出 | 中 | 默认使用 OpenAI 兼容 TTS；`omp say` 作为可选后端。待验证：omp 的 `modelRoles.speech`（云端 Kokoro）能否被外部复用 |
 | R3 | 被打断后，omp 上下文里保留了未念出的文字 | 中 | 用 `<interrupted>` 补偿（§5.4） |
 | R4 | 两个 omp 进程共享同一账号的额度 | 低–中 | 语音轮次短；可以配置更便宜的模型 |
-| R5 | pi 用户没有 omp | 中 | 语音模式要求安装 omp；检测不到 omp 时给出明确提示 |
+| R5 | pi 用户没有 omp | 中 | **已解决（2026-09-26）**：语音进程跟随当前后端，pi 上由扩展自带的 Pi 扩展模拟 host tools（§2.1） |
 | R6 | STT 转写错误导致派错活 | 中 | 默认派活前确认（§6） |
 | R7 | worker 触发的 `extension_ui_request` 有超时 | 中 | 转述时说明时限；超时后告知用户"已按默认处理" |
 | R8 | 录音进程冲突（听写与语音模式） | 低 | **已解决（2026-09-25）**：语音模式开着时听写停用，麦克风按钮隐藏，见 §5.1 |

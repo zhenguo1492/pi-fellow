@@ -1,8 +1,8 @@
 /**
- * Messages between the extension and the Bot view in VS Code's bottom panel
- * (docs/voice-agent-design.md §11), wrapped in `{ type: 'voice', message }`. The host sends whole
- * snapshots; the view renders them. The chat's own voice controls (robot status line, composer
- * mic) use `VoiceStatus` from the chat protocol instead.
+ * Messages between the extension and the Bot view, which a chat tab shows in place of its
+ * conversation (docs/voice-agent-design.md §11), wrapped in `{ type: 'voice', message }`. The host
+ * sends whole snapshots; the view renders them. The chat's own voice controls (robot status line,
+ * composer mic) use `VoiceStatus` from the chat protocol instead.
  */
 
 /**
@@ -33,6 +33,16 @@ export interface VoiceStatus {
 /** What the UI calls each mode. The values stay `omp` / `pair`: the voice model's set_mode tool and saved state use them. */
 export const VOICE_MODE_LABEL: Record<VoiceStatus['mode'], string> = { omp: 'Delegate', pair: 'Pair' };
 
+/** Voice mode is on or starting: the composer's text can go to the voice agent. */
+export function voiceIsOn(status: VoiceStatus | undefined): boolean {
+    return status !== undefined && (status.phase !== 'off' || status.starting);
+}
+
+/** The Bot view with the voice agent offline: the composer is locked, and its placeholder says why. */
+export const VOICE_OFFLINE_SEND_HINT = 'The voice agent must be online to send messages';
+export const VOICE_OFFLINE_SEND_TITLE =
+    'The voice agent must be online to send messages here: start it with the robot above, or go back to the worker conversation.';
+
 /** A request from the chat's voice controls to the voice agent. */
 export type VoiceAgentAction =
     | { type: 'start' }
@@ -40,7 +50,6 @@ export type VoiceAgentAction =
     | { type: 'mute'; muted: boolean }
     | { type: 'hush' }
     | { type: 'mode'; mode: 'omp' | 'pair' }
-    | { type: 'showPanel' }
     /** Typed in the composer for the voice agent: goes in like speech. */
     | { type: 'send'; text: string };
 
@@ -84,8 +93,6 @@ export type VoiceObservationKind = 'needs_input' | 'error' | 'done' | 'research'
 export interface VoiceSentence {
     text: string;
     state: 'pending' | 'playing' | 'played' | 'cut';
-    /** While playing: when its audio started (epoch ms) and how long it is, for the spoken-word highlight. */
-    playback?: { at: number; durationMs: number };
 }
 
 export interface VoiceToolEntry {
@@ -121,7 +128,7 @@ export type VoiceEntry =
           /** Voice mode only: the reply as it went to TTS, with playback state. Absent for typed-only turns. */
           sentences?: VoiceSentence[];
           tools: VoiceToolEntry[];
-          /** The agent's own reads (read, grep, glob), described. */
+          /** The agent's own lookups (read, grep, glob, web_search), described. */
           lookups: string[];
           done: boolean;
           interrupted?: boolean;
@@ -214,5 +221,9 @@ export interface VoiceViewState {
 
 export type VoiceViewHostMessage = { type: 'state'; state: VoiceViewState };
 
-export type VoiceViewClientMessage = { type: 'ready' } | { type: 'proposal'; id: string; action: 'confirm' | 'cancel' };
+export type VoiceViewClientMessage =
+    | { type: 'ready' }
+    | { type: 'proposal'; id: string; action: 'confirm' | 'cancel' }
+    /** The history button: pick a past voice session to read. */
+    | { type: 'history' };
 

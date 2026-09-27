@@ -47,7 +47,10 @@ export type RpcCommand =
     | { id?: string; type: 'negotiate_protocol'; protocolVersion: 2 }
     | { id?: string; type: 'set_host_tools'; tools: RpcHostToolDefinition[] };
 
-/** omp only: a tool the host executes; omp calls it back with `host_tool_call` (omp docs rpc.md). */
+/**
+ * A tool the host executes; the agent calls it back with `host_tool_call` (omp docs rpc.md). omp
+ * RPC has it natively; pi through the bundled extension (PiRpcBridge.setHostTools).
+ */
 export interface RpcHostToolDefinition {
     name: string;
     label?: string;

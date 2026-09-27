@@ -13,10 +13,10 @@ import { PiRpcSessionManager, createPiChatSession } from './pi/rpcSession';
 import type { PiChatSession } from './pi/slashCommands';
 import type { TuiAuthCommand } from './shared/protocol';
 import { SidebarProvider } from './providers/sidebar';
-import { StatusBarManager } from './providers/status-bar';
+import { ModelStatusTracker } from './providers/model-status';
 import { SettingsPanel } from './providers/settings-panel';
 import { clearExtensionApiKeySecrets, getPiAgentDir, isSyncWithPiCli } from './pi/piCliSync';
-import { verifyPiCliAvailable, resolvePiCliInvocation, initWindowBackend } from './pi/piCliPaths';
+import { verifyPiCliAvailable, resolvePiCliInvocation, initWindowBackend, getAvailableBackends } from './pi/piCliPaths';
 import { canLoadPiNativeModules } from './pi/piExtensionCompat';
 import { probeStt, probeTts } from './voice/voiceSettings';
 import { maybePromptForRecommendedPackages } from './pi/recommendedPackagesPrompt';
@@ -25,7 +25,7 @@ import { setPiExtensionPath } from './pi/extensionPath';
 import { DiffManager, DiffContentProvider } from './providers/diff';
 import { CheckpointManager } from './providers/checkpoint';
 import { PlanDocumentProvider } from './providers/plan-document';
-import { createBootErrorWebviewProvider } from './providers/boot-error-webview';
+import { createBootErrorWebviewProvider, createCliMissingWebviewProvider } from './providers/boot-error-webview';
 import { rebuildAgentNativeModules } from './pi/piExtensionCompat';
 import { registerAttachFromExplorer } from './pi/attachFromExplorer';
 import { ensurePastedAttachmentsDir } from './pi/pastedAttachmentStore';
@@ -47,11 +47,40 @@ function registerBootErrorSidebar(
     );
 }
 
+/** Neither CLI installed: point the user at an installer, then reload so activation runs again. */
+async function promptInstallCli(): Promise<void> {
+    const installOmp = 'Install omp';
+    const installPi = 'Install pi';
+    const reload = 'Reload Window';
+    const pick = await vscode.window.showWarningMessage(
+        'Oh My Pi Chater needs the omp or pi CLI. Install one, then reload the window.',
+        installOmp,
+        installPi,
+        reload,
+    );
+    if (pick === installOmp) {
+        void vscode.env.openExternal(vscode.Uri.parse('https://omp.sh'));
+    } else if (pick === installPi) {
+        void vscode.env.openExternal(vscode.Uri.parse('https://www.npmjs.com/package/@earendil-works/pi-coding-agent'));
+    } else if (pick === reload) {
+        void vscode.commands.executeCommand('workbench.action.reloadWindow');
+    }
+}
+
 export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('Oh My Pi Chater');
     outputChannel.appendLine('Oh My Pi Chater extension activating...');
     setPiExtensionPath(context.extensionPath);
     context.subscriptions.push(initWindowBackend(context.workspaceState));
+
+    if (getAvailableBackends().length === 0) {
+        outputChannel.appendLine('Agent CLI not found: neither omp nor pi is installed (PATH, common install dirs, oh-my-pi-chater.cliPath).');
+        context.subscriptions.push(
+            vscode.window.registerWebviewViewProvider('oh-my-pi-chater.chat', createCliMissingWebviewProvider()),
+        );
+        void promptInstallCli();
+        return;
+    }
 
     if (!(await verifyPiCliAvailable(outputChannel))) {
         registerBootErrorSidebar(
@@ -96,7 +125,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const diffContentProvider = new DiffContentProvider();
         const planDocumentProvider = new PlanDocumentProvider();
         const checkpointManager = new CheckpointManager();
-        const statusBar = new StatusBarManager(piSession);
+        const modelStatus = new ModelStatusTracker(piSession);
 
         const diffManager = new DiffManager(piSession, checkpointManager);
         const pastedStorageDir = await ensurePastedAttachmentsDir(context.globalStorageUri.fsPath);
@@ -109,19 +138,20 @@ export async function activate(context: vscode.ExtensionContext) {
             planDocumentProvider,
             pastedStorageDir,
             context.workspaceState,
-            statusBar,
+            modelStatus,
         );
         if (sidebarProvider.activeSession) {
-            statusBar.setSession(sidebarProvider.activeSession);
+            modelStatus.setSession(sidebarProvider.activeSession);
         }
-        await sidebarProvider.restorePersistedTabs();
         sidebarProviderForShutdown = sidebarProvider;
 
         registerAttachFromExplorer(context, () => sidebarProvider);
         context.subscriptions.push(
             ...registerWorkerControlCommands(sidebarProvider, outputChannel),
-            ...registerVoiceAgentCommands(context, { worker: sidebarProvider, chat: sidebarProvider }),
+            ...registerVoiceAgentCommands(context, { worker: sidebarProvider, chat: sidebarProvider, resumeList: sidebarProvider }),
         );
+        // After the voice agent's history is in: a tab the user only talked to it about comes back under its voice name.
+        await sidebarProvider.restorePersistedTabs();
 
         context.subscriptions.push(
             // Retained so switching to another view container keeps the terminals (TUI mode) and chat DOM.
@@ -130,7 +160,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }),
             vscode.workspace.registerTextDocumentContentProvider('pi-diff', diffContentProvider),
             vscode.workspace.registerTextDocumentContentProvider('pi-plan', planDocumentProvider),
-            statusBar,
+            modelStatus,
 
             diffManager,
             checkpointManager,
@@ -141,7 +171,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 await session?.newSession();
                 await sidebarProvider.pushStateSync();
                 sidebarProvider.postModelFooter();
-                statusBar.refresh();
+                modelStatus.refresh();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.abort', async () => {
@@ -152,7 +182,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const session = sidebarProvider.activeSession ?? piSession;
                 await session?.showModelPicker();
                 sidebarProvider.sendStateSync();
-                statusBar.refresh();
+                modelStatus.refresh();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.toggleThinking', async () => {
@@ -162,7 +192,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     vscode.window.showInformationMessage(`Thinking level: ${level}`);
                 }
                 sidebarProvider.sendStateSync();
-                statusBar.refresh();
+                modelStatus.refresh();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.focusChat', () => {
@@ -175,7 +205,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     // Transcripts land in the chat composer, so bring it up first.
                     await vscode.commands.executeCommand('oh-my-pi-chater.chat.focus');
                 }
-                await sidebarProvider.voiceInput.toggle();
+                await sidebarProvider.toggleDictation();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.openSessionPanel', () => {

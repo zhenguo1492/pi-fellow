@@ -1,3 +1,5 @@
+import type { AgentBackend } from '../pi/agentBackend';
+import { resolveCliTarget } from '../pi/piCliPaths';
 import { PiRpcBridge } from '../pi/piRpcBridge';
 import type { RpcHostToolDefinition } from '../pi/rpcTypes';
 import type { VoiceCallUsage, VoiceUsageTotals } from '../shared/voiceViewProtocol';
@@ -13,7 +15,7 @@ export interface VoiceTurnHandlers {
     onText(delta: string): void;
     onToolCall(call: HostToolCall): void;
     onToolCancel(callId: string): void;
-    /** One of the voice agent's own read-only tools started; `description` is omp's intent line or name + target. */
+    /** One of the voice agent's own lookup tools started; `description` is omp's intent line or name + target. */
     onBuiltinTool(description: string, call: { toolName: string; args: Record<string, unknown> }): void;
     /** One LLM call of the turn finished; reported even after the turn was cut off, since its tokens were spent. */
     onUsage(usage: VoiceCallUsage): void;
@@ -24,7 +26,7 @@ export interface VoiceLlmOptions {
     /** Voice contexts are session files here, one per worker task (design §2.3, §5.12). */
     sessionDir: string;
     systemPrompt: string;
-    /** `provider/id`; omp's default model when omitted. */
+    /** `provider/id`; the agent's default model when omitted. */
     model?: string;
     thinking: string;
     tools: RpcHostToolDefinition[];
@@ -33,8 +35,15 @@ export interface VoiceLlmOptions {
 /** extension_ui_request methods that block the run until answered. */
 const BLOCKING_UI_METHODS: Record<string, true> = { select: true, confirm: true, input: true, editor: true };
 
-/** omp built-ins the voice agent gets: read-only lookups (design §5.4, §7.4). Changes go to the worker. */
-const BUILTIN_TOOLS: Record<string, true> = { read: true, grep: true, glob: true };
+/**
+ * Built-ins the voice agent gets: read-only lookups in the project and on the web (design §5.4, §7.4).
+ * Changes go to the worker. pi's glob is `find`. pi has no built-in web_search: a user's pi extension
+ * may register one. pi skips allowlisted names nothing registers, so without one it just goes unlisted.
+ */
+const BUILTIN_TOOLS: Record<AgentBackend, string[]> = { omp: ['read', 'grep', 'glob', 'web_search'], pi: ['read', 'grep', 'find', 'web_search'] };
+
+/** The voice system prompt names omp's tools. */
+const PI_TOOL_NOTE = 'Here the glob tool is called find: it finds files by glob pattern.';
 
 interface RunningTurn {
     promptId: string;
@@ -71,14 +80,16 @@ interface OmpUsage {
 }
 
 /**
- * The voice agent's LLM: one hidden omp RPC process (design §5.4). Always omp, because host tools
- * are an omp RPC extension. One prompt at a time; the caller serializes turns.
+ * The voice agent's LLM: one hidden omp or pi RPC process (design §5.4), with the host tools
+ * (native on omp, the bundled Pi extension on pi). One prompt at a time; the caller serializes turns.
  */
 export class VoiceLlm {
     private _turn: RunningTurn | undefined;
     private _promptSeq = 0;
     private _exited = false;
     private _stopping = false;
+    /** pi: the error of the run's last `agent_end`, reported once `agent_settled` arrives. */
+    private _endError: string | undefined;
 
     private constructor(
         private readonly _bridge: PiRpcBridge,
@@ -98,21 +109,31 @@ export class VoiceLlm {
 
     static async start(options: VoiceLlmOptions, onExit: (error: Error | null) => void): Promise<VoiceLlm> {
         const bridge = new PiRpcBridge();
-        const tools = Object.keys(BUILTIN_TOOLS).join(',');
-        const args = ['--tools', tools, '--no-skills', '--no-rules', '--no-extensions', '--no-lsp', '--no-title'];
-        // Its tools only read or go through HostToolRouter, which enforces its own rules. A project or
-        // user approvalMode of always-ask would otherwise gate host tools behind a dialog nobody can answer.
-        args.push('--approval-mode', 'yolo');
+        const { backend } = resolveCliTarget();
+        const builtins = BUILTIN_TOOLS[backend];
+        const args: string[] = [];
+        if (backend === 'omp') {
+            args.push('--tools', builtins.join(','), '--no-skills', '--no-rules', '--no-extensions', '--no-lsp', '--no-title');
+            // Its tools only read or go through HostToolRouter, which enforces its own rules. A project or
+            // user approvalMode of always-ask would otherwise gate host tools behind a dialog nobody can answer.
+            args.push('--approval-mode', 'yolo');
+        } else {
+            // pi's allowlist also filters extension tools, so it names the host tools too, and keeps the
+            // user's extensions' tools out. The extensions still load: model providers can be pi packages
+            // (e.g. pi-provider-antigravity), and without them `--model` fails with "Model not found".
+            const tools = [...builtins, ...options.tools.map((tool) => tool.name)];
+            // --no-context-files, like omp's --no-rules: AGENTS.md / CLAUDE.md instruct the coding agent
+            // (e.g. a user's "reply with [英文没问题]" rule), not the voice agent, and would be read aloud.
+            args.push('--tools', tools.join(','), '--no-skills', '--no-prompt-templates', '--no-context-files');
+            args.push('--append-system-prompt', PI_TOOL_NOTE);
+        }
         args.push('--thinking', options.thinking, '--session-dir', options.sessionDir);
         args.push('--system-prompt', options.systemPrompt);
         if (options.model) {
             args.push('--model', options.model);
         }
-        await bridge.start(options.cwd, args, 'omp');
+        await bridge.start(options.cwd, args, backend, { hostTools: true });
         try {
-            if (bridge.backend !== 'omp') {
-                throw new Error('The voice agent needs omp (host tools are an omp RPC feature); only pi was found.');
-            }
             await bridge.setHostTools(options.tools);
             const state = await bridge.getState();
             const model = state.model ? `${state.model.provider}/${state.model.id}` : 'unknown';
@@ -128,8 +149,8 @@ export class VoiceLlm {
     }
 
     /**
-     * Resolves when omp settles the run (`agent_end` with `isTerminal !== false`), with its error if any.
-     * Aborting `signal` aborts the run; text arriving after that is dropped.
+     * Resolves when the run settles (omp: `agent_end` with `isTerminal !== false`; pi: `agent_settled`),
+     * with its error if any. Aborting `signal` aborts the run; text arriving after that is dropped.
      */
     prompt(message: string, signal: AbortSignal, handlers: VoiceTurnHandlers): Promise<{ error?: string }> {
         if (this._turn) {
@@ -158,12 +179,9 @@ export class VoiceLlm {
     }
 
     sendToolResult(callId: string, text: string, isError: boolean): void {
-        this._write({
-            type: 'host_tool_result',
-            id: callId,
-            result: { content: [{ type: 'text', text }] },
-            ...(isError ? { isError: true } : {}),
-        });
+        if (!this._exited) {
+            this._bridge.sendHostToolResult(callId, { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
+        }
     }
 
     /** Starts an empty voice context and returns its session file. Only while idle. */
@@ -171,16 +189,16 @@ export class VoiceLlm {
         await this._bridge.newSession();
         const { sessionFile } = await this._bridge.getState();
         if (!sessionFile) {
-            throw new Error('omp did not report a session file for the new voice context');
+            throw new Error('The agent did not report a session file for the new voice context');
         }
         return sessionFile;
     }
 
-    /** Only while idle. Throws when omp cannot load it. */
+    /** Only while idle. Throws when the agent cannot load it. */
     async switchSession(sessionFile: string): Promise<void> {
         const { cancelled } = await this._bridge.switchSession(sessionFile);
         if (cancelled) {
-            throw new Error(`omp did not switch to ${sessionFile}`);
+            throw new Error(`The agent did not switch to ${sessionFile}`);
         }
     }
 
@@ -233,12 +251,12 @@ export class VoiceLlm {
             }
             case 'tool_execution_start':
                 // Host tools also report here; they surface through host_tool_call instead.
-                if (turn && !turn.signal.aborted && typeof event.toolName === 'string' && BUILTIN_TOOLS[event.toolName]) {
+                if (turn && !turn.signal.aborted && typeof event.toolName === 'string' && BUILTIN_TOOLS[this._bridge.backend].includes(event.toolName)) {
                     const args = (event.args ?? {}) as Record<string, unknown>;
                     turn.handlers.onBuiltinTool(
                         typeof event.intent === 'string'
                             ? event.intent
-                            : `${event.toolName} ${String(args.path ?? args.pattern ?? '')}`.trim(),
+                            : `${event.toolName} ${String(args.path ?? args.pattern ?? args.query ?? '')}`.trim(),
                         { toolName: event.toolName, args },
                     );
                 }
@@ -268,11 +286,24 @@ export class VoiceLlm {
                 }
                 const messages = event.messages as Array<{ stopReason?: string; errorMessage?: string }> | undefined;
                 const last = messages?.[messages.length - 1];
-                turn.finish(last?.stopReason === 'error' ? (last.errorMessage ?? 'unknown error') : undefined);
+                const error = last?.stopReason === 'error' ? (last.errorMessage ?? 'unknown error') : undefined;
+                // pi may go on after agent_end (retry, compaction recovery); agent_settled is its last word.
+                if (this._bridge.backend === 'pi') {
+                    this._endError = error;
+                } else {
+                    turn.finish(error);
+                }
                 return;
             }
+            case 'agent_settled':
+                if (turn && this._bridge.backend === 'pi') {
+                    const error = this._endError;
+                    this._endError = undefined;
+                    turn.finish(error);
+                }
+                return;
             case 'extension_ui_request':
-                // No extensions are loaded; never leave a blocking dialog hanging.
+                // Other extensions are not loaded (the bridge keeps pi's host-tools frames); never leave a blocking dialog hanging.
                 if (typeof event.method === 'string' && BLOCKING_UI_METHODS[event.method]) {
                     this._write({ type: 'extension_ui_response', id: event.id, cancelled: true });
                 }

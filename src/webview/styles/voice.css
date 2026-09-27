@@ -1,7 +1,7 @@
 /*
- * The Bot view in the bottom panel (docs/voice-agent-design.md §11, src/webview/voicePanel.ts),
- * loaded after main.css: the engines and token use at the top, then cards and the transcript,
- * filling the view. Everything is scoped under .vp.
+ * The Bot view a chat tab shows in place of its conversation (docs/voice-agent-design.md §11,
+ * src/webview/voicePanel.ts), loaded after main.css: the engines and token use at the top, then
+ * cards and the transcript, filling the tab body. Everything is scoped under .vp.
  */
 
 .vp {
@@ -21,13 +21,13 @@
     --vp-line: 1.6;
     /* Labels, tags, chips, cards. */
     --vp-small: calc(var(--vp-font) - 1.5px);
-    /* Transcript text per speaker: light tints on dark themes, dark shades on light themes. */
-    --text-user: #b3bbff;
-    --text-voice: #ffbf9f;
-    --text-narr: #f0d98c;
-    /* The word being spoken. */
-    --word-bg: color-mix(in srgb, var(--voice) 42%, transparent);
-    --word-fg: #fff;
+    /* A transcript row under the pointer, as Slack's message hover. */
+    --row-hover: color-mix(in srgb, var(--fg) 5%, transparent);
+    /* The sentence being spoken. */
+    --speaking-bg: color-mix(in srgb, var(--voice) 32%, transparent);
+    --speaking-fg: #fff;
+    /* Opaque fills (floating details, sticky headers) match the sidebar the view sits in. */
+    --vp-bg: var(--vscode-sideBar-background, var(--bg));
 
     position: relative;
     flex: 1;
@@ -35,28 +35,17 @@
     container-type: inline-size;
     display: flex;
     flex-direction: column;
-    background: var(--vscode-panel-background, var(--bg));
+    background: var(--vp-bg);
     color: var(--fg);
     user-select: text;
 }
 body.vscode-light .vp {
-    --text-user: #2d3a9e;
-    --text-voice: #a13a0c;
-    --text-narr: #6f5600;
-    --word-bg: color-mix(in srgb, var(--voice) 24%, transparent);
-    --word-fg: #000;
-}
-body.vscode-high-contrast .vp {
-    --text-user: #cdd3ff;
-    --text-voice: #ffd2bc;
-    --text-narr: #ffe9a6;
+    --speaking-bg: color-mix(in srgb, var(--voice) 20%, transparent);
+    --speaking-fg: #000;
 }
 body.vscode-high-contrast-light .vp {
-    --text-user: #1a237a;
-    --text-voice: #7a2800;
-    --text-narr: #514000;
-    --word-bg: color-mix(in srgb, var(--voice) 24%, transparent);
-    --word-fg: #000;
+    --speaking-bg: color-mix(in srgb, var(--voice) 20%, transparent);
+    --speaking-fg: #000;
 }
 /* The state line along the top of the view (same colours as the chat's robot status line). */
 .vp::before {
@@ -84,6 +73,7 @@ body.vscode-high-contrast-light .vp {
 
 /* ── Header: engines, context window, tokens ── */
 .vp-head {
+    display: flex;
     position: relative;
     z-index: 5;
     flex-shrink: 0;
@@ -93,12 +83,18 @@ body.vscode-high-contrast-light .vp {
 }
 /* One summary line; clicking it (.open) floats the details over the transcript without moving it. */
 .vp-sum {
-    display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+    display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
     padding: 3px 12px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .vp-sum:hover { background: var(--hover); }
 .vp-sum:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 .vp-sum-v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
+.vp-hist {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center; width: 26px;
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+}
+.vp-hist:hover { color: var(--fg); background: var(--hover); }
+.vp-hist:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 .vp.vp-configured .vp-sum-v { color: var(--muted); }
 .vp-sk { color: var(--muted); font-family: var(--vscode-font-family, sans-serif); font-weight: 600; letter-spacing: .02em; }
 .vp-sum .vp-car { flex-shrink: 0; font-size: .7em; opacity: .7; transition: transform .15s; }
@@ -107,7 +103,7 @@ body.vscode-high-contrast-light .vp {
     display: none; flex-direction: column; gap: 1px; padding: 2px 12px 6px;
     position: absolute; top: 100%; left: 0; right: 0;
     max-height: 70vh; overflow: auto;
-    background: var(--vscode-panel-background, var(--bg));
+    background: var(--vp-bg);
     border-bottom: 1px solid var(--border);
     box-shadow: 0 4px 10px rgba(0, 0, 0, .3);
 }
@@ -130,7 +126,7 @@ body.vscode-high-contrast-light .vp {
 .vp-calls table { border-collapse: collapse; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
 .vp-calls th, .vp-calls td { padding: 0 12px 0 0; text-align: right; white-space: nowrap; }
 .vp-calls th:nth-child(-n+2), .vp-calls td:nth-child(-n+2) { text-align: left; }
-.vp-calls th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--vscode-panel-background, var(--bg)); }
+.vp-calls th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--vp-bg); }
 .vp-calls-empty { color: var(--muted); }
 
 /* ── Cards: tasks to confirm, background research; one line each ── */
@@ -160,16 +156,15 @@ body.vscode-high-contrast-light .vp {
 .vp-banner { display: none; flex-shrink: 0; margin: 8px 10px 0; padding: 3px 10px; border-radius: 5px; font-size: var(--vp-small); color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
 .vp.readonly .vp-banner { display: block; }
 
-/* ── Transcript: one row per utterance, speaker label + colour bar ── */
+/* ── Transcript: Slack-style messages, avatar + name and time over the text; a speaker's consecutive turns share one header ── */
 .vp-stream {
     flex: 1;
     /* About three rows even at the smallest. */
     min-height: calc(var(--vp-font) * var(--vp-line) * 3 + 8px);
     overflow-y: auto;
-    padding: 8px 8px 4px;
+    padding: 6px 0 4px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
     font-size: var(--vp-font);
     line-height: var(--vp-line);
 }
@@ -177,35 +172,60 @@ body.vscode-high-contrast-light .vp {
 .vp-stream::-webkit-scrollbar-thumb { background: var(--scrollbar); border: 2px solid transparent; background-clip: content-box; border-radius: 5px; }
 .vp-empty { margin: auto 0; padding: 4px 8px; color: var(--muted); text-align: center; }
 
-/* No row backgrounds: the speaker shows in the label, the bar and the text colour. */
 .vp-turn {
     --c: var(--muted);
-    --t: var(--fg);
+    position: relative;
     flex-shrink: 0;
     display: grid;
-    /* Wide enough for the longest label ("Update") at the label size. */
-    grid-template-columns: 4.4em minmax(0, 1fr);
-    column-gap: 8px;
-    padding: 2px 8px;
-    border-left: 2px solid var(--c);
-    border-radius: 0 4px 4px 0;
+    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-areas: "av who" "av txt";
+    column-gap: 10px;
+    margin-top: 4px;
+    padding: 5px 12px 3px;
     animation: vp-rise .28s ease-out both;
 }
-.vp-turn.user { --c: var(--user); --t: var(--text-user); }
-.vp-turn.bot  { --c: var(--voice); --t: var(--text-voice); }
-.vp-turn.narr { --c: var(--warn); --t: var(--text-narr); }
-.vp-turn.sys  { --c: transparent; --t: var(--muted); }
+.vp-turn:hover { background: var(--row-hover); }
+/* Same speaker as the turn before: no avatar or header; the time shows in the avatar column on hover. The header
+ * keeps only the stopwatch, at the row's top right (there is no header line to put it in). */
+.vp-turn.cont { grid-template-areas: "av txt"; margin-top: 0; padding-top: 1px; }
+.vp-turn.cont .vp-av, .vp-turn.cont .vp-name, .vp-turn.cont .vp-time { display: none; }
+.vp-turn.cont .vp-who { grid-area: auto; position: absolute; top: 1px; right: 8px; }
+/* A turn moved after it was shown does not rise in again. */
+.vp-turn[data-settled] { animation: none; }
+.vp-turn.user { --c: var(--user); }
+.vp-turn.bot  { --c: var(--voice); }
+.vp-turn.narr { --c: var(--warn); }
 .vp-turn.silent { opacity: .6; }
-.vp-who { color: var(--c); font-size: var(--vp-small); font-weight: 600; line-height: calc(var(--vp-font) * var(--vp-line)); white-space: nowrap; display: flex; align-items: flex-start; gap: 3px; cursor: default; }
-.vp-turn.sys .vp-who { color: var(--muted); font-weight: 500; }
+/* The avatar's hue: the speaker's colour, except User green and Bot blue (VS Code's chart colours, themed for light and dark). */
+.vp-av {
+    --av: var(--c);
+    grid-area: av; align-self: start;
+    width: 32px; height: 32px; margin-top: 2px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; color: var(--av); background: color-mix(in srgb, var(--av) 20%, transparent);
+}
+.vp-turn.user .vp-av { --av: var(--vscode-charts-green, #89d185); }
+.vp-turn.bot .vp-av  { --av: var(--vscode-charts-blue, #3794ff); }
+.vp-av svg { width: 20px; height: 20px; }
+.vp-gtime {
+    grid-area: av; justify-self: end; align-self: start; display: none;
+    font-size: calc(var(--vp-small) - 1.5px); line-height: calc(var(--vp-font) * var(--vp-line)); white-space: nowrap; color: var(--muted); cursor: default;
+}
+.vp-turn.cont:hover .vp-gtime { display: block; }
+.vp-who { grid-area: who; display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; line-height: 1.4; cursor: default; }
+.vp-name { display: inline-flex; align-items: baseline; gap: 5px; font-weight: 700; color: var(--fg); }
+.vp-badge { padding: 0 3px; border-radius: 3px; font-size: calc(var(--vp-small) - 2px); font-weight: 600; letter-spacing: .04em; color: var(--muted); background: color-mix(in srgb, var(--muted) 20%, transparent); }
+.vp-time { font-size: calc(var(--vp-small) - .5px); color: var(--muted); }
 .vp-src { font-size: .85em; opacity: .75; font-weight: 400; }
-.vp-txt { min-width: 0; overflow-wrap: anywhere; color: var(--t); }
+.vp-txt { grid-area: txt; min-width: 0; overflow-wrap: anywhere; color: var(--fg); }
+.vp-turn.sys .vp-txt { color: var(--muted); }
 .vp-line { white-space: pre-wrap; }
 
-/* Spoken sentences: pending dim, played normal, cut struck through; the word being spoken is highlighted. */
-.vp-s { transition: opacity .2s; }
+/* Spoken sentences: pending dim, playing highlighted, played normal, cut struck through. */
+.vp-s { border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; transition: opacity .2s, background-color .2s, color .2s; }
 .vp-s.pending { opacity: .42; }
-.vp-w { border-radius: 2px; animation-name: vp-word; animation-timing-function: step-end; animation-fill-mode: none; }
+/* Highlight without padding, so the line does not reflow as the sentence starts or stops playing. */
+.vp-s.playing { background: var(--speaking-bg); color: var(--speaking-fg); box-shadow: 0 0 0 1px var(--speaking-bg); }
 .vp-s.cut { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--error) 70%, transparent); opacity: .5; }
 .vp-cut-tag, .vp-barge, .vp-kind { display: inline-block; padding: 0 6px; font-size: calc(var(--vp-small) - 1px); line-height: 1.5; vertical-align: 1px; white-space: nowrap; }
 .vp-cut-tag { margin-left: 5px; border-radius: 7px; color: var(--error); border: 1px solid color-mix(in srgb, var(--error) 40%, transparent); }
@@ -245,14 +265,18 @@ details.vp-chip.failed .vp-res { color: var(--error); }
 .vp-attach { margin: 2px 0 4px; padding: 4px 8px; font-family: var(--font-mono); font-size: calc(var(--vp-small) - 1px); line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 4px; }
 .vp-attach:empty { display: none; }
 
-/* Latency: a stopwatch beside the speaker label toggles the breakdown under the turn. */
+/* Latency: a stopwatch after the header's time, shown on hover (Slack's message actions), toggles the breakdown under the turn. */
 .vp-timing {
+    align-self: center;
     display: inline-flex; align-items: center; justify-content: center;
-    width: 18px; height: calc(var(--vp-font) * var(--vp-line)); margin-left: 2px; padding: 0;
-    border: 0; border-radius: 4px; background: none; color: var(--muted); opacity: .7; cursor: pointer;
+    /* No taller than the header line, so showing it does not move the row. */
+    width: 22px; height: 18px; margin-left: -2px; padding: 0;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--vp-bg); color: var(--muted); opacity: 0; cursor: pointer;
 }
 .vp-timing[hidden] { display: none; }
-.vp-timing:hover { opacity: 1; color: var(--fg); background: var(--hover); }
+.vp-turn:hover .vp-timing, .vp-timing:focus-visible { opacity: 1; }
+.vp-timing:hover { color: var(--fg); background: var(--hover); }
 .vp-timing.open { opacity: 1; color: var(--c); }
 .vp-timing:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 .vp-timing-body { width: fit-content; max-width: 100%; color: var(--muted); }
@@ -263,15 +287,15 @@ details.vp-chip.failed .vp-res { color: var(--error); }
     .vp-card-h { display: none; }
 }
 @container (max-width: 260px) {
-    .vp-turn { grid-template-columns: minmax(0, 1fr); }
+    .vp-turn { grid-template-columns: minmax(0, 1fr); grid-template-areas: "who" "txt"; }
+    .vp-turn.cont { grid-template-areas: "txt"; }
+    .vp-turn .vp-av, .vp-turn.cont:hover .vp-gtime { display: none; }
 }
 
 @keyframes vp-spin { to { transform: rotate(360deg); } }
 @keyframes vp-blink { 0%, 100% { opacity: .2; } 40% { opacity: 1; } }
 @keyframes vp-flow { to { background-position: -200% 0; } }
 @keyframes vp-rise { from { opacity: 0; transform: translateY(4px); } }
-/* Highlight without padding, so the line does not reflow as it moves from word to word. */
-@keyframes vp-word { from, to { background: var(--word-bg); color: var(--word-fg); box-shadow: 0 0 0 1px var(--word-bg); } }
 
 @media (prefers-reduced-motion: reduce) {
     .vp-turn, .vp-card { animation: none; }

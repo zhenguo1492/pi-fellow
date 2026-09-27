@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
-import type { VoiceEngines, VoiceEntry, VoicePhase, VoiceViewClientMessage, VoiceViewState } from '../shared/voiceViewProtocol';
+import type { VoiceEngines, VoiceEntry, VoicePhase, VoiceViewClientMessage, VoiceViewHostMessage, VoiceViewState } from '../shared/voiceViewProtocol';
 import type { VoiceTranscriptStore, VoiceSessionRecord } from './transcriptStore';
 import type { VoiceAgent } from './voiceAgent';
-import type { VoicePanelView } from './voicePanelView';
 import type { WorkerController } from './workerController';
 
 /** Snapshots are coalesced: a streaming reply changes the transcript many times a second. */
@@ -19,34 +18,53 @@ export interface VoiceViewController {
 }
 
 /**
+ * Where the Bot view is drawn: a chat tab shows it in place of its conversation (the tab's icon
+ * toggles it). Implemented by the chat sidebar.
+ */
+export interface BotViewSurface {
+    readonly onDidReceiveVoiceMessage: vscode.Event<VoiceViewClientMessage>;
+    /** The Bot view came into or went out of sight: tab switch, toggle, sidebar shown or hidden. */
+    readonly onDidChangeBotViewVisibility: vscode.Event<void>;
+    isBotViewVisible(): boolean;
+    postVoice(message: VoiceViewHostMessage): void;
+    /** Shows the Bot view in the active tab and reveals the chat. */
+    showBotView(preserveFocus: boolean): Promise<void>;
+}
+
+/**
  * The Bot view's content (docs/voice-agent-design.md §11): the engines voice mode uses, the voice
  * context's token use, the voice conversation of the task voice is bound to and its cards. The view
- * lives in the bottom panel next to Terminal and only shows; everything typed goes through the
- * chat's composer. This side owns the snapshots, the session shown and the card actions.
+ * replaces a chat tab's conversation and only shows; everything typed goes through the chat's
+ * composer. This side owns the snapshots, the session shown and the card actions.
  */
 export class VoicePanel implements vscode.Disposable {
     /** A past session picked from history; undefined follows the live one. */
     private _pinned: string | undefined;
     private _refreshTimer: NodeJS.Timeout | undefined;
+    /** The last snapshot posted, serialized; an identical one is not posted again. */
+    private _posted: string | undefined;
     private readonly _disposables: vscode.Disposable[] = [];
 
     constructor(
         private readonly _store: VoiceTranscriptStore,
         private readonly _worker: WorkerController,
         private readonly _controller: VoiceViewController,
-        private readonly _view: VoicePanelView,
+        private readonly _view: BotViewSurface,
     ) {
         this._disposables.push(
             _view.onDidReceiveVoiceMessage((message) => this._onMessage(message)),
             // Hidden (retained) webviews drop messages: bring the view up to date when it shows.
-            _view.onDidChangeVisibility(() => this.refresh()),
+            _view.onDidChangeBotViewVisibility(() => {
+                this._posted = undefined;
+                this.refresh();
+            }),
             _store.onDidChange(() => this.refresh()),
             _worker.onActiveTaskChanged(() => {
                 this._pinned = undefined;
                 this.refresh();
             }),
+            // Not the worker's tab events: the view does not draw the worker (the chat around it does).
             _worker.onRequestsChanged(() => this.refresh()),
-            _worker.onTabEvent(() => this.refresh()),
             vscode.workspace.onDidChangeConfiguration((e) => {
                 if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent') || e.affectsConfiguration('oh-my-pi-chater.voice')) {
                     this.refresh();
@@ -57,7 +75,7 @@ export class VoicePanel implements vscode.Disposable {
 
     /** Reveals the Bot view. */
     show(preserveFocus = false): Promise<void> {
-        return this._view.reveal(preserveFocus);
+        return this._view.showBotView(preserveFocus);
     }
 
     /** History: pick a past session to read, or go back to the live one; the active task's come first. */
@@ -97,8 +115,17 @@ export class VoicePanel implements vscode.Disposable {
         this._refreshTimer ??= setTimeout(() => {
             this._refreshTimer = undefined;
             // Off screen: nothing to draw; coming into view refreshes.
-            if (this._view.isVisible()) {
-                this._view.postVoice({ type: 'state', state: this.snapshot() });
+            if (!this._view.isBotViewVisible()) {
+                this._posted = undefined;
+                return;
+            }
+            const state = this.snapshot();
+            // Not drawn, and its elapsed time would make every snapshot differ.
+            delete state.worker;
+            const posted = JSON.stringify(state);
+            if (posted !== this._posted) {
+                this._posted = posted;
+                this._view.postVoice({ type: 'state', state });
             }
         }, REFRESH_MS);
     }
@@ -122,7 +149,7 @@ export class VoicePanel implements vscode.Disposable {
             usage: live ? agent?.usage : undefined,
             session: session
                 ? { id: session.id, title: session.title, startedAt: session.startedAt, readonly: !live }
-                : { id: '', title: 'Voice', startedAt: Date.now(), readonly: false },
+                : { id: '', title: 'Voice', startedAt: 0, readonly: false },
             entries: session?.entries ?? [],
             proposals: [],
             research: [],
@@ -188,7 +215,12 @@ export class VoicePanel implements vscode.Disposable {
     private _onMessage(message: VoiceViewClientMessage): void {
         switch (message.type) {
             case 'ready':
+                // A fresh webview has nothing drawn yet.
+                this._posted = undefined;
                 this.refresh();
+                return;
+            case 'history':
+                void this.pickSession();
                 return;
             case 'proposal': {
                 const agent = this._controller.agent();

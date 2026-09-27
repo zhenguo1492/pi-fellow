@@ -473,17 +473,84 @@ function matchesQuery(session: SessionInfo, query: string): boolean {
     return haystack.includes(q);
 }
 
-function hasMeaningfulContent(session: SessionInfo): boolean {
-    const hasName = !!session.name && session.name !== session.id;
-    if (hasName) return true;
-    return (session.messageCount ?? 0) > 0;
+function hasCustomName(session: SessionInfo): boolean {
+    return !!session.name && session.name !== session.id;
 }
 
-/** Sessions shown in the resume list, newest activity first. */
+/**
+ * Sessions shown in the resume list, newest activity first: those with worker messages, a name, or
+ * a voice conversation. An untouched new session is left out.
+ */
 export function buildSessionDisplayList(sessions: SessionInfo[], query = ''): SessionInfo[] {
     return sessions
-        .filter((s) => hasMeaningfulContent(s) && matchesQuery(s, query))
+        .filter((s) => (hasCustomName(s) || (s.messageCount ?? 0) > 0 || (s.voiceTurns ?? 0) > 0) && matchesQuery(s, query))
         .sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0));
+}
+
+/** A worker session's voice conversation, as the voice transcript store keeps it. */
+export interface VoiceSessionSummary {
+    /** The worker session file the conversation belongs to; pi writes none before the worker's first reply. */
+    sessionFile: string;
+    /** Name the conversation gave the session: generated from what the user said, or set by the user. */
+    title?: string;
+    /** The first thing the user said. */
+    firstUtterance: string;
+    /** User turns, spoken or typed. */
+    turns: number;
+    startedAt: number;
+    updatedAt: number;
+}
+
+/**
+ * `sessions` of `sessionDir` with their voice conversations, plus a row for each conversation whose
+ * session has no file yet: talking only to the voice agent leaves pi's worker session unwritten.
+ * An unnamed session takes the conversation's name; one without worker messages, its first utterance.
+ */
+export function withVoiceSessions(
+    sessions: SessionInfo[],
+    voice: readonly VoiceSessionSummary[],
+    sessionDir: string,
+): SessionInfo[] {
+    const dir = canonicalizeSessionPath(sessionDir);
+    const pending = new Map<string, VoiceSessionSummary>();
+    for (const summary of voice) {
+        if (canonicalizeSessionPath(path.dirname(summary.sessionFile)) === dir) {
+            pending.set(canonicalizeSessionPath(summary.sessionFile), summary);
+        }
+    }
+    if (pending.size === 0) {
+        return sessions;
+    }
+    const merged = sessions.map((session) => {
+        const key = canonicalizeSessionPath(session.path);
+        const summary = pending.get(key);
+        if (!summary) {
+            return session;
+        }
+        pending.delete(key);
+        return withVoice(session, summary);
+    });
+    for (const summary of pending.values()) {
+        const match = /^(.+)_(.+)\.jsonl$/.exec(path.basename(summary.sessionFile));
+        const id = match?.[2] ?? path.basename(summary.sessionFile);
+        merged.push(
+            withVoice(
+                { id, name: id, path: summary.sessionFile, messageCount: 0, turnCount: 0, created: summary.startedAt, lastModified: summary.updatedAt },
+                summary,
+            ),
+        );
+    }
+    return merged;
+}
+
+function withVoice(session: SessionInfo, summary: VoiceSessionSummary): SessionInfo {
+    return {
+        ...session,
+        name: hasCustomName(session) ? session.name : (summary.title ?? session.name),
+        firstMessage: (session.messageCount ?? 0) > 0 ? session.firstMessage : summary.firstUtterance,
+        voiceTurns: summary.turns,
+        lastModified: Math.max(session.lastModified ?? 0, summary.updatedAt),
+    };
 }
 
 export interface SessionListRow {
@@ -495,12 +562,11 @@ export interface SessionListRow {
 
 /** Resolve the same title shown by the resume-session list. */
 export function getSessionDisplayTitle(session: SessionInfo): string {
-    const hasName = !!session.name && session.name !== session.id;
-    const title = (hasName ? session.name : session.firstMessage || session.id) ?? session.id;
+    const title = (hasCustomName(session) ? session.name : session.firstMessage || session.id) ?? session.id;
     return title.replace(/[\x00-\x1f\x7f]/g, ' ').trim();
 }
 
-/** Rows for the resume panel: one line each — title, then `turns · size · age`. */
+/** Rows for the resume panel: one line each — title, then `turns · voice turns · size · age`. */
 export function buildSessionListRows(
     sessions: SessionInfo[],
     query: string,
@@ -510,8 +576,11 @@ export function buildSessionListRows(
 
     return buildSessionDisplayList(sessions, query).map((session) => {
         const turns = session.turnCount ?? 0;
+        const voiceTurns = session.voiceTurns ?? 0;
         const meta = [
-            `${turns} ${turns === 1 ? 'turn' : 'turns'}`,
+            // A voice-only session's worker has no turns to count.
+            turns > 0 || voiceTurns === 0 ? `${turns} ${turns === 1 ? 'turn' : 'turns'}` : '',
+            voiceTurns > 0 ? `${voiceTurns} voice ${voiceTurns === 1 ? 'turn' : 'turns'}` : '',
             formatSessionSize(session.sizeBytes),
             formatSessionAge(session.lastModified),
         ]

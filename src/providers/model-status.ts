@@ -4,15 +4,16 @@ import * as vscode from 'vscode';
 import { cliCommand, getAgentLayout, piCliChildEnv, resolvePiCliInvocation } from '../pi/piCliPaths';
 import {
     fetchPiProviderUsage,
-    formatUsageTooltip,
     parseOmpUsage,
     ProviderUsageTracker,
     statusBarWindows,
+    usageDetails,
     type ProviderAccountUsage,
     type UsageTarget,
 } from '../pi/providerUsage';
 import type { PiAgentEvent } from '../pi/rpcTypes';
 import type { PiChatSession } from '../pi/slashCommands';
+import type { ModelStatusInfo } from '../shared/protocol';
 
 const execFileAsync = promisify(execFile);
 
@@ -46,20 +47,27 @@ const REFRESH_EVENTS: Partial<Record<PiAgentEvent['type'], true>> = {
     model_change: true,
 };
 
-export class StatusBarManager implements vscode.Disposable {
-    private _item: vscode.StatusBarItem;
+/**
+ * The active tab's model status (model, context use, provider plan limits), which the chat shows
+ * over its conversation. Follows one session; `SidebarProvider` switches it with the active tab.
+ */
+export class ModelStatusTracker implements vscode.Disposable {
     private _session: PiChatSession;
     private _unsubscribe: (() => void) | undefined;
+    private _status!: ModelStatusInfo;
+    private readonly _changed = new vscode.EventEmitter<ModelStatusInfo>();
+    readonly onDidChange = this._changed.event;
     private readonly _usage = new ProviderUsageTracker(fetchUsage, () => this._update());
     private readonly _usagePoll = setInterval(() => this._usage.refresh(), USAGE_POLL_MS);
 
     constructor(session: PiChatSession) {
         this._session = session;
-        this._item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-        this._item.command = 'oh-my-pi-chater.selectModel';
         this._subscribe();
         this._update();
-        this._item.show();
+    }
+
+    get status(): ModelStatusInfo {
+        return this._status;
     }
 
     refresh(): void {
@@ -91,69 +99,26 @@ export class StatusBarManager implements vscode.Disposable {
         const session = this._session;
         const model = session.getCurrentModel();
         const agentSession = session.session;
-        const isRetrying = agentSession?.isRetrying ?? false;
-        const isStreaming = (agentSession?.isStreaming ?? false) || isRetrying;
-        const icon = isRetrying ? '$(sync~spin)' : isStreaming ? '$(loading~spin)' : '$(hubot)';
-        const name = model ? (model.name ?? model.id) : 'No model';
-        const retrySuffix =
-            isRetrying && agentSession && agentSession.retryAttempt > 0
-                ? ` (reconnecting ${agentSession.retryAttempt})`
-                : '';
-        const usage = agentSession?.getContextUsage?.();
-        const percent =
-            typeof usage?.percent === 'number' && !Number.isNaN(usage.percent)
-                ? Math.round(usage.percent)
-                : undefined;
-
+        const retrying = agentSession?.isRetrying ?? false;
         this._usage.setTarget(model?.provider ? { backend: session.backend, provider: model.provider } : undefined);
         const snapshot = this._usage.snapshot;
-        const limitWindows = snapshot && model ? statusBarWindows(snapshot.accounts, model.id) : [];
-        const limitText = limitWindows.map((w) => ` · ${w.text} ${Math.round(w.usedPercent)}%`).join('');
-        const maxUsed = Math.max(0, ...limitWindows.map((w) => w.usedPercent));
-        this._item.backgroundColor =
-            maxUsed >= 100
-                ? new vscode.ThemeColor('statusBarItem.errorBackground')
-                : maxUsed >= 90
-                  ? new vscode.ThemeColor('statusBarItem.warningBackground')
-                  : undefined;
-        this._item.text = `${icon} ${name}${percent !== undefined ? ` · ctx ${percent}%` : ''}${limitText}${retrySuffix}`;
-
-        const tooltip: string[] = [`Model: ${name}`];
-        if (usage) {
-            if (usage.tokens !== null) {
-                tooltip.push(
-                    `Context: ${usage.tokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens`,
-                );
-            }
-            if (percent !== undefined) {
-                tooltip.push(`Context used: ${percent}%`);
-            }
-        }
-        const tokens = session.getSessionTokenStats();
-        if (tokens) {
-            tooltip.push(`Session in/out: ${tokens.input.toLocaleString()} / ${tokens.output.toLocaleString()}`);
-            if (tokens.cacheRead > 0 || tokens.cacheWrite > 0) {
-                tooltip.push(
-                    `Cache read/write: ${tokens.cacheRead.toLocaleString()} / ${tokens.cacheWrite.toLocaleString()}`,
-                );
-            }
-            if (tokens.cost > 0) {
-                tooltip.push(`Cost: $${tokens.cost.toFixed(4)}`);
-            }
-        }
-        const thinking = session.getThinkingLevel();
-        if (thinking) {
-            tooltip.push(`Thinking: ${thinking}`);
-        }
-        if (snapshot) {
-            tooltip.push(...formatUsageTooltip(snapshot));
-        }
-        this._item.tooltip = tooltip.join('\n');
+        this._status = {
+            model: model ? (model.name ?? model.id) : undefined,
+            activity: retrying ? 'retrying' : agentSession?.isStreaming ? 'streaming' : 'idle',
+            retryAttempt: retrying ? (agentSession?.retryAttempt ?? 0) : 0,
+            context: agentSession?.getContextUsage(),
+            tokens: session.getSessionTokenStats(),
+            thinking: session.getThinkingLevel(),
+            limits: snapshot && model ? statusBarWindows(snapshot.accounts, model.id) : [],
+            usage: snapshot ? usageDetails(snapshot) : [],
+            usageError: snapshot?.error,
+        };
+        this._changed.fire(this._status);
     }
 
     dispose(): void {
         this._unsubscribe?.();
         clearInterval(this._usagePoll);
-        this._item.dispose();
+        this._changed.dispose();
     }
 }

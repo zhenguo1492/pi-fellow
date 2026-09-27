@@ -6,10 +6,12 @@ Extension ID: `zhenguo.oh-my-pi-chater`. Install from a locally built VSIX (`npm
 
 ## Requirements
 
-- **omp (Oh My Pi)** or **Pi CLI** must be installed (`omp` binary, or `npm install -g oh-my-pi-chater` / `brew install oh-my-pi-chater`)
+- **omp (Oh My Pi)** or **Pi CLI** must be installed — omp: `curl -fsSL https://omp.sh/install | sh` (or `bun install -g @oh-my-pi/pi-coding-agent`); pi: `npm install -g @earendil-works/pi-coding-agent`. With neither installed, the chat view shows these install steps and a Reload Window button instead of the chat.
 - VS Code or VSCodium
 
 The extension talks to the agent via `<cli> --mode rpc`. It does not bundle the SDK — everything runs through the CLI. With `oh-my-pi-chater.backend: auto` (default) it runs `omp` when found on PATH (or `~/.local/bin`, `~/.bun/bin`), otherwise `pi`. omp is spawned directly; pi runs as `node cli.js` under your Node.
+
+The Settings panel's backend picker lists only the CLIs installed on this machine. If this workspace's picked backend is uninstalled later, the window falls back to `oh-my-pi-chater.backend`.
 
 ## Features
 
@@ -22,8 +24,8 @@ The extension talks to the agent via `<cli> --mode rpc`. It does not bundle the 
 **Slash commands** — `/login`, `/logout`, `/model`, `/new`, `/settings`, `/reload`, `/compact`, `/resume`, `/session`  
 **MCP config import** — bring MCP server configs from Cursor, Zed, or VS Code  
 **Settings panel** — configure auth, thinking level, workspace scope, sync mode  
-**Status bar** — model, context fill, and the subscription limits that gate the current model (e.g. Claude `5h 11% · 7d 3%`, plus `Fable 7d` on Fable; Codex 5h + weekly; Antigravity Gemini vs Claude/GPT buckets); hover for per-window bars and reset times. omp backend uses `omp usage --json` (all providers omp supports); pi backend reads OAuth credentials from `auth.json` and queries Anthropic, OpenAI Codex, or Antigravity quota directly (without refreshing tokens)
-**Model picker** — the status bar model button (or `/model`) opens the full list; the ☆ on each row stars a model into `oh-my-pi-chater.favoriteModels`. The chip under the chat input switches between starred models only. Lists only providers you signed in to with `/login` (pi `auth.json`, omp credential store); set `oh-my-pi-chater.showAllModels` to include env-var / `models.json` / `models.yml` providers  
+**Model status line** — at the top of the conversation (styled like the Bot view's header): model, context fill, and the subscription limits that gate the current model (e.g. Claude `5h 11% · 7d 3%`, plus `Fable 7d` on Fable; Codex 5h + weekly; Antigravity Gemini vs Claude/GPT buckets); click it for context, session tokens, per-window bars and reset times. omp backend uses `omp usage --json` (all providers omp supports); pi backend reads OAuth credentials from `auth.json` and queries Anthropic, OpenAI Codex, or Antigravity quota directly (without refreshing tokens)
+**Model picker** — the switch button at the right of the model status line (or `/model`) opens the full list; the ☆ on each row stars a model into `oh-my-pi-chater.favoriteModels`. The chip under the chat input switches between starred models only. Lists only providers you signed in to with `/login` (pi `auth.json`, omp credential store); set `oh-my-pi-chater.showAllModels` to include env-var / `models.json` / `models.yml` providers  
 **Session catalog** — list, resume, or switch between sessions  
 **Checkpoint + Todo merge** — Pi-managed plan todos merged into VS Code with task markers  
 **TUI mode** — header toggle turns every tab into an embedded terminal running the CLI's own TUI (`omp --resume <tab session>`); switching back reloads the conversation into the chat view. `/tree` and the command palette still open the session tree

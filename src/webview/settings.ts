@@ -343,9 +343,7 @@ function buildTabPanel(tabId: SettingsTabId, children: HTMLElement[]): HTMLEleme
 
 function buildHeader(data: SettingsData): HTMLElement {
     const header = el('div', 'settings-header');
-    const available = data.availableBackends && data.availableBackends.length > 0
-        ? data.availableBackends
-        : ['omp', 'pi'];
+    const available = data.availableBackends;
 
     header.innerHTML = `
         <div class="settings-header-top">

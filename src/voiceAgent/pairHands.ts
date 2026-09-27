@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import * as vscode from 'vscode';
 import type { AgentCursor } from './agentCursor';
@@ -5,7 +6,8 @@ import type { CodeAnchor } from './codeAnchors';
 import type { DebugDriver } from './debugDriver';
 import { FileHands } from './fileHands';
 import type { DebugAction, EditorHands } from './hostTools';
-import { cleanTerminalOutput, locateEdit } from './pairText';
+import { cleanTerminalOutput, insideFolder, locateEdit } from './pairText';
+import { findViewers, languageOf, runPreviewCommand, settleWithin, type FileViewers, type Viewer } from './viewers';
 import type { OutputReader } from './vscodeOutput';
 
 /** Typing speed: one line per this long, or faster so the whole edit takes at most MAX_TYPING_MS. */
@@ -15,6 +17,13 @@ const MAX_TYPING_MS = 2000;
 const SHELL_INTEGRATION_WAIT_MS = 5000;
 /** Output kept while a command runs; only its tail goes to the model. */
 const MAX_OUTPUT_CHARS = 200_000;
+/** How long open_with waits for an editor to open or an extension's preview command to return. */
+const OPEN_WITH_TIMEOUT_MS = 8000;
+/** How long after a preview command returns its editor or panel may take to show up as a tab. */
+const NEW_TAB_WAIT_MS = 1500;
+/** A file just written may not be visible to stat yet: tries, this far apart. */
+const STAT_ATTEMPTS = 5;
+const STAT_RETRY_MS = 200;
 
 /**
  * The voice agent's hands in the user's VS Code (docs/voice-pair-agent-cursor.md §11-§13): it opens
@@ -52,6 +61,90 @@ export class PairHands implements EditorHands, vscode.Disposable {
 
     openFile(target: CodeAnchor): Promise<string> {
         return this._cursor.open(target);
+    }
+
+    async listViewers(target: string): Promise<FileViewers> {
+        const { uri, relative } = await this._files.resolve(target);
+        // A file create_file just made is open, even before stat sees it on disk.
+        const document = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+        if (!document) {
+            let stat: vscode.FileStat | undefined;
+            for (let attempt = 1; !stat && attempt <= STAT_ATTEMPTS; attempt++) {
+                stat = await Promise.resolve(vscode.workspace.fs.stat(uri)).catch(() => undefined);
+                if (!stat && attempt < STAT_ATTEMPTS) {
+                    await sleep(STAT_RETRY_MS);
+                }
+            }
+            if (!stat) {
+                throw new Error(`${relative} does not exist.`);
+            }
+            if (stat.type & vscode.FileType.Directory) {
+                throw new Error(`${relative} is a folder, not a file.`);
+            }
+        }
+        const builtinRoot = path.join(vscode.env.appRoot, 'extensions');
+        const extensions = vscode.extensions.all.map((e) => ({
+            id: e.id,
+            packageJSON: e.packageJSON,
+            // `isBuiltin` is on the runtime description but not in the API typings: the install folder backs it up.
+            builtin: (e.packageJSON as { isBuiltin?: unknown } | undefined)?.isBuiltin === true || insideFolder(builtinRoot, e.extensionPath),
+        }));
+        // An open document's language may have been set by the user; otherwise as VS Code would guess it.
+        const languageId = document?.languageId ?? languageOf(extensions, uri.fsPath);
+        const thirdPartyCommands = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<boolean>('discoverPreviewCommands', false);
+        return { path: relative, languageId, ...findViewers(extensions, uri.fsPath, languageId, { thirdPartyCommands }) };
+    }
+
+    async openWith(target: string, viewer: Viewer, toSide: boolean): Promise<string> {
+        const { uri, relative } = await this._files.resolve(target);
+        const column = toSide ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+        const where = toSide ? ' beside the current editor' : '';
+        const waited = `${Math.round(OPEN_WITH_TIMEOUT_MS / 1000)}s`;
+        if (viewer.kind === 'editor') {
+            const run = await settleWithin(vscode.commands.executeCommand('vscode.openWith', uri, viewer.id, column), OPEN_WITH_TIMEOUT_MS);
+            if (run.status === 'timeout') {
+                return `Started opening ${relative} in ${viewer.label}${where}, but it had not finished after ${waited}; it may still appear. Ask the user whether they see it.`;
+            }
+            if (run.status === 'failed') {
+                throw new Error(`VS Code could not open ${relative} in ${viewer.label}: ${run.error instanceof Error ? run.error.message : String(run.error)}`);
+            }
+            return `Opened ${relative} in ${viewer.label}${where}.`;
+        }
+        // Many preview commands ignore their argument and preview the active editor: make it this file.
+        const shown = await settleWithin(vscode.window.showTextDocument(uri, { viewColumn: column, preview: false }), OPEN_WITH_TIMEOUT_MS);
+        if (shown.status === 'timeout') {
+            return `Started opening ${relative}${where}, but it had not opened after ${waited}, so ${viewer.label} was not run. Ask the user what they see.`;
+        }
+        // A file that is not text cannot be the active text editor; the command still gets its uri.
+        const tabKeys = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs.map(tabKey));
+        const activeTabKey = () => {
+            const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+            return tab && tabKey(tab);
+        };
+        const before = new Set(tabKeys());
+        const activeBefore = activeTabKey();
+        const showedSomething = async () => {
+            for (let waitedMs = 0; ; waitedMs += 100) {
+                if (activeTabKey() !== activeBefore || tabKeys().some((key) => !before.has(key))) {
+                    return true;
+                }
+                if (waitedMs >= NEW_TAB_WAIT_MS) {
+                    return false;
+                }
+                await sleep(100);
+            }
+        };
+        const run = await runPreviewCommand((...args) => vscode.commands.executeCommand(viewer.id, ...args), uri, showedSomething, OPEN_WITH_TIMEOUT_MS);
+        switch (run.status) {
+            case 'shown':
+                return `Opened ${relative}${where} and ran ${viewer.label}${run.withUri ? '' : ' on it as the active editor'}.`;
+            case 'unchanged':
+                return `Opened ${relative}${where} and ran ${viewer.label}, but no new editor or panel appeared: the preview may already be open, or the command did nothing for this file. Ask the user what they see.`;
+            case 'timeout':
+                return `Opened ${relative}${where} and started ${viewer.label}, but it had not finished after ${waited}, so I stopped waiting; it may still appear. Ask the user whether they see it.`;
+            case 'failed':
+                throw new Error(`${viewer.label} failed on ${relative}: ${run.error}`);
+        }
     }
 
     readOutput(source: string | undefined, lines: number): Promise<string> {
@@ -205,6 +298,12 @@ export class PairHands implements EditorHands, vscode.Disposable {
         this._terminals.push(terminal);
         return terminal;
     }
+}
+
+/** A tab by its group, title, and what it shows: a file, or a webview or custom editor's view type. */
+function tabKey(tab: vscode.Tab): string {
+    const input = tab.input as { uri?: vscode.Uri; viewType?: string } | undefined;
+    return [tab.group.viewColumn, tab.label, input?.viewType ?? '', input?.uri?.toString() ?? ''].join('\u0000');
 }
 
 function shellIntegration(terminal: vscode.Terminal): Promise<vscode.TerminalShellIntegration | undefined> {

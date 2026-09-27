@@ -9,8 +9,16 @@ vi.mock('vscode', () => ({
     },
 }));
 
+// A CLI default applies to new conversations, never to a session loaded from disk.
+vi.mock('../../../pi/piCliSync', () => ({
+    applyPiCliDefaultModel: async (manager: PiRpcSessionManager) => {
+        await manager.setModel('default-provider', 'shared-default');
+        return true;
+    },
+}));
+
 import { clearCliTargetCache, resolveCliTarget } from '../../../pi/piCliPaths';
-import { PiRpcSessionManager } from '../../../pi/rpcSession';
+import { PiRpcSessionManager, RpcSessionShim } from '../../../pi/rpcSession';
 
 describe('CLI target caching', () => {
     it('caches targets across repeated calls with preferredBackend', () => {
@@ -71,5 +79,55 @@ describe('PiRpcSessionManager readiness', () => {
         init.resolve();
         await expect(loading).resolves.toBe(true);
         expect(switchSession).toHaveBeenCalledWith('/tmp/session.jsonl');
+    });
+});
+
+describe('PiRpcSessionManager restoration', () => {
+    it('preserves distinct saved models when restoring separate tabs', async () => {
+        const savedModels: Record<string, { provider: string; id: string }> = {
+            '/tmp/first.jsonl': { provider: 'anthropic', id: 'claude-sonnet' },
+            '/tmp/second.jsonl': { provider: 'openai', id: 'gpt-6' },
+        };
+        const restoreTab = async (path: string) => {
+            const manager = new PiRpcSessionManager({ appendLine: vi.fn() } as unknown as vscode.OutputChannel);
+            const session = new RpcSessionShim('/tmp');
+            let model = { provider: 'default-provider', id: 'shared-default' };
+            const internals = manager as unknown as {
+                _shim: RpcSessionShim;
+                _bridge: {
+                    switchSession: (path: string) => Promise<{ cancelled: boolean }>;
+                    setModel: (provider: string, id: string) => Promise<void>;
+                    getState: () => Promise<{
+                        isStreaming: boolean; sessionId: string; sessionFile: string;
+                        thinkingLevel: string; model: { provider: string; id: string };
+                    }>;
+                };
+                syncFromRpc: () => Promise<void>;
+            };
+            internals._shim = session;
+            internals._bridge = {
+                switchSession: async (sessionPath) => {
+                    model = savedModels[sessionPath];
+                    return { cancelled: false };
+                },
+                setModel: async (provider, id) => { model = { provider, id }; },
+                getState: async () => ({
+                    isStreaming: false,
+                    sessionId: path,
+                    sessionFile: path,
+                    thinkingLevel: 'off',
+                    model,
+                }),
+            };
+            internals.syncFromRpc = async () => {
+                session.model = model;
+                session.sessionFile = path;
+            };
+            expect(await manager.loadSession(path)).toBe(true);
+            return manager.serializeState().model;
+        };
+
+        expect(await restoreTab('/tmp/first.jsonl')).toMatchObject(savedModels['/tmp/first.jsonl']);
+        expect(await restoreTab('/tmp/second.jsonl')).toMatchObject(savedModels['/tmp/second.jsonl']);
     });
 });

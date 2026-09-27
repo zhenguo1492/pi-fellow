@@ -1,25 +1,27 @@
 /**
  * The voice agent's place in the composer (docs/voice-agent-design.md §11): a robot status line
- * over the input box, and the choice where typed text goes. Voice agent off: the robot starts it.
- * On: the line says what it is doing (listening, thinking, synthesizing, speaking, …), the robot
- * stops it, and the composer's text goes to it unless "omp" is ticked. Slash commands and
- * messages with attachments always go to omp.
+ * over the input box, and where typed text goes. The robot and its label are one button. Voice agent
+ * off: it starts it. On: the label says what it is doing (listening, thinking, …) and a click stops it.
+ * The composer talks to what the tab shows: its conversation → the omp worker, the Bot view → the
+ * voice agent (offline: nobody, the composer is locked).
  */
 import type { VoiceReadiness } from '../shared/protocol';
-import { VOICE_MODE_LABEL, type VoiceAgentAction, type VoicePhase, type VoiceStatus } from '../shared/voiceViewProtocol';
+import { VOICE_MODE_LABEL, voiceIsOn, type VoiceAgentAction, type VoicePhase, type VoiceStatus } from '../shared/voiceViewProtocol';
 import { voiceWaveHtml } from './voiceWave';
 import { vscode } from './vscodeApi';
 
 const BAR_ID = 'voice-bar';
-const TARGET_ID = 'voice-target';
 
-const ICON_ROBOT =
+export const ICON_ROBOT =
     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="5" width="11" height="8.5" rx="2.5"/><path d="M8 5V2.75"/><circle cx="8" cy="2.25" r=".75" fill="currentColor" stroke="none"/><circle cx="5.75" cy="9" r="1" fill="currentColor" stroke="none"/><circle cx="10.25" cy="9" r="1" fill="currentColor" stroke="none"/><path d="M1 8.25v2M15 8.25v2"/></svg>';
 const ICON_HUSH =
     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2.5 6v4h2.5l3.5 3V3L5 6z"/><path d="M11 6l3.5 4M14.5 6L11 10"/></svg>';
-/** Page of dotted entries, one per line: the log of what was said, shown in the Bot view. */
+/** Page of dotted entries, one per line: the voice agent's conversation, the Bot view. */
 const ICON_LOG =
     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="1.75" width="11" height="12.5" rx="1.5"/><path d="M7 5.25h4M7 8h4M7 10.75h2.5"/><circle cx="5" cy="5.25" r=".75" fill="currentColor" stroke="none"/><circle cx="5" cy="8" r=".75" fill="currentColor" stroke="none"/><circle cx="5" cy="10.75" r=".75" fill="currentColor" stroke="none"/></svg>';
+/** Speech bubble: the worker's conversation, shown instead of the Bot view. */
+const ICON_CHAT =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M3 2.5h10a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4.5 14v-2.5H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z"/></svg>';
 /** Person handing off to a worker box: omp mode, the voice agent delegates the work to the omp worker. */
 const ICON_DELEGATE =
     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.5" cy="4.5" r="2"/><path d="M1 12.5a3.5 3.5 0 0 1 7 0"/><path d="M9 6h4.5M11.5 4l2 2-2 2"/><rect x="10" y="9.5" width="5" height="4.5" rx="1.2"/><circle cx="11.75" cy="11.75" r=".5" fill="currentColor" stroke="none"/><circle cx="13.25" cy="11.75" r=".5" fill="currentColor" stroke="none"/></svg>';
@@ -55,16 +57,11 @@ const PHASE_TITLE: Record<ShownPhase, string> = {
 let status: VoiceStatus | undefined;
 /** STT and TTS checks from the host; the voice agent needs both. Absent until the host reports them. */
 let readiness: VoiceReadiness | undefined;
-/** Ticked: the composer's text goes to omp while the voice agent is on. Reset each time it starts. */
-let toOmp = false;
+/** The active tab shows the Bot view instead of the worker's conversation. */
+let botViewShown = false;
 
 function post(action: VoiceAgentAction): void {
     vscode.postMessage({ type: 'voiceAgent', action });
-}
-
-/** Voice mode is on (or starting): the composer talks to the voice agent by default. */
-function voiceOn(): boolean {
-    return status !== undefined && (status.phase !== 'off' || status.starting);
 }
 
 /** Why the voice agent cannot start, one line per failing service; undefined when it can. */
@@ -77,22 +74,20 @@ function unavailableReason(): string | undefined {
 }
 
 export const voiceBarHtml = `<div id="${BAR_ID}" class="voice-bar" data-state="off">
-    <button type="button" class="voice-bar-robot" data-act="robot">${ICON_ROBOT}</button>
-    <span class="voice-bar-dot" aria-hidden="true"></span>
-    <span class="voice-bar-label" role="status" aria-live="polite"></span>
+    <button type="button" class="voice-bar-toggle" data-act="robot">
+        <span class="voice-bar-robot">${ICON_ROBOT}</span>
+        <span class="voice-bar-dot" aria-hidden="true"></span>
+        <span class="voice-bar-label" role="status" aria-live="polite"></span>
+    </button>
     <span class="voice-bar-muted" title="The microphone is muted: it hears nothing. Click the mic in the input box to unmute." hidden>Muted</span>
     <span class="voice-bar-spacer">${voiceWaveHtml}</span>
     <button type="button" class="voice-bar-btn" data-act="mode"></button>
     <button type="button" class="voice-bar-btn" data-act="hush" title="Stop the reply being spoken" aria-label="Stop the reply being spoken">${ICON_HUSH}</button>
-    <button type="button" class="voice-bar-btn" data-act="panel" title="Show the log (Bot view: conversation, engines, token use)" aria-label="Show the log">${ICON_LOG}</button>
+    <button type="button" class="voice-bar-btn" data-act="panel">${ICON_LOG}</button>
 </div>`;
 
-export const voiceTargetHtml = `<label id="${TARGET_ID}" class="voice-target" title="Send what you type to the omp worker instead of the voice agent. Slash commands and messages with attachments always go to the worker." hidden>
-    <input type="checkbox"><span>To worker</span>
-</label>`;
-
-/** Wires the status line and the target checkbox; call once the composer skeleton exists. */
-export function bindVoiceBar(onTargetChange: () => void): void {
+/** Wires the status line; call once the composer skeleton exists. */
+export function bindVoiceBar(): void {
     const bar = document.getElementById(BAR_ID);
     bar?.addEventListener('mousedown', (e) => {
         // Keep focus (and the caret) in the textarea.
@@ -107,37 +102,28 @@ export function bindVoiceBar(onTargetChange: () => void): void {
                 if (status?.starting) {
                     return;
                 }
-                if (!voiceOn() && unavailableReason() !== undefined) {
+                if (!voiceIsOn(status) && unavailableReason() !== undefined) {
                     vscode.postMessage({ type: 'openSettings', section: 'voice' });
                     return;
                 }
-                post({ type: voiceOn() ? 'stop' : 'start' });
+                post({ type: voiceIsOn(status) ? 'stop' : 'start' });
                 return;
             case 'mode':
-                post({ type: 'mode', mode: status?.mode === 'pair' ? 'omp' : 'pair' });
+                post({ type: 'mode', mode: status?.mode === 'omp' ? 'pair' : 'omp' });
                 return;
             case 'hush':
                 post({ type: 'hush' });
                 return;
             case 'panel':
-                post({ type: 'showPanel' });
+                vscode.postMessage({ type: 'toggleBotView' });
                 return;
         }
-    });
-    const box = document.querySelector<HTMLInputElement>(`#${TARGET_ID} input`);
-    box?.addEventListener('change', () => {
-        toOmp = box.checked;
-        onTargetChange();
     });
     render();
 }
 
 export function applyVoiceBarStatus(next: VoiceStatus | undefined): void {
-    const wasOn = voiceOn();
     status = next;
-    if (voiceOn() && !wasOn) {
-        toOmp = false;
-    }
     render();
 }
 
@@ -146,14 +132,23 @@ export function setVoiceReadiness(next: VoiceReadiness): void {
     render();
 }
 
-/** Where the composer's text goes now; `omp` for slash commands and attachments regardless. */
-export function composerTarget(text: string, attachments: number): 'voice' | 'omp' {
-    return voiceOn() && !toOmp && attachments === 0 && !text.startsWith('/') ? 'voice' : 'omp';
+/** The log button switches the active tab between the worker's conversation and the Bot view; it shows which one a click brings. */
+export function setBotViewShown(shown: boolean): void {
+    botViewShown = shown;
+    render();
 }
 
-/** Placeholder of the input box while the voice agent is on and gets what is typed. */
-export function voicePlaceholder(): string | undefined {
-    return voiceOn() && !toOmp ? 'Talk to the voice agent…' : undefined;
+/** Where the composer's text goes: to what the active tab shows. */
+export function composerTarget(): 'voice' | 'omp' {
+    return botViewShown ? 'voice' : 'omp';
+}
+
+/**
+ * The Bot view with the voice agent off: nobody reads what is typed there, so the composer takes
+ * nothing until the agent comes online or the tab goes back to the worker's conversation.
+ */
+export function composerLocked(): boolean {
+    return botViewShown && !voiceIsOn(status);
 }
 
 /** Sends the composer's text to the voice agent: it goes in like speech and cuts off a reply. */
@@ -166,7 +161,7 @@ function render(): void {
     if (!bar) {
         return;
     }
-    const on = voiceOn();
+    const on = voiceIsOn(status);
     // Muted is not a state of the agent: it stays in its colour and a grey tag says the mic is off.
     const phase: ShownPhase = status?.phase === 'muted' ? 'listening' : (status?.phase ?? 'off');
     const muted = on && status?.muted === true;
@@ -175,46 +170,49 @@ function render(): void {
     const label = bar.querySelector<HTMLElement>('.voice-bar-label')!;
     const idleMuted = muted && phase === 'listening';
     label.textContent = status?.starting ? 'Starting…' : idleMuted ? 'Online' : PHASE_LABEL[phase];
-    label.title = status?.starting
-        ? 'The voice agent is starting: microphone, speech services and voice model.'
-        : idleMuted
-          ? 'The voice agent is on and waiting; type to it, or unmute to talk.'
-          : PHASE_TITLE[phase];
     bar.querySelector<HTMLElement>('.voice-bar-muted')!.hidden = !muted;
-    const robot = bar.querySelector<HTMLButtonElement>('[data-act="robot"]')!;
+    const toggle = bar.querySelector<HTMLButtonElement>('[data-act="robot"]')!;
     // Off and a speech service is not working: red, the tooltip says why, a click opens Settings → Voice.
     const blockedBy = on ? undefined : unavailableReason();
-    const robotTitle = status?.starting
+    const action = status?.starting
         ? 'The voice agent is starting…'
         : on
           ? 'Stop the voice agent'
           : blockedBy
             ? `The voice agent cannot start:\n${blockedBy}`
             : 'Start the voice agent';
-    robot.title = robotTitle;
-    robot.setAttribute('aria-label', robotTitle);
-    robot.setAttribute('aria-pressed', String(on));
-    robot.setAttribute('aria-disabled', String(blockedBy !== undefined));
-    robot.classList.toggle('is-unavailable', blockedBy !== undefined);
-    if (blockedBy) {
-        label.title = robotTitle;
-    }
+    toggle.title = status?.starting
+        ? 'The voice agent is starting: microphone, speech services and voice model.'
+        : on
+          ? `${idleMuted ? 'The voice agent is on and waiting; type to it, or unmute to talk.' : PHASE_TITLE[phase]}\nClick to stop the voice agent.`
+          : blockedBy
+            ? action
+            : PHASE_TITLE.off;
+    toggle.setAttribute('aria-label', action);
+    toggle.setAttribute('aria-pressed', String(on));
+    toggle.setAttribute('aria-disabled', String(blockedBy !== undefined || status?.starting === true));
+    bar.querySelector('.voice-bar-robot')!.classList.toggle('is-unavailable', blockedBy !== undefined);
     const mode = bar.querySelector<HTMLButtonElement>('[data-act="mode"]')!;
-    const pair = status?.mode === 'pair';
+    const pair = status?.mode !== 'omp';
     mode.hidden = !on || status?.starting === true;
     if (mode.dataset.mode !== (pair ? 'pair' : 'omp')) {
         mode.dataset.mode = pair ? 'pair' : 'omp';
         mode.innerHTML = pair ? ICON_HANDSHAKE : ICON_DELEGATE;
     }
     mode.title = pair
-        ? 'Pair mode: the voice agent edits files and runs commands itself, and does not direct the worker. Click for Delegate mode, where it hands the work to the worker again.'
+        ? 'Pair mode: the voice agent edits files and runs commands itself, and hands heavy jobs to the worker on its own. Click for Delegate mode, where the worker does all the work.'
         : 'Delegate mode: the voice agent hands the work to the omp worker and directs it. Click for Pair mode, where it edits and runs commands itself.';
     mode.setAttribute('aria-label', `${VOICE_MODE_LABEL[pair ? 'pair' : 'omp']} mode`);
     bar.querySelector<HTMLButtonElement>('[data-act="hush"]')!.hidden = phase !== 'speaking' && phase !== 'synthesizing';
-
-    const target = document.getElementById(TARGET_ID);
-    if (target) {
-        target.hidden = !on;
-        target.querySelector<HTMLInputElement>('input')!.checked = toOmp;
+    const panel = bar.querySelector<HTMLButtonElement>('[data-act="panel"]')!;
+    if (panel.dataset.shown !== String(botViewShown)) {
+        panel.dataset.shown = String(botViewShown);
+        panel.innerHTML = botViewShown ? ICON_CHAT : ICON_LOG;
+        const panelTitle = botViewShown
+            ? 'Back to the worker conversation'
+            : 'Show the voice agent conversation in this tab (Bot view: conversation, engines, token use)';
+        panel.title = panelTitle;
+        panel.setAttribute('aria-label', panelTitle);
+        panel.setAttribute('aria-pressed', String(botViewShown));
     }
 }

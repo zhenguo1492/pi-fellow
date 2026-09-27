@@ -239,8 +239,6 @@ export class PiRpcSessionManager {
         }
 
         const agentEvent = event as PiAgentEvent;
-        this.events.dispatch(agentEvent);
-
         if (agentEvent.type === 'agent_start' && this._shim) {
             this._shim.isStreaming = true;
             this._shim.isRetrying = false;
@@ -257,6 +255,11 @@ export class PiRpcSessionManager {
         }
         if (agentEvent.type === 'agent_end' && this._shim) {
             this._shim.isStreaming = false;
+        }
+
+        this.events.dispatch(agentEvent);
+
+        if (agentEvent.type === 'agent_end' && this._shim) {
             void this.syncFromRpc();
         }
         if (agentEvent.type === 'message_end') {
@@ -575,11 +578,8 @@ export class PiRpcSessionManager {
                 return false;
             }
             await this.syncFromRpc();
-            try {
-                await applyPiCliDefaultModel(this);
-            } catch {
-                /* model not available in current backend */
-            }
+            // switch_session restores the saved model. Applying the CLI default here would
+            // append a model_change to this conversation and overwrite its restored choice.
             return true;
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);

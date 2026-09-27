@@ -1,10 +1,10 @@
 /**
- * The Bot view in the bottom panel (docs/voice-agent-design.md §11): at the top, the engines voice
- * mode uses and the voice context's token use; below, the cards and the voice conversation. It only
- * shows: everything typed goes through the chat's composer. Renders the host's `VoiceViewState`
- * snapshots, which arrive many times a second while a reply streams, so the transcript is updated
- * per entry id and per part, keeping scroll position, open folds and running CSS animations (the
- * playing sentence's word highlight) intact.
+ * The Bot view (docs/voice-agent-design.md §11), shown by a chat tab in place of its conversation:
+ * at the top, the engines voice mode uses and the voice context's token use; below, the cards and
+ * the voice conversation. It only shows: everything typed goes through the chat's composer. Renders
+ * the host's `VoiceViewState` snapshots, which arrive many times a second while a reply streams, so
+ * the transcript is updated per entry id and per part, keeping scroll position, open folds and
+ * running CSS animations intact.
  */
 import type { ClientMessage } from '../shared/protocol';
 import {
@@ -20,12 +20,15 @@ import {
     type VoiceViewState,
 } from '../shared/voiceViewProtocol';
 import { formatTokenCount } from './tokenStatsBar';
+import { ICON_ROBOT } from './voiceBar';
 import { vscode } from './vscodeApi';
 
 /** Within this many pixels of the bottom, the transcript follows new content. */
 const FOLLOW_SLACK_PX = 40;
 /** LLM calls listed under the token totals, newest first. */
 const CALLS_SHOWN = 50;
+/** A speaker's turns this close together share one avatar and header, as in Slack. */
+const GROUP_MS = 5 * 60_000;
 
 const SOURCE_ICON: Record<'stt' | 'text' | 'panel', [icon: string, title: string]> = {
     stt: ['🎙', 'Spoken'],
@@ -36,6 +39,19 @@ const SOURCE_ICON: Record<'stt' | 'text' | 'panel', [icon: string, title: string
 /** Stopwatch (reply latency), drawn in the text colour. */
 const TIMING_ICON =
     '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="9.2" r="5.3"/><path d="M8 9.2V6.4M6.3 1.6h3.4M12.2 4.6l1-1"/></g></svg>';
+
+/** Clock with a back arrow: past voice conversations. */
+const HISTORY_ICON =
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2.25 2.5V5h2.5"/><path d="M8 5v3.25l2 1.25"/></svg>';
+
+const SVG_OPEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+/** Avatars per speaker; the bot's is the robot that starts voice mode. */
+const AVATAR: Record<'user' | 'bot' | 'narr' | 'sys', string> = {
+    user: `${SVG_OPEN}<circle cx="8" cy="5.5" r="2.75"/><path d="M2.75 14a5.25 5.25 0 0 1 10.5 0"/></svg>`,
+    bot: ICON_ROBOT,
+    narr: `${SVG_OPEN}<path d="M3 12h10l-1.25-1.5V7a3.75 3.75 0 0 0-7.5 0v3.5z"/><path d="M6.5 13.75a1.5 1.5 0 0 0 3 0"/></svg>`,
+    sys: `${SVG_OPEN}<path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>`,
+};
 
 function post(message: VoiceViewClientMessage): void {
     vscode.postMessage({ type: 'voice', message } satisfies ClientMessage);
@@ -56,6 +72,11 @@ function mmss(ms: number): string {
 function secs(ms: number): string {
     return `${(ms / 1000).toFixed(2)}s`;
 }
+
+/** Message time in the header, as Slack shows it, with seconds ("7:18:05 AM"). */
+const CLOCK = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+/** The avatar column's shorter time ("7:18"), shown on hover for grouped turns. */
+const GUTTER_CLOCK = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 
 function cost(usd: number): string {
     return usd >= 0.01 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(4)}`;
@@ -85,6 +106,7 @@ root.setAttribute('aria-label', 'Voice agent');
 root.innerHTML = `
 <div class="vp-head">
     <button type="button" class="vp-sum" aria-expanded="false" title="Show engines and token use"><span class="vp-sum-v"></span><span class="vp-car">▶</span></button>
+    <button type="button" class="vp-hist" title="Past voice conversations" aria-label="Past voice conversations">${HISTORY_ICON}</button>
     <div class="vp-detail">
         <div class="vp-eng"></div>
         <details class="vp-tokens">
@@ -95,7 +117,7 @@ root.innerHTML = `
 </div>
 <div class="vp-cards"></div>
 <div class="vp-banner">Viewing a past session — read only</div>
-<div class="vp-stream" role="log" aria-live="polite"></div>`;
+<div class="vp-stream" role="log" aria-live="polite"><div class="vp-empty"></div></div>`;
 
 const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
 const headEl = q('.vp-head');
@@ -107,12 +129,14 @@ const tokSumEl = q('.vp-tok-sum');
 const callsEl = q('.vp-calls');
 const cardsEl = q('.vp-cards');
 const stream = q('.vp-stream');
+/** Stays last in the stream, shown only while there are no turns. */
+const emptyEl = q('.vp-empty');
 
 function isFollowing(): boolean {
     return stream.scrollHeight - stream.scrollTop - stream.clientHeight < FOLLOW_SLACK_PX;
 }
 
-/** Puts the view in its webview (src/webview/voiceView.ts), filling it. */
+/** Puts the view in its host: the chat's Bot view container, which it fills. */
 export function mountVoicePanel(host: HTMLElement): void {
     host.appendChild(root);
 }
@@ -124,6 +148,7 @@ function setHeadOpen(open: boolean): void {
     sumBtn.setAttribute('aria-expanded', String(open));
 }
 sumBtn.addEventListener('click', () => setHeadOpen(!headEl.classList.contains('open')));
+q('.vp-hist').addEventListener('click', () => post({ type: 'history' }));
 headEl.addEventListener('mouseleave', () => setHeadOpen(false));
 document.addEventListener('click', (e) => {
     if (!headEl.contains(e.target as Node)) {
@@ -216,18 +241,22 @@ function callsTable(calls: Array<{ u: VoiceCallUsage; who: string }>): string {
     return `<table><thead><tr><th>Time</th><th>For</th><th>In</th><th>Cache read</th><th>Cache write</th><th>Out</th><th>Cost</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
-// ── Transcript: one row per utterance ──
+// ── Transcript: Slack-style messages, avatar + name and time over the text ──
 
 interface TurnView {
     el: HTMLElement;
+    avatar: HTMLElement;
     who: HTMLElement;
+    time: HTMLElement;
+    /** The time in the avatar column, shown on hover when the header is left out (`.cont`). */
+    gutterTime: HTMLElement;
     attach: HTMLElement;
     pre: HTMLElement;
     body: HTMLElement;
     post: HTMLElement;
     error: HTMLElement;
     chips: HTMLElement;
-    /** Stopwatch button beside the speaker label; toggles `timingBody` (the turn's latency breakdown). */
+    /** Stopwatch button after the header's time, shown on hover; toggles `timingBody` (the turn's latency breakdown). */
     timing: HTMLButtonElement;
     timingBody: HTMLElement;
     /** Whether `body` holds per-sentence spans or plain text. */
@@ -242,13 +271,16 @@ let sessionId: string | undefined;
 function createTurn(): TurnView {
     const el = document.createElement('div');
     el.innerHTML =
-        '<div class="vp-who"><span class="vp-name"></span><button type="button" class="vp-timing" aria-expanded="false" hidden>' +
+        '<div class="vp-av" aria-hidden="true"></div><time class="vp-gtime"></time><div class="vp-who"><span class="vp-name"></span><time class="vp-time"></time><button type="button" class="vp-timing" aria-expanded="false" hidden>' +
         TIMING_ICON +
         '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-err" hidden></div><div class="vp-chips"></div><div class="vp-chip-body vp-timing-body" hidden></div></div>';
     const part = <T extends HTMLElement = HTMLElement>(sel: string) => el.querySelector<T>(sel)!;
     return {
         el,
+        avatar: part('.vp-av'),
         who: part('.vp-name'),
+        time: part('.vp-time'),
+        gutterTime: part('.vp-gtime'),
         attach: part('.vp-attach'),
         pre: part('.vp-pre'),
         body: part('.vp-body'),
@@ -260,47 +292,58 @@ function createTurn(): TurnView {
     };
 }
 
+/** Who said a turn, for grouping: a user's spoken and typed turns get separate headers (the header shows the source). */
+function speaker(entry: VoiceEntry): string {
+    return entry.kind === 'user' ? `user:${entry.source}` : entry.kind === 'system' ? 'sys' : entry.proactive ? 'narr' : 'bot';
+}
+
 function renderStream(s: VoiceViewState): void {
     if (s.session.id !== sessionId) {
         sessionId = s.session.id;
         turns.clear();
         openChips.clear();
-        stream.replaceChildren();
+        stream.replaceChildren(emptyEl);
     }
     const follow = isFollowing();
     const entries = s.debug ? s.entries : s.entries.filter((e) => !(e.kind === 'assistant' && e.silent));
-    const seen = new Set<string>();
+    // Gone turns go first: left in place, they would push every later turn to be moved.
+    const ids = new Set(entries.map((e) => e.id));
+    for (const [id, view] of turns) {
+        if (!ids.has(id)) {
+            view.el.remove();
+            turns.delete(id);
+        }
+    }
     let prev: Element | null = null;
+    let prevEntry: VoiceEntry | undefined;
     for (const entry of entries) {
-        seen.add(entry.id);
         let view = turns.get(entry.id);
         if (!view) {
             view = createTurn();
             turns.set(entry.id, view);
         }
         updateTurn(view, entry, s.debug);
+        const grouped = prevEntry !== undefined && speaker(prevEntry) === speaker(entry) && entry.at - prevEntry.at < GROUP_MS;
+        view.el.classList.toggle('cont', grouped);
+        prevEntry = entry;
         const expected: Element | null = prev ? prev.nextElementSibling : stream.firstElementChild;
         if (expected !== view.el) {
+            if (view.el.isConnected) {
+                // Re-inserting a shown turn would replay its entry animation.
+                view.el.dataset.settled = '';
+            }
             stream.insertBefore(view.el, expected);
         }
         prev = view.el;
     }
-    for (const [id, view] of turns) {
-        if (!seen.has(id)) {
-            view.el.remove();
-            turns.delete(id);
-        }
-    }
-    stream.querySelector(':scope > .vp-empty')?.remove();
-    if (entries.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'vp-empty';
-        empty.textContent = s.session.readonly
-            ? 'Nothing was said in this session.'
-            : s.phase === 'off'
-              ? 'Voice mode is off. Start it with the robot above the chat’s input box.'
-              : 'Say something, or type in the chat’s input box.';
-        stream.append(empty);
+    emptyEl.hidden = entries.length > 0;
+    const emptyText = s.session.readonly
+        ? 'Nothing was said in this session.'
+        : s.phase === 'off'
+          ? 'Voice mode is off. Start it with the robot above the chat’s input box.'
+          : 'Say something, or type in the chat’s input box.';
+    if (emptyEl.textContent !== emptyText) {
+        emptyEl.textContent = emptyText;
     }
     if (follow) {
         stream.scrollTop = stream.scrollHeight;
@@ -308,9 +351,22 @@ function renderStream(s: VoiceViewState): void {
 }
 
 function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
-    view.who.title = new Date(entry.at).toLocaleString();
+    if (!view.time.textContent) {
+        // An entry's time never changes: set once, not on every snapshot.
+        const when = new Date(entry.at).toLocaleString();
+        view.time.textContent = CLOCK.format(entry.at);
+        // The avatar column is narrow: no seconds or AM/PM there.
+        view.gutterTime.textContent = GUTTER_CLOCK.formatToParts(entry.at)
+            .filter((p) => p.type !== 'dayPeriod')
+            .map((p) => p.value)
+            .join('')
+            .trim();
+        view.time.title = when;
+        view.gutterTime.title = when;
+    }
     if (entry.kind === 'user') {
         view.el.className = 'vp-turn user';
+        setHtml(view.avatar, AVATAR.user);
         const [icon, title] = SOURCE_ICON[entry.source] ?? SOURCE_ICON.text;
         setHtml(view.who, `User<span class="vp-src" title="${title}">${icon}</span>`);
         setHtml(view.attach, '');
@@ -334,6 +390,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     }
     if (entry.kind === 'system') {
         view.el.className = 'vp-turn sys';
+        setHtml(view.avatar, AVATAR.sys);
         setHtml(view.who, 'Setting');
         setHtml(view.attach, '');
         setHtml(view.pre, '');
@@ -345,8 +402,10 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         return;
     }
 
-    view.el.className = `vp-turn ${entry.proactive ? 'narr' : 'bot'}${entry.silent ? ' silent' : ''}`;
-    setHtml(view.who, entry.proactive ? 'Update' : 'Bot');
+    const kind = entry.proactive ? 'narr' : 'bot';
+    view.el.className = `vp-turn ${kind}${entry.silent ? ' silent' : ''}`;
+    setHtml(view.avatar, AVATAR[kind]);
+    setHtml(view.who, `${entry.proactive ? 'Update' : 'Bot'}<span class="vp-badge">AI</span>`);
     setHtml(view.attach, debug && entry.input ? esc(entry.input) : '');
     setHtml(view.pre, entry.proactive ? `<span class="vp-kind ${esc(entry.proactive)}">${esc(entry.proactive)}</span>` : '');
 
@@ -435,17 +494,6 @@ function setError(view: TurnView, error: string | undefined): void {
 
 /** Scripts written without spaces between words. */
 const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
-/** A spoken word (a single character in CJK) and the whitespace after it. */
-const WORD = /([\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]|[^\s\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+)(\s*)/g;
-
-/** Rough spoken length in seconds; only the proportions matter when the audio length is known. */
-function speechSecs(text: string): number {
-    let secs = 0;
-    for (const ch of text) {
-        secs += CJK.test(ch) ? 0.22 : /\s/.test(ch) ? 0.02 : 0.065;
-    }
-    return secs;
-}
 
 function setSentences(view: TurnView, sentences: VoiceSentence[]): void {
     if (view.mode !== 'sentences') {
@@ -456,58 +504,34 @@ function setSentences(view: TurnView, sentences: VoiceSentence[]): void {
     const spans = view.body.children;
     sentences.forEach((sentence, i) => {
         const next = sentences[i + 1]?.text ?? '';
-        const spaced =
-            next && !/\s$/.test(sentence.text) && !/^\s/.test(next) && !CJK.test(sentence.text.slice(-1))
-                ? `${sentence.text} `
-                : sentence.text;
+        const gap = next && !/\s$/.test(sentence.text) && !/^\s/.test(next) && !CJK.test(sentence.text.slice(-1)) ? ' ' : '';
         let span = spans[i] as HTMLElement | undefined;
         if (!span) {
             span = document.createElement('span');
             view.body.append(span);
         }
-        // Rebuilt only when something shown changes, so the word highlight keeps running.
-        const key = `${sentence.state}|${sentence.playback?.at ?? ''}|${spaced}`;
-        if (span.dataset.key === key) {
-            return;
+        // Rebuilt only when something shown changes; the space before the next sentence is a
+        // trailing text node, added without a rebuild.
+        const key = `${sentence.state}|${sentence.text}`;
+        if (span.dataset.key !== key) {
+            span.dataset.key = key;
+            span.dataset.gap = '';
+            span.className = `vp-s ${sentence.state}`;
+            span.textContent = sentence.text;
         }
-        span.dataset.key = key;
-        span.className = `vp-s ${sentence.state}`;
-        if (sentence.state === 'playing') {
-            speakWords(span, spaced, sentence.playback);
-        } else {
-            span.textContent = spaced;
+        if (span.dataset.gap !== gap) {
+            if (span.dataset.gap) {
+                span.lastChild?.remove();
+            }
+            if (gap) {
+                span.append(gap);
+            }
+            span.dataset.gap = gap;
         }
     });
     while (spans.length > sentences.length) {
         spans[spans.length - 1].remove();
     }
-}
-
-/**
- * The playing sentence, one span per word, each highlighted (CSS animation `vp-word`) during its
- * share of the audio: the audio's length split by each word's rough spoken length. Delays count
- * from when the audio started, so a late or repeated render stays in step with the voice.
- */
-function speakWords(span: HTMLElement, text: string, playback: VoiceSentence['playback']): void {
-    const words = [...text.matchAll(WORD)].map(([, word, gap]) => ({ word, gap, weight: speechSecs(word + gap) }));
-    const total = words.reduce((sum, w) => sum + w.weight, 0) || 1;
-    const durationMs = playback?.durationMs ?? total * 1000;
-    const elapsedMs = playback ? Date.now() - playback.at : 0;
-    let before = 0;
-    const nodes: Node[] = [];
-    for (const { word, gap, weight } of words) {
-        const el = document.createElement('span');
-        el.className = 'vp-w';
-        el.textContent = word;
-        el.style.animationDelay = `${Math.round((before / total) * durationMs - elapsedMs)}ms`;
-        el.style.animationDuration = `${Math.max(1, Math.round((weight / total) * durationMs))}ms`;
-        before += weight;
-        nodes.push(el);
-        if (gap) {
-            nodes.push(document.createTextNode(gap));
-        }
-    }
-    span.replaceChildren(...nodes);
 }
 
 interface Chip {

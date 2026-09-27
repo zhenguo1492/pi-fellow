@@ -1,4 +1,5 @@
 import type { AgentBackend } from '../pi/agentBackend';
+import type { VoiceSessionSummary } from '../pi/sessionCatalog';
 import type { ExtensionUiMethod } from '../shared/extensionUi';
 
 /**
@@ -35,6 +36,11 @@ export interface WorkerController {
     answer(tabId: string, requestId: string, answer: WorkerAnswer): boolean;
     /** Last `count` user instructions with the worker's final reply to each, oldest first. */
     recentTurns(tabId: string, count: number): WorkerTurn[];
+    /**
+     * Names the tab's worker session after its voice conversation. False, and nothing changes, when
+     * the session already has a name (the user's, or omp's own title) or the tab moved to another session.
+     */
+    nameTask(tabId: string, sessionFile: string, name: string): Promise<boolean>;
 }
 
 export interface WorkerTask {
@@ -43,6 +49,8 @@ export interface WorkerTask {
     backend: AgentBackend;
     /** Worker session file; keys the voice context once it exists (§5.12 rule 1). */
     sessionFile?: string;
+    /** The worker session's name, when it has one. */
+    sessionName?: string;
     /** `provider/id` of the worker's current model. */
     model?: string;
 }
@@ -55,6 +63,17 @@ export function provisionalTaskKey(tabId: string): string {
 /** Voice context and transcript key (§5.12 rule 1): the worker session file, or the tab before it has one. */
 export function taskKey(task: Pick<WorkerTask, 'tabId' | 'sessionFile'>): string {
     return task.sessionFile ?? provisionalTaskKey(task.tabId);
+}
+
+/**
+ * The voice side of worker sessions, for the sidebar's resume list (the voice transcript store): a
+ * session the user only talked to the voice agent about is still one to resume, under its voice name.
+ */
+export interface VoiceHistory {
+    voiceSessions(): VoiceSessionSummary[];
+    /** `by: 'user'` also stops a generated name from replacing this one. */
+    nameTask(sessionFile: string, title: string, by: 'auto' | 'user'): boolean;
+    forgetTask(sessionFile: string): void;
 }
 
 export interface WorkerSendOptions {

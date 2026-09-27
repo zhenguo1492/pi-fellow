@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { type AgentBackend, type AgentLayout, resolveAgentDir } from './agentBackend';
@@ -162,17 +162,27 @@ export function onDidChangeWindowBackend(listener: (backend: AgentBackend) => vo
 
 /**
  * CLI to run. This window's picked backend wins, then `oh-my-pi-chater.backend` (`auto` prefers omp,
- * then pi); `oh-my-pi-chater.cliPath` pins the executable. Sync so agent-dir lookups stay sync.
+ * then pi); `oh-my-pi-chater.cliPath` pins the executable. A window pick whose CLI has since been
+ * uninstalled yields to the setting. Sync so agent-dir lookups stay sync.
  */
 export function resolveCliTarget(preferredBackend?: BackendSetting): CliTarget {
     const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
-    const setting = preferredBackend ?? windowBackend ?? config.get<BackendSetting>('backend', 'auto');
+    const configuredSetting = config.get<BackendSetting>('backend', 'auto');
+    const setting = preferredBackend ?? windowBackend ?? configuredSetting;
     const configured = config.get<string>('cliPath', '').trim();
     const key = `${setting}\0${configured}\0${process.env.PATH ?? ''}`;
     if (cachedTarget?.key === key && fs.existsSync(cachedTarget.target.cliPath)) {
         return cachedTarget.target;
     }
-    const target = findCliTarget(setting, configured);
+    let target: CliTarget;
+    try {
+        target = findCliTarget(setting, configured);
+    } catch (err) {
+        if (preferredBackend || !windowBackend || setting === configuredSetting) {
+            throw err;
+        }
+        target = findCliTarget(configuredSetting, configured);
+    }
     cachedTarget = { key, target };
     return target;
 }
@@ -498,4 +508,39 @@ export async function runPiCliCommand(
         outputChannel?.appendLine(`[${invocation.backend} stderr] ${stderr.trim()}`);
     }
     return { stdout, stderr };
+}
+
+/**
+ * One `-p` run of the CLI with `args`: `input` goes over stdin, so text starting with "-" is never
+ * read as a flag. Resolves with its trimmed output; rejects when it fails, prints nothing, or runs
+ * past `timeoutMs`. `onSpawn` gets the process, to stop it early.
+ */
+export function runPrintMode(
+    invocation: PiCliInvocation,
+    args: string[],
+    input: string,
+    cwd: string,
+    options: { timeoutMs?: number; onSpawn?: (child: ChildProcess) => void } = {},
+): Promise<string> {
+    const [command, argv] = cliCommand(invocation, args);
+    const child = spawn(command, argv, { cwd, env: piCliChildEnv(invocation), stdio: ['pipe', 'pipe', 'pipe'] });
+    options.onSpawn?.(child);
+    const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => child.kill('SIGTERM'), options.timeoutMs);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    child.stdin.end(input);
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    child.on('error', reject);
+    child.on('close', (code, signal) => {
+        clearTimeout(timer);
+        const output = stdout.trim();
+        if (code === 0 && output) {
+            resolve(output);
+        } else {
+            reject(new Error(signal ? `stopped (${signal})` : `${invocation.backend} exited with code ${code}: ${stderr.trim().slice(-300)}`));
+        }
+    });
+    return promise;
 }

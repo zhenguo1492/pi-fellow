@@ -66,3 +66,35 @@ describe('turn message: editor', () => {
         expect(buildTurnMessage(base)).not.toContain('<editor');
     });
 });
+
+describe('turn message: proposals settled with the panel buttons', () => {
+    const base: TurnInput = {
+        trigger: { kind: 'user', text: '好了吗', source: 'stt' },
+        status: { phase: 'working', queued: 0 },
+        updates: [],
+        requests: [],
+        proposals: [],
+        research: [],
+    };
+
+    it('tells the model a confirmed proposal already went out, and a cancelled one was dropped, before the user speaks', () => {
+        const message = buildTurnMessage({
+            ...base,
+            settledProposals: [
+                { id: 'p1', tabId: 'tab-1', message: 'bump version', outcome: 'confirmed', by: 'button', result: 'Sent as a new task; the worker has started.' },
+                { id: 'p2', tabId: 'tab-1', message: 'drop the cache', outcome: 'cancelled', by: 'button' },
+            ],
+        });
+        expect(message).toContain('<proposal-settled id="p1" outcome="confirmed">bump version\nResult: Sent as a new task; the worker has started.</proposal-settled>');
+        expect(message).toContain('<proposal-settled id="p2" outcome="cancelled">drop the cache</proposal-settled>');
+        expect(message.indexOf('<proposal-settled')).toBeLessThan(message.indexOf('<user'));
+    });
+
+    it('says a confirmed proposal is still being sent when its result is not in yet', () => {
+        const message = buildTurnMessage({
+            ...base,
+            settledProposals: [{ id: 'p1', tabId: 'tab-1', message: 'bump version', outcome: 'confirmed', by: 'button' }],
+        });
+        expect(message).toContain('<proposal-settled id="p1" outcome="confirmed">bump version\nResult: It is being sent now.</proposal-settled>');
+    });
+});

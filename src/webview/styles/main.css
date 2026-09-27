@@ -679,18 +679,62 @@ body {
     filter: brightness(0) invert(0.8);
 }
 
-.tab-spinner {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border: 2px solid var(--muted);
-    border-top-color: var(--btn-bg);
-    border-radius: 50%;
-    animation: tab-spin 0.8s linear infinite;
+/* The bubble stays still; its full outline masks a slowly rotating rainbow. */
+.tab-chat-icon {
+    display: block;
+    position: relative;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    overflow: hidden;
+    mask: url('../../../media/icons/chat.svg') center / contain no-repeat;
 }
-.tab-active .tab-spinner {
-    border-color: rgba(255, 255, 255, 0.2);
-    border-top-color: var(--btn-bg);
+.tab-chat-icon::before {
+    content: '';
+    position: absolute;
+    inset: -50%;
+    background: conic-gradient(#ff5a71, #ffad45, #ffe071, #55dba2, #45cfff, #a37dff, #ff5a71);
+    animation: tab-chat-rainbow 3s linear infinite;
+}
+@keyframes tab-chat-rainbow {
+    to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .tab-chat-icon::before { animation: none; }
+}
+
+/* The icon is a button: it toggles the tab between its conversation and the Bot view. */
+button.tab-icon {
+    padding: 0;
+    border: 0;
+    border-radius: 3px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+button.tab-icon:hover {
+    opacity: 1;
+    background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+}
+button.tab-icon:focus-visible {
+    outline: 1px solid var(--focus-border);
+}
+
+.tab-icon-robot {
+    display: flex;
+    color: var(--voice-accent);
+}
+.tab-icon-robot svg {
+    width: 14px;
+    height: 14px;
+}
+.tab-streaming .tab-icon-robot {
+    animation: tab-robot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes tab-robot-pulse {
+    50% { opacity: 0.4; }
 }
 
 @keyframes tab-spin {
@@ -753,111 +797,6 @@ body {
     filter: brightness(0) invert(0.8);
 }
 .icon-btn:hover .header-icon-img { filter: brightness(0) invert(1); }
-
-/* ── Backend selector dropdown ── */
-.backend-dropdown {
-    position: relative;
-    flex-shrink: 0;
-    margin: 0 1px;
-}
-
-.backend-dropdown-btn {
-    height: 22px;
-    padding: 0 5px 0 6px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--input-bg) 85%, transparent);
-    color: var(--fg);
-    cursor: pointer;
-    font-size: 11px;
-    font-weight: 500;
-    line-height: 1;
-    font-family: inherit;
-    transition: color 0.15s, background 0.15s, border-color 0.15s;
-    user-select: none;
-}
-
-.backend-dropdown-btn:hover,
-.backend-dropdown-btn.active {
-    background: var(--input-bg);
-    border-color: color-mix(in srgb, var(--border) 60%, var(--fg) 25%);
-}
-
-.backend-btn-text {
-    text-transform: lowercase;
-}
-
-.backend-dropdown-btn .dropdown-chevron {
-    opacity: 0.7;
-    transition: transform 0.15s;
-}
-
-.backend-dropdown-btn.active .dropdown-chevron {
-    transform: rotate(180deg);
-}
-
-.backend-dropdown-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    min-width: 90px;
-    overflow-y: auto;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--vscode-menu-background, var(--card-bg));
-    color: var(--vscode-menu-foreground, var(--fg));
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.18);
-    z-index: 120;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-
-.backend-dropdown-menu[hidden] {
-    display: none;
-}
-
-.backend-dropdown-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: 4px 8px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: inherit;
-    font-size: 11.5px;
-    font-family: inherit;
-    cursor: pointer;
-    text-align: left;
-    transition: background 0.1s, color 0.1s;
-    user-select: none;
-}
-
-.backend-dropdown-item:hover {
-    background: var(--vscode-menu-selectionBackground, var(--input-bg));
-    color: var(--vscode-menu-selectionForeground, var(--fg));
-}
-
-.backend-dropdown-item.active {
-    font-weight: 600;
-}
-
-.backend-item-label {
-    text-transform: lowercase;
-}
-
-.backend-item-check {
-    font-size: 11px;
-    margin-left: 8px;
-    color: var(--accent);
-}
 
 /* ── Composer model picker (opens above the input container) ── */
 .model-picker {
@@ -1890,6 +1829,22 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 #input::placeholder { color: var(--muted); }
 #input { user-select: text; }
 
+/* The Bot view with the voice agent offline: the box takes nothing; the placeholder says why. */
+.input-area.is-locked .composer-toolbar {
+    margin: -3px -5px;
+    padding: 3px 5px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+#input:disabled {
+    color: var(--muted);
+    cursor: not-allowed;
+}
+.composer-action-btn--ghost:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 .composer-footer {
     display: flex;
     align-items: center;
@@ -2618,18 +2573,44 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     --vb-state: var(--success-fg);
 }
 
+/* Robot, status dot and label: one button that starts or stops the voice agent. */
+.voice-bar-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 8px 0 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.voice-bar-toggle:hover {
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.voice-bar.on .voice-bar-toggle:hover {
+    background: color-mix(in srgb, var(--vb-state) 10%, transparent);
+}
+
+.voice-bar[data-state='starting'] .voice-bar-toggle {
+    background: transparent;
+    cursor: default;
+}
+
 .voice-bar-robot {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 22px;
     height: 22px;
-    padding: 0;
+    box-sizing: border-box;
     border: 1px solid transparent;
     border-radius: 6px;
-    background: transparent;
     color: var(--muted);
-    cursor: pointer;
 }
 
 .voice-bar-robot svg,
@@ -2638,8 +2619,12 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     height: 15px;
 }
 
-.voice-bar-robot:hover {
+.voice-bar:not(.on):not([data-state='starting']) .voice-bar-toggle:hover .voice-bar-robot:not(.is-unavailable) {
     background: color-mix(in srgb, var(--fg) 8%, transparent);
+    color: var(--fg);
+}
+
+.voice-bar:not(.on):not([data-state='starting']) .voice-bar-toggle:hover .voice-bar-label {
     color: var(--fg);
 }
 
@@ -2651,7 +2636,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 
 .voice-bar[data-state='starting'] .voice-bar-robot {
     animation: pulse-dot 1.2s ease-in-out infinite;
-    cursor: default;
 }
 
 .voice-bar-dot {
@@ -2680,7 +2664,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
 
 .voice-bar-label {
     white-space: nowrap;
-    cursor: default;
 }
 
 /* Muted mic while the agent is on: a grey tag; the robot keeps the agent's colour. */
@@ -2692,7 +2675,6 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     font-size: 10px;
     color: var(--muted);
     white-space: nowrap;
-    cursor: default;
 }
 
 .voice-bar-muted[hidden] {
@@ -2734,33 +2716,10 @@ omp-tool-view[data-filepath] .tv-head .tv-path:hover { text-decoration: underlin
     color: var(--success-fg);
 }
 
-/* Composer footer: send to the worker instead of the voice agent. */
-.voice-target {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    margin-left: auto;
-    padding-left: 8px;
-    font-size: 11px;
-    color: var(--muted);
-    cursor: pointer;
-    user-select: none;
-}
-
-.voice-target[hidden] {
-    display: none;
-}
-
-.voice-target input {
-    margin: 0;
-    width: 12px;
-    height: 12px;
-    accent-color: var(--link);
-    cursor: pointer;
-}
-
-.voice-target:has(input:checked) {
-    color: var(--fg);
+/* The tab shows the Bot view: the button (now a chat bubble) goes back to the worker's conversation. */
+.voice-bar-btn[data-act='panel'][aria-pressed='true'] {
+    background: color-mix(in srgb, var(--voice-accent) 18%, transparent);
+    color: var(--voice-accent);
 }
 
 .composer-btn-icon {
@@ -4534,4 +4493,111 @@ html.tree-panel-open .input-container {
 
 .tui-pane .xterm {
     height: 100%;
+}
+
+/* ── Bot view: a tab shows the voice agent's conversation instead of its own ── */
+.bot-host {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+}
+
+#app.bot-mode .bot-host {
+    display: flex;
+}
+
+#app.bot-mode .messages,
+#app.bot-mode .scroll-btn-wrap {
+    display: none;
+}
+
+/* ── Model status line over the conversation (src/webview/modelStatus.ts), like the Bot view's header ── */
+.ms-head {
+    --ms-small: calc(var(--vscode-font-size, 13px) - 1.5px);
+    --ms-hover: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, .31));
+    --ms-bg: var(--vscode-sideBar-background, var(--bg));
+    display: flex;
+    position: relative;
+    z-index: 20;
+    flex-shrink: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    font-size: var(--ms-small);
+    line-height: 1.6;
+    user-select: none;
+}
+.ms-head[hidden],
+#app.bot-mode .ms-head { display: none; }
+.ms-sum {
+    display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+    padding: 3px 12px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.ms-sum:hover, .ms-switch:hover { background: var(--ms-hover); }
+.ms-sum:focus-visible, .ms-switch:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+.ms-sum-v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--ms-small) - .5px); flex-shrink: 1; }
+.ms-model { color: var(--fg); }
+.ms-sk { color: var(--muted); font-family: var(--vscode-font-family, sans-serif); font-weight: 600; letter-spacing: .02em; }
+.ms-sep { margin: 0 5px; color: var(--muted); opacity: .7; }
+.ms-warn { color: var(--warning-fg); }
+.ms-err { color: var(--error-fg); }
+.ms-working {
+    margin: 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--link);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    padding: 0 8px;
+}
+.ms-working[hidden] { display: none; }
+.ms-working[hidden] ~ .ms-car { margin-left: auto; }
+.ms-spinner {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border: 1.5px solid color-mix(in srgb, var(--link) 25%, transparent);
+    border-top-color: var(--link);
+    border-radius: 50%;
+    animation: tab-spin 0.8s linear infinite;
+    flex-shrink: 0;
+    vertical-align: -1px;
+}
+.ms-car { flex-shrink: 0; font-size: .7em; opacity: .7; transition: transform .15s; }
+.ms-head.open .ms-car { transform: rotate(90deg); }
+/* Idle: dim; a turn running: pulsing link colour; reconnecting: warning. */
+.ms-dot { flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .5; }
+.ms-head[data-activity="streaming"] .ms-dot { background: var(--link); opacity: 1; animation: ms-pulse 1.2s ease-in-out infinite; }
+.ms-head[data-activity="retrying"] .ms-dot { background: var(--warning-fg); opacity: 1; animation: ms-pulse .8s ease-in-out infinite; }
+@keyframes ms-pulse { 50% { opacity: .3; } }
+.ms-switch {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center; width: 26px;
+    border: 0; background: none; color: var(--muted); cursor: pointer;
+}
+.ms-switch:hover { color: var(--fg); }
+.ms-detail {
+    display: none; padding: 2px 12px 6px;
+    position: absolute; top: 100%; left: 0; right: 0;
+    max-height: 70vh; overflow: auto;
+    background: var(--ms-bg);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .3);
+    user-select: text;
+}
+/* Two columns so every meter lines up whatever the label length. */
+.ms-head.open .ms-detail { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 10px; row-gap: 1px; }
+.ms-row { display: contents; }
+.ms-k { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+.ms-v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--ms-small) - .5px); }
+.ms-group { grid-column: 1 / -1; margin-top: 4px; color: var(--muted); font-weight: 600; }
+.ms-group.ms-err { color: var(--error-fg); }
+.ms-meter { display: inline-block; width: 90px; height: 5px; margin-right: 8px; vertical-align: 1px; border-radius: 3px; background: color-mix(in srgb, var(--muted) 25%, transparent); overflow: hidden; }
+.ms-meter i { display: block; height: 100%; border-radius: 3px; background: var(--link); }
+.ms-meter.ms-warn i { background: var(--warning-fg); }
+.ms-meter.ms-err i { background: var(--error-fg); }
+@media (prefers-reduced-motion: reduce) {
+    .ms-dot { animation: none !important; }
 }

@@ -9,6 +9,8 @@ import {
     encodeSessionCwd,
     getSessionDirForCwd,
     getSessionDisplayTitle,
+    withVoiceSessions,
+    type VoiceSessionSummary,
 } from '../../../pi/sessionCatalog';
 import type { SessionInfo } from '../../../shared/protocol';
 
@@ -90,5 +92,44 @@ describe('session list', () => {
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
+    });
+});
+
+describe('voice sessions in the resume list', () => {
+    const dir = '/tmp/agent/sessions/-proj';
+    const voice = (file: string, over: Partial<VoiceSessionSummary> = {}): VoiceSessionSummary => ({
+        sessionFile: `${dir}/${file}`,
+        firstUtterance: '把 average 修好',
+        turns: 3,
+        startedAt: 500,
+        updatedAt: 3000,
+        ...over,
+    });
+    /** A worker session with no messages and no name: what a tab the user only talked to the voice agent about leaves. */
+    const untouched = (id: string): SessionInfo => ({ id, name: id, path: `${dir}/2026-01-01_${id}.jsonl`, messageCount: 0, turnCount: 0, firstMessage: '(no messages)', lastModified: 100 });
+
+    it('keeps an otherwise empty session that has a voice conversation, and still drops untouched ones', () => {
+        const sessions = withVoiceSessions([untouched('talked'), untouched('empty')], [voice('2026-01-01_talked.jsonl')], dir);
+        const rows = buildSessionListRows(sessions, '', undefined);
+        expect(rows.map((r) => r.label)).toEqual(['把 average 修好']);
+        expect(rows[0].meta).toMatch(/^3 voice turns · /);
+    });
+
+    it('lists a voice-only session pi never wrote to disk, under its voice name, and resolves its file path', () => {
+        const rows = buildSessionListRows(withVoiceSessions([], [voice('2026-01-01_unwritten.jsonl', { title: '修复 average' })], dir), '', undefined);
+        expect(rows).toEqual([expect.objectContaining({ sessionPath: `${dir}/2026-01-01_unwritten.jsonl`, label: '修复 average' })]);
+    });
+
+    it("never replaces the session's own name or first prompt, and ignores other folders' conversations", () => {
+        const worked: SessionInfo = { ...untouched('worked'), name: 'Average bug', messageCount: 4, turnCount: 1, firstMessage: 'fix average' };
+        const [merged, ...rest] = withVoiceSessions(
+            [worked],
+            [voice('2026-01-01_worked.jsonl', { title: 'Voice name' }), { ...voice('x.jsonl'), sessionFile: '/elsewhere/x.jsonl' }],
+            dir,
+        );
+        expect(rest).toEqual([]);
+        expect(getSessionDisplayTitle(merged)).toBe('Average bug');
+        expect(merged.firstMessage).toBe('fix average');
+        expect(buildSessionListRows([merged], '', undefined)[0].meta).toMatch(/^1 turn · 3 voice turns · /);
     });
 });

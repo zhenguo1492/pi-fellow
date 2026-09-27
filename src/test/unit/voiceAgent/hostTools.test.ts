@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { HostToolRouter, type EditorHands, type ToolTurn } from '../../../voiceAgent/hostTools';
+import { findViewers, type ExtensionManifest } from '../../../voiceAgent/viewers';
 import type {
     WorkerAnswer,
     WorkerController,
@@ -44,14 +45,50 @@ class FakeWorker implements WorkerController {
     recentTurns() {
         return [];
     }
+    async nameTask() {
+        return false;
+    }
 }
+
+/** A draw.io-like installed extension: one custom editor and one preview command offered for its files. */
+const DIAGRAMS: ExtensionManifest = {
+    id: 'someone.diagrams',
+    builtin: false,
+    packageJSON: {
+        contributes: {
+            customEditors: [{ viewType: 'diagrams.editor', displayName: 'Diagram', selector: [{ filenamePattern: '*.drawio' }], priority: 'default' }],
+            commands: [{ command: 'diagrams.preview', title: 'Preview Diagram' }],
+            menus: { 'editor/title': [{ command: 'diagrams.preview', when: 'resourceExtname == .drawio' }] },
+        },
+    },
+};
+
+/** VS Code's built-in Markdown extension, trimmed to its side preview. */
+const MARKDOWN: ExtensionManifest = {
+    id: 'vscode.markdown-language-features',
+    builtin: true,
+    packageJSON: {
+        contributes: {
+            commands: [{ command: 'markdown.showPreviewToSide', title: 'Open Preview to the Side', category: 'Markdown' }],
+            menus: { 'editor/title': [{ command: 'markdown.showPreviewToSide', when: 'resourceExtname == .md' }] },
+        },
+    },
+};
 
 function setup(confirm = true) {
     const worker = new FakeWorker();
     const edits: string[] = [];
     const commands: string[] = [];
+    const opened: string[] = [];
+    /** The discoverPreviewCommands setting, read on every list_viewers as PairHands does. */
+    const settings = { thirdPartyCommands: false };
     const hands: EditorHands = {
         openFile: async (target) => `opened ${target.path}`,
+        listViewers: async (path) => ({ path, languageId: undefined, ...findViewers([DIAGRAMS, MARKDOWN], path, undefined, settings) }),
+        openWith: async (path, viewer, toSide) => {
+            opened.push(`${viewer.kind} ${viewer.id} ${path}${toSide ? ' side' : ''}`);
+            return `opened ${path}`;
+        },
         editFile: async (edit) => {
             edits.push(edit.path);
             return `edited ${edit.path}`;
@@ -101,8 +138,10 @@ function setup(confirm = true) {
         (_tabId, question) => ({ id: 'r1', question, startedAt: 0, status: 'running' as const }),
         hands,
     );
+    // A new router starts in pair mode; most tests here direct the worker, which is omp mode's job.
+    router.setMode('omp');
     const turn = (seq: number, userAt = seq * 1000, tabId = 'tab-1'): ToolTurn => ({ tabId, seq, userAt });
-    return { worker, router, turn, edits, commands };
+    return { worker, router, turn, edits, commands, opened, settings };
 }
 
 describe('HostToolRouter: tell_worker / confirm_task', () => {
@@ -121,8 +160,11 @@ describe('HostToolRouter: tell_worker / confirm_task', () => {
         expect(confirmed).toEqual({ text: expect.stringContaining('new task'), isError: false });
         expect(worker.sends).toEqual([{ tabId: 'tab-1', text: 'bump version', options: { when: 'after', includeEditorContext: false } }]);
 
-        expect((await router.execute('confirm_task', { proposalId: proposal.id }, turn(3))).isError).toBe(true);
+        const again = await router.execute('confirm_task', { proposalId: proposal.id }, turn(3));
+        expect(again).toEqual({ text: expect.stringContaining('Already sent'), isError: false });
         expect(worker.sends).toHaveLength(1);
+        // Confirmed aloud: the model saw its own tool result, so there is nothing to tell it.
+        expect(router.takeSettled('tab-1')).toEqual([]);
     });
 
     it('a newer proposal replaces the older one', async () => {
@@ -168,6 +210,64 @@ describe('HostToolRouter: tell_worker / confirm_task', () => {
         const { worker, router, turn } = setup(false);
         await router.execute('tell_worker', { message: 'bump version', when: 'now' }, turn(1));
         expect(worker.sends).toHaveLength(1);
+    });
+
+    it('a proposal confirmed with the panel button is told to the model once, and confirm_task does not send it again', async () => {
+        const { worker, router, turn } = setup();
+        await router.execute('tell_worker', { message: 'bump version', when: 'now' }, turn(1));
+        const [proposal] = router.proposals('tab-1');
+
+        expect(await router.confirmProposal(proposal.id)).toContain('new task');
+        expect(router.proposals('tab-1')).toEqual([]);
+        expect(router.takeSettled('tab-1')).toEqual([
+            expect.objectContaining({ id: proposal.id, message: 'bump version', outcome: 'confirmed', by: 'button', result: expect.stringContaining('new task') }),
+        ]);
+        expect(router.takeSettled('tab-1')).toEqual([]);
+
+        // The user also says yes aloud: the model is told it already went out, not that something failed.
+        const late = await router.execute('confirm_task', { proposalId: proposal.id }, turn(2));
+        expect(late.isError).toBe(false);
+        expect(late.text).toMatch(/Already sent.*button/);
+        expect(worker.sends).toHaveLength(1);
+    });
+
+    it('confirm_task while the button is still sending the proposal does not send it twice', async () => {
+        const { worker, router, turn } = setup();
+        await router.execute('tell_worker', { message: 'bump version', when: 'now' }, turn(1));
+        const [proposal] = router.proposals('tab-1');
+        const sending = router.confirmProposal(proposal.id);
+        const late = await router.execute('confirm_task', { proposalId: proposal.id }, turn(2));
+        await sending;
+        expect(late.isError).toBe(false);
+        expect(worker.sends).toHaveLength(1);
+    });
+
+    it('a proposal cancelled with the panel button is told to the model and cannot be confirmed', async () => {
+        const { worker, router, turn } = setup();
+        await router.execute('tell_worker', { message: 'bump version', when: 'now' }, turn(1));
+        const [proposal] = router.proposals('tab-1');
+
+        router.cancelProposal(proposal.id);
+        expect(router.proposals('tab-1')).toEqual([]);
+        expect(router.takeSettled('tab-1')).toEqual([expect.objectContaining({ id: proposal.id, outcome: 'cancelled', by: 'button' })]);
+
+        const late = await router.execute('confirm_task', { proposalId: proposal.id }, turn(2));
+        expect(late).toEqual({ text: expect.stringContaining('cancelled'), isError: true });
+        expect(worker.sends).toEqual([]);
+    });
+
+    it('a proposal the button failed to send is reported as not sent', async () => {
+        const { worker, router, turn } = setup();
+        await router.execute('tell_worker', { message: 'bump version', when: 'now' }, turn(1));
+        const [proposal] = router.proposals('tab-1');
+        worker.send = async () => {
+            throw new Error('no chat tab');
+        };
+
+        await expect(router.confirmProposal(proposal.id)).rejects.toThrow('no chat tab');
+        expect(router.takeSettled('tab-1')).toEqual([expect.objectContaining({ outcome: 'failed', result: expect.stringContaining('no chat tab') })]);
+        const late = await router.execute('confirm_task', { proposalId: proposal.id }, turn(2));
+        expect(late).toEqual({ text: expect.stringMatching(/^Not sent: .*no chat tab/), isError: true });
     });
 });
 
@@ -219,6 +319,27 @@ describe('HostToolRouter: proactive turns', () => {
 describe('HostToolRouter: omp and pair modes', () => {
     const edit = { path: 'a.ts', oldText: 'x', newText: 'y' };
 
+    it('starts in pair mode: edits at once, and switches to omp and back on its own for a heavy job', async () => {
+        const worker = new FakeWorker();
+        const edited: string[] = [];
+        const hands = {
+            editFile: async (e: { path: string }) => {
+                edited.push(e.path);
+                return 'edited';
+            },
+        } as unknown as EditorHands;
+        const router = new HostToolRouter(worker, () => undefined, () => false, () => ({ id: 'r1', question: '', startedAt: 0, status: 'running' as const }), hands);
+        const turn = { tabId: 'tab-1', seq: 1, userAt: 1000 };
+        expect(router.mode).toBe('pair');
+        expect((await router.execute('edit_file', edit, turn)).isError).toBe(false);
+        expect(edited).toEqual(['a.ts']);
+        await router.execute('set_mode', { mode: 'omp', auto: true }, turn);
+        expect((await router.execute('tell_worker', { message: 'refactor the parser', when: 'now' }, turn)).isError).toBe(false);
+        expect(worker.sends.map((s) => s.text)).toEqual(['refactor the parser']);
+        await router.execute('set_mode', { mode: 'pair' }, turn);
+        expect(router.mode).toBe('pair');
+    });
+
     it('enters pair mode only when a later user turn confirms, and leaves it at once', async () => {
         const { router, turn } = setup();
         expect(router.mode).toBe('omp');
@@ -231,6 +352,36 @@ describe('HostToolRouter: omp and pair modes', () => {
         expect(router.mode).toBe('omp');
         // The old request does not carry over: pair needs asking and confirming again.
         expect((await router.execute('set_mode', { mode: 'pair' }, turn(4))).text).toMatch(/Not switched yet/);
+    });
+
+    it('switches pair -> omp on its own for a heavy job, and back to pair without confirmation', async () => {
+        const { router, turn } = setup();
+        router.setMode('pair');
+        const auto = await router.execute('set_mode', { mode: 'omp', auto: true }, turn(1));
+        expect([auto.isError, router.mode]).toEqual([false, 'omp']);
+        // A redundant omp call keeps the auto switch.
+        await router.execute('set_mode', { mode: 'omp' }, turn(2));
+        await router.execute('set_mode', { mode: 'pair' }, turn(2));
+        expect(router.mode).toBe('pair');
+        // Only once: the next time omp was the user's idea, pair needs confirming again.
+        await router.execute('set_mode', { mode: 'omp' }, turn(3));
+        expect((await router.execute('set_mode', { mode: 'pair' }, turn(4))).text).toMatch(/Not switched yet/);
+        expect(router.mode).toBe('omp');
+    });
+
+    it('needs confirmation for pair after the user switched to omp, even following an auto switch', async () => {
+        const { router, turn } = setup();
+        router.setMode('pair');
+        router.setMode('omp');
+        expect((await router.execute('set_mode', { mode: 'pair' }, turn(1))).text).toMatch(/Not switched yet/);
+        router.setMode('pair');
+        await router.execute('set_mode', { mode: 'omp', auto: true }, turn(2));
+        router.setMode('omp');
+        expect((await router.execute('set_mode', { mode: 'pair' }, turn(3))).text).toMatch(/Not switched yet/);
+        // auto means nothing outside pair mode: there is no switch from pair to remember.
+        await router.execute('set_mode', { mode: 'omp', auto: true }, turn(4));
+        expect((await router.execute('set_mode', { mode: 'pair' }, turn(4))).text).toMatch(/Not switched yet/);
+        expect(router.mode).toBe('omp');
     });
 
     it('in omp mode refuses to change files, run commands or debug itself, but reads output', async () => {
@@ -298,5 +449,58 @@ describe('HostToolRouter: deleting files', () => {
         router.setMode('pair');
         expect((await router.execute('delete_file', { path: 'b.ts', recursive: true }, turn(4))).text).toMatch(/Not deleted yet/);
         expect(edits).toEqual([]);
+    });
+});
+
+describe('HostToolRouter: list_viewers / open_with', () => {
+    it('lists and opens editors in omp and in pair mode, without touching files or running commands', async () => {
+        const { router, turn, edits, commands, opened } = setup();
+        for (const mode of ['omp', 'pair'] as const) {
+            router.setMode(mode);
+            const listed = await router.execute('list_viewers', { path: 'docs/flow.drawio' }, turn(1));
+            expect(listed.isError).toBe(false);
+            expect(listed.text).toMatch(/- diagrams\.editor: Diagram \[someone\.diagrams, default\]/);
+            expect(listed.text).toMatch(/- default: Text Editor/);
+            expect((await router.execute('open_with', { path: 'docs/flow.drawio', viewer: 'diagrams.editor', toSide: true }, turn(1))).isError).toBe(false);
+        }
+        expect(opened).toEqual(['editor diagrams.editor docs/flow.drawio side', 'editor diagrams.editor docs/flow.drawio side']);
+        expect([edits, commands]).toEqual([[], []]);
+    });
+
+    it("always lists and opens VS Code's built-in Markdown preview", async () => {
+        const { router, turn, opened, settings } = setup();
+        for (const on of [false, true]) {
+            settings.thirdPartyCommands = on;
+            expect((await router.execute('list_viewers', { path: 'README.md' }, turn(1))).text).toMatch(/- markdown\.showPreviewToSide: Markdown: Open Preview to the Side/);
+            expect((await router.execute('open_with', { path: 'README.md', viewer: 'markdown.showPreviewToSide' }, turn(1))).isError).toBe(false);
+        }
+        expect(opened).toEqual(['command markdown.showPreviewToSide README.md', 'command markdown.showPreviewToSide README.md']);
+    });
+
+    it("with discoverPreviewCommands off, neither lists nor runs an installed extension's preview command", async () => {
+        const { router, turn, opened, settings } = setup();
+        expect((await router.execute('list_viewers', { path: 'docs/flow.drawio' }, turn(1))).text).not.toMatch(/diagrams\.preview/);
+        const refused = await router.execute('open_with', { path: 'docs/flow.drawio', viewer: 'diagrams.preview' }, turn(1));
+        expect(refused).toEqual({ text: expect.stringMatching(/not a viewer for docs\/flow\.drawio\. Use one of: diagrams\.editor, default\.$/), isError: true });
+        expect(opened).toEqual([]);
+
+        settings.thirdPartyCommands = true;
+        expect((await router.execute('list_viewers', { path: 'docs/flow.drawio' }, turn(1))).text).toMatch(/- diagrams\.preview: Preview Diagram/);
+        expect((await router.execute('open_with', { path: 'docs/flow.drawio', viewer: 'diagrams.preview' }, turn(1))).isError).toBe(false);
+        expect(opened).toEqual(['command diagrams.preview docs/flow.drawio']);
+    });
+
+    it('opens only a viewer listed for that file: never an arbitrary command', async () => {
+        const { router, turn, opened, settings } = setup();
+        settings.thirdPartyCommands = true;
+        const arbitrary = await router.execute('open_with', { path: 'docs/flow.drawio', viewer: 'workbench.action.terminal.new' }, turn(1));
+        expect(arbitrary).toEqual({ text: expect.stringMatching(/not a viewer for docs\/flow\.drawio\. Use one of: diagrams\.editor, default, diagrams\.preview/), isError: true });
+        // Nothing is offered for another kind of file but the text editor.
+        expect((await router.execute('open_with', { path: 'notes.txt', viewer: 'diagrams.editor' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('open_with', { path: 'notes.txt', viewer: 'diagrams.preview' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('open_with', { path: 'notes.txt', viewer: 'markdown.showPreviewToSide' }, turn(1))).isError).toBe(true);
+        expect(opened).toEqual([]);
+        expect((await router.execute('open_with', { path: 'notes.txt', viewer: 'default' }, turn(1))).isError).toBe(false);
+        expect(opened).toEqual(['editor default notes.txt']);
     });
 });

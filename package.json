@@ -23,13 +23,6 @@
           "title": "Oh My Pi Chater",
           "icon": "media/oh-my-pi-chater.svg"
         }
-      ],
-      "panel": [
-        {
-          "id": "oh-my-pi-chater-voice",
-          "title": "Bot",
-          "icon": "media/voice-panel.svg"
-        }
       ]
     },
     "views": {
@@ -38,13 +31,6 @@
           "type": "webview",
           "id": "oh-my-pi-chater.chat",
           "name": "Oh My Pi Chater"
-        }
-      ],
-      "oh-my-pi-chater-voice": [
-        {
-          "type": "webview",
-          "id": "oh-my-pi-chater.voice",
-          "name": "Bot"
         }
       ]
     },
@@ -73,13 +59,6 @@
           "command": "oh-my-pi-chater.voiceAgent.unfollowPi",
           "when": "oh-my-pi-chater.piFocus && oh-my-pi-chater.piFollowing",
           "group": "navigation@90"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "oh-my-pi-chater.voiceView.history",
-          "when": "view == oh-my-pi-chater.voice",
-          "group": "navigation"
         }
       ],
       "commandPalette": [
@@ -295,7 +274,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Starred models (`provider/id`) offered by the model chip under the chat input. Star or unstar models with the ☆ button in the full model picker (status bar model button or /model)."
+          "description": "Starred models (`provider/id`) offered by the model chip under the chat input. Star or unstar models with the ☆ button in the full model picker (switch button of the model status line at the top of the chat, or /model)."
         },
         "oh-my-pi-chater.contextUsageWarningThreshold": {
           "type": "number",
@@ -346,7 +325,7 @@
         "oh-my-pi-chater.voiceAgent.model": {
           "type": "string",
           "default": "",
-          "description": "Voice agent: omp model (provider/id) for the voice conversation. Empty uses the current chat tab's model when the voice agent starts. Takes effect after Voice Agent — Stop."
+          "description": "Voice agent: model (provider/id) for the voice conversation, on the active backend (omp or pi). Empty uses the current chat tab's model when the voice agent starts. Takes effect after Voice Agent — Stop."
         },
         "oh-my-pi-chater.voiceAgent.thinking": {
           "type": "string",
@@ -369,6 +348,11 @@
           "type": "boolean",
           "default": true,
           "description": "Voice agent: follow Pi when VS Code starts. Following, the editor opens and scrolls to the code Pi talks about, reads or writes; typing in the editor stops following. Toggle with the eye button in the editor title bar or Pi's status bar item."
+        },
+        "oh-my-pi-chater.voiceAgent.discoverPreviewCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Voice agent: let list_viewers and open_with also use preview commands from installed extensions, not only VS Code's built-in ones such as the Markdown preview. Off by default: many extensions' preview commands need their own arguments or state and may do nothing or never finish. Custom editors from installed extensions (e.g. draw.io) are always offered."
         },
         "oh-my-pi-chater.voiceAgent.narration": {
           "type": "string",

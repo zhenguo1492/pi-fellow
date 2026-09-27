@@ -17,8 +17,6 @@ describe('Protocol types', () => {
             { type: 'deleteSession', sessionPath: '/tmp/s.jsonl' },
             { type: 'renameSession', sessionPath: '/tmp/s.jsonl', name: 'My session' },
             { type: 'closeSessionPanel' },
-            { type: 'setBackend', backend: 'omp' },
-            { type: 'setBackend', backend: 'pi' },
             { type: 'createTab', backend: 'pi' },
             { type: 'getState' },
         ];
@@ -39,7 +37,6 @@ describe('Protocol types', () => {
             model: { provider: 'ollama', id: 'test/model', name: 'Test Model' },
             thinkingLevel: 'off',
             activeBackend: 'omp',
-            availableBackends: ['omp', 'pi'],
         };
 
         const messages: ServerMessage[] = [

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import type { VoiceSessionSummary } from '../pi/sessionCatalog';
 import type { VoiceEntry, VoiceHearing, VoiceLatency, VoiceObservationKind, VoiceSentence } from '../shared/voiceViewProtocol';
 import type { Metrics } from './conversation';
 import type { VoiceTurnListener, VoiceTurnResult } from './voiceAgent';
@@ -21,6 +22,8 @@ export interface VoiceSessionRecord {
     entries: VoiceEntry[];
     /** The omp session file holding the voice agent's context for this conversation, once it has one. */
     voiceSessionFile?: string;
+    /** `title` names the task's worker session: generated from what the user said, or set by the user. */
+    named?: 'auto' | 'user';
 }
 
 /** The slice of `vscode.Memento` the store needs. */
@@ -123,6 +126,82 @@ export class VoiceTranscriptStore {
         await Promise.all(names.filter((name) => name.endsWith('.jsonl') && !kept.has(name)).map((name) => fs.rm(path.join(dir, name), { force: true })));
     }
 
+    /**
+     * Every worker session with a voice conversation in it, for the resume list: a session the user
+     * only talked to the voice agent about has nothing else to show. Keyed by session file only, since
+     * `tab:` keys name no tab in another window.
+     */
+    voiceSessions(): VoiceSessionSummary[] {
+        const byFile = new Map<string, VoiceSessionSummary>();
+        // Oldest first (`_sessions` is newest first), so on a tie the earlier conversation stays first.
+        for (const session of [...this._sessions].reverse()) {
+            if (session.taskKey.startsWith(provisionalTaskKey(''))) {
+                continue;
+            }
+            const said = userTexts(session);
+            if (said.length === 0) {
+                continue;
+            }
+            const summary = byFile.get(session.taskKey);
+            if (!summary) {
+                byFile.set(session.taskKey, {
+                    sessionFile: session.taskKey,
+                    title: session.named ? session.title : undefined,
+                    firstUtterance: said[0],
+                    turns: said.length,
+                    startedAt: session.startedAt,
+                    updatedAt: session.updatedAt,
+                });
+                continue;
+            }
+            summary.turns += said.length;
+            summary.title ??= session.named ? session.title : undefined;
+            summary.updatedAt = Math.max(summary.updatedAt, session.updatedAt);
+            if (session.startedAt < summary.startedAt) {
+                summary.startedAt = session.startedAt;
+                summary.firstUtterance = said[0];
+            }
+        }
+        return [...byFile.values()];
+    }
+
+    /** What the user said in a worker session's voice conversations, oldest first. */
+    userUtterances(sessionFile: string): string[] {
+        return this._sessions
+            .filter((s) => s.taskKey === sessionFile)
+            .reverse()
+            .sort((a, b) => a.startedAt - b.startedAt)
+            .flatMap(userTexts);
+    }
+
+    isNamed(sessionFile: string): boolean {
+        return this._sessions.some((s) => s.taskKey === sessionFile && s.named);
+    }
+
+    /**
+     * Names a worker session's voice conversations; later ones for the task inherit it. A generated
+     * name never replaces the user's. False when nothing was named.
+     */
+    nameTask(sessionFile: string, title: string, by: 'auto' | 'user'): boolean {
+        const sessions = this._sessions.filter((s) => s.taskKey === sessionFile);
+        if (sessions.length === 0 || (by === 'auto' && sessions.some((s) => s.named === 'user'))) {
+            return false;
+        }
+        for (const session of sessions) {
+            session.title = title;
+            session.named = by;
+        }
+        this._changed();
+        return true;
+    }
+
+    /** The worker session was deleted: its voice conversations go too, and their contexts with the next prune. */
+    forgetTask(sessionFile: string): void {
+        this._sessions = this._sessions.filter((s) => s.taskKey !== sessionFile);
+        this._live.delete(sessionFile);
+        this._changed();
+    }
+
     isLive(session: VoiceSessionRecord): boolean {
         return this._live.get(session.taskKey) === session;
     }
@@ -213,13 +292,9 @@ export class VoiceTranscriptStore {
             case 'speak':
                 sentences.push({ text: event.text, state: 'pending' });
                 break;
-            case 'playing': {
-                const sentence = setFirst(sentences, event.text, ['pending'], 'playing');
-                if (sentence) {
-                    sentence.playback = { at: event.at, durationMs: event.durationMs };
-                }
+            case 'playing':
+                setFirst(sentences, event.text, ['pending'], 'playing');
                 break;
-            }
             case 'played':
                 setFirst(sentences, event.text, ['playing', 'pending'], 'played');
                 break;
@@ -309,7 +384,11 @@ export class VoiceTranscriptStore {
             this._sessions = [session, ...this._sessions.filter((s) => s !== session)];
         } else {
             const now = Date.now();
-            session = { id: randomUUID(), taskKey: key, title: task?.name || 'Voice', startedAt: now, updatedAt: now, entries: [] };
+            const named = this._sessions.find((s) => s.taskKey === key && s.named);
+            session = { id: randomUUID(), taskKey: key, title: named?.title ?? (task?.name || 'Voice'), startedAt: now, updatedAt: now, entries: [] };
+            if (named) {
+                session.named = named.named;
+            }
             this._started.add(session);
             this._sessions.unshift(session);
             this._sessions.splice(Math.max(1, this._limits.sessions()));
@@ -369,26 +448,23 @@ export class VoiceTranscriptStore {
     }
 }
 
-/** Moves the first matching sentence to `to`; playback timing only stays while it plays. */
-function setFirst(
-    sentences: VoiceSentence[],
-    text: string,
-    from: VoiceSentence['state'][],
-    to: VoiceSentence['state'],
-): VoiceSentence | undefined {
+/** What the user said in a conversation, spoken or typed; panel actions (approve, cancel) are not talk. */
+function userTexts(session: VoiceSessionRecord): string[] {
+    return session.entries.flatMap((e) => (e.kind === 'user' && e.source !== 'panel' ? [e.text] : []));
+}
+
+/** Moves the first matching sentence to `to`. */
+function setFirst(sentences: VoiceSentence[], text: string, from: VoiceSentence['state'][], to: VoiceSentence['state']): void {
     const sentence = sentences.find((s) => s.text === text && from.includes(s.state));
     if (sentence) {
         sentence.state = to;
-        delete sentence.playback;
     }
-    return sentence;
 }
 
 function cutUnheard(sentences: VoiceSentence[]): void {
     for (const sentence of sentences) {
         if (sentence.state === 'pending' || sentence.state === 'playing') {
             sentence.state = 'cut';
-            delete sentence.playback;
         }
     }
 }

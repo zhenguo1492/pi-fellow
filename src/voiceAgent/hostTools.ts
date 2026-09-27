@@ -3,6 +3,7 @@ import type { RpcHostToolDefinition } from '../pi/rpcTypes';
 import type { CodeAnchor } from './codeAnchors';
 import type { WorkerAnswer, WorkerController, WorkerSendOutcome } from './workerController';
 import type { ResearchJob } from './research';
+import { formatViewers, type FileViewers, type Viewer } from './viewers';
 import { clip, formatDigest, type WorkerDigest } from './workerDigest';
 
 /** A new task held back until the user agrees (design §6, two-phase confirmation). */
@@ -13,6 +14,18 @@ export interface Proposal {
     includeEditorContext: boolean;
     /** Voice turn that proposed it; only a later user turn may confirm it. */
     createdTurn: number;
+}
+
+/** A proposal that is no longer waiting: sent, turned down, or confirmed but not delivered. */
+export interface SettledProposal {
+    id: string;
+    tabId: string;
+    message: string;
+    outcome: 'confirmed' | 'cancelled' | 'failed';
+    /** The voice panel's buttons, or confirm_task after the user agreed aloud. */
+    by: 'button' | 'voice';
+    /** What sending it did, or why it failed; undefined while it is being sent, and for a cancelled one. */
+    result?: string;
 }
 
 /** The voice turn a tool call belongs to: its bound tab (§5.12 rule 4) and when the user spoke. */
@@ -145,13 +158,40 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         loadMode: 'essential',
     },
     {
+        name: 'list_viewers',
+        label: 'List viewers',
+        description:
+            "List the ways the user's VS Code can show a file besides plain text: editors for its file type from the installed extensions (e.g. the draw.io editor for .drawio, VS Code's image preview) and VS Code's built-in preview commands (e.g. the Markdown preview, which also draws the Mermaid diagrams in a .md file). Call it before open_with whenever the user asks to see, preview or view a diagram or rendered file; open_with only takes a viewer id from this list. Changes nothing; works in both modes.",
+        parameters: { ...OBJECT, properties: { path: { type: 'string', description: 'Workspace-relative path.' } }, required: ['path'] },
+        loadMode: 'essential',
+    },
+    {
+        name: 'open_with',
+        label: 'Open with',
+        description:
+            "Show a file in the user's editor with one of the viewers list_viewers returned for it: an editor opens the file in it, a command opens the file and runs it. For a diagram file such as .drawio, use its editor. For Mermaid, show the Markdown file that holds it with markdown.showPreviewToSide, so the user edits on one side and watches it render on the other. Only ids from list_viewers for this same file are accepted: call list_viewers first. Gives up waiting after 8 seconds. Changes no files; works in both modes.",
+        parameters: {
+            ...OBJECT,
+            properties: {
+                path: { type: 'string', description: 'Workspace-relative path.' },
+                viewer: { type: 'string', description: 'The id of an editor or command exactly as list_viewers gave it, e.g. an editor viewType, "default" for the text editor, or a command id.' },
+                toSide: { type: 'boolean', description: 'Open it in the editor group beside the current one, so the source stays visible.' },
+            },
+            required: ['path', 'viewer'],
+        },
+        loadMode: 'essential',
+    },
+    {
         name: 'set_mode',
         label: 'Set mode',
         description:
-            'Switch between omp mode (you direct the worker) and pair mode (you edit files and run commands yourself, like a human partner, and do not direct the worker). To omp: switches at once. To pair: the first call only records the request; ask the user to confirm, and call it again after they agree in their next message.',
+            'Switch between omp mode (you direct the worker) and pair mode (you edit files and run commands yourself, like a human partner, and do not direct the worker). To omp: switches at once. Pass auto=true when you switch from pair to omp on your own because the job is heavy, not because the user asked. To pair: the first call only records the request; ask the user to confirm, and call it again after they agree in their next message. Exception: after your own auto=true switch, set_mode pair switches back at once once that work is done.',
         parameters: {
             ...OBJECT,
-            properties: { mode: { type: 'string', enum: ['omp', 'pair'] } },
+            properties: {
+                mode: { type: 'string', enum: ['omp', 'pair'] },
+                auto: { type: 'boolean', description: 'Only with mode="omp": you switch on your own initiative, the user did not ask.' },
+            },
             required: ['mode'],
         },
         loadMode: 'essential',
@@ -336,6 +376,10 @@ export type AgentMode = 'omp' | 'pair';
 export interface EditorHands {
     /** Opens and highlights code in the user's editor. */
     openFile(target: CodeAnchor): Promise<string>;
+    /** The editors and preview commands that can show a file; throws when it is outside the workspace or not a file. */
+    listViewers(path: string): Promise<FileViewers>;
+    /** Shows a file with one of the viewers listViewers gave for it. */
+    openWith(path: string, viewer: Viewer, toSide: boolean): Promise<string>;
     editFile(edit: { path: string; oldText: string; newText: string; nearLine?: number }): Promise<string>;
     createFile(path: string, content: string): Promise<string>;
     createFolder(path: string): Promise<string>;
@@ -382,6 +426,8 @@ const DEFAULT_TERMINAL_TIMEOUT_SECS = 30;
 const DEFAULT_DEBUG_START_SECS = 15;
 const DEFAULT_DEBUG_STEP_SECS = 10;
 const DEFAULT_OUTPUT_LINES = 80;
+/** Settled proposals remembered for a late confirm_task. */
+const MAX_SETTLED = 20;
 
 const OUTCOME_TEXT: Record<WorkerSendOutcome, string> = {
     started: 'Sent as a new task; the worker has started.',
@@ -392,10 +438,17 @@ const OUTCOME_TEXT: Record<WorkerSendOutcome, string> = {
 /** Executes the voice agent's host tool calls against the worker (design §5.11, §6). */
 export class HostToolRouter {
     private readonly _proposals = new Map<string, Proposal>();
+    /** Proposals no longer waiting, newest last, so a late confirm_task learns what became of them. */
+    private readonly _settled = new Map<string, SettledProposal>();
+    /** Settled with the voice panel's buttons and not yet told to the model, per tab. */
+    private readonly _unseenSettled = new Map<string, SettledProposal[]>();
     private _nextProposal = 1;
-    private _mode: AgentMode = 'omp';
+    /** A new voice agent starts in pair mode; it hands heavy jobs to the worker with set_mode auto. */
+    private _mode: AgentMode = 'pair';
     /** User turn in which switching to pair mode was asked for; a later user turn confirms it. */
     private _pairRequestedTurn: number | undefined;
+    /** The voice agent itself switched pair -> omp for a heavy job: it may switch back to pair without asking. */
+    private _autoSwitchedFromPair = false;
     /** A deletion asked about in `turn`; the same delete_file in a later user turn carries it out. */
     private _pendingDelete: { path: string; recursive: boolean; turn: number } | undefined;
 
@@ -418,6 +471,7 @@ export class HostToolRouter {
     setMode(mode: AgentMode): void {
         this._pairRequestedTurn = undefined;
         this._pendingDelete = undefined;
+        this._autoSwitchedFromPair = false;
         if (mode !== this._mode) {
             this._mode = mode;
             this._onModeChange?.(mode);
@@ -441,20 +495,22 @@ export class HostToolRouter {
 
     /** The user agreed in the voice panel: send it now, without the later-turn rule confirm_task has. */
     async confirmProposal(id: string): Promise<string> {
-        const proposal = this._proposals.get(id);
-        if (!proposal) {
-            throw new Error('That proposal is gone: it was replaced or already sent.');
-        }
-        this._proposals.delete(id);
-        const outcome = await this._worker.send(proposal.tabId, proposal.message, {
-            when: 'after',
-            includeEditorContext: proposal.includeEditorContext,
-        });
-        return OUTCOME_TEXT[outcome];
+        return this._send(this._take(id), 'button');
     }
 
-    dropProposal(id: string): void {
-        this._proposals.delete(id);
+    /** The user turned a proposal down in the voice panel. */
+    cancelProposal(id: string): void {
+        this._settle(this._take(id), 'cancelled', 'button');
+    }
+
+    /**
+     * Proposals the user settled with the voice panel's buttons since the model was last told, for
+     * the next turn's message; each is handed out once.
+     */
+    takeSettled(tabId: string): SettledProposal[] {
+        const settled = this._unseenSettled.get(tabId) ?? [];
+        this._unseenSettled.delete(tabId);
+        return settled;
     }
 
     async execute(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<ToolResult> {
@@ -471,10 +527,16 @@ export class HostToolRouter {
             throw new Error('Nobody asked for this: the user has not spoken since this update. Tell them and let them decide.');
         }
         if (this._mode === 'pair' && WORKER_CONTROL[toolName]) {
-            throw new Error('You are in pair mode: you do the work yourself and do not direct the worker. If the user wants omp to do it, ask whether to switch back to omp mode.');
+            throw new Error(
+                'You are in pair mode: you do the work yourself and do not direct the worker. If the user wants omp to do it, ask whether to switch back to omp mode; if the job is too heavy to do yourself, switch with set_mode omp and auto=true.',
+            );
         }
         if (this._mode === 'omp' && PAIR_ONLY[toolName]) {
-            throw new Error('Only in pair mode. In omp mode changes and commands go to the worker; switch to pair mode only if the user explicitly asks for it.');
+            throw new Error(
+                this._autoSwitchedFromPair
+                    ? 'Only in pair mode. You switched to omp mode yourself: once the worker has finished that work, switch back with set_mode pair.'
+                    : 'Only in pair mode. In omp mode changes and commands go to the worker; switch to pair mode only if the user explicitly asks for it.',
+            );
         }
         if (FILE_CHANGING[toolName] && this._worker.status(tabId).phase === 'working') {
             throw new Error('The worker is still running a task and may be writing files. Wait for it to finish, or ask the user to stop it from the chat.');
@@ -483,18 +545,26 @@ export class HostToolRouter {
             case 'set_mode': {
                 const mode = args.mode === 'pair' ? 'pair' : 'omp';
                 if (mode === 'omp') {
+                    if (this._mode === 'omp') {
+                        this._pairRequestedTurn = undefined;
+                        return 'Already in omp mode.';
+                    }
+                    const auto = args.auto === true;
                     this.setMode('omp');
-                    return 'Now in omp mode: changes and commands go to the worker again.';
+                    this._autoSwitchedFromPair = auto;
+                    return auto
+                        ? 'Now in omp mode: tell the worker to do the job; it can run its own subagents in parallel. Once that work is done, switch back with set_mode pair; no confirmation needed.'
+                        : 'Now in omp mode: changes and commands go to the worker again.';
                 }
                 if (this._mode === 'pair') {
                     return 'Already in pair mode.';
                 }
-                if (this._pairRequestedTurn === undefined || turn.seq <= this._pairRequestedTurn) {
+                if (!this._autoSwitchedFromPair && (this._pairRequestedTurn === undefined || turn.seq <= this._pairRequestedTurn)) {
                     this._pairRequestedTurn = turn.seq;
                     return 'Not switched yet. Ask the user to confirm pair mode: you will edit files and run commands yourself in their editor and terminal, and will not direct omp. Call set_mode pair again only after they agree in their next message.';
                 }
                 this.setMode('pair');
-                return 'Now in pair mode: edit files with edit_file, manage them with create_file, create_folder, rename_file, delete_file, save_file and close_editor, run commands with run_in_terminal, and debug with debug_start, set_breakpoint, debug_control and debug_inspect, saying what you do as you go. The worker is not yours to direct until the user asks for omp mode.';
+                return 'Now in pair mode: edit files with edit_file, manage them with create_file, create_folder, rename_file, delete_file, save_file and close_editor, run commands with run_in_terminal, and debug with debug_start, set_breakpoint, debug_control and debug_inspect, saying what you do as you go. The worker is not yours to direct until you switch to omp mode: when the user asks for it, or on your own for a job too heavy to do yourself.';
             }
             case 'edit_file':
                 return this._requireHands().editFile({
@@ -581,14 +651,29 @@ export class HostToolRouter {
                 return OUTCOME_TEXT[await this._worker.send(tabId, text, { when, includeEditorContext })];
             }
             case 'confirm_task': {
-                const proposal = this._proposals.get(requireString(args, 'proposalId'));
+                const id = requireString(args, 'proposalId');
+                const settled = this._settled.get(id);
+                if (settled?.tabId === tabId) {
+                    const who = settled.by === 'button' ? 'the user confirmed it with the button in the voice panel' : 'you confirmed it earlier';
+                    switch (settled.outcome) {
+                        case 'cancelled':
+                            throw new Error(
+                                'Not sent: the user cancelled it with the button in the voice panel. Do not ask about it again; if they bring it up and want it after all, propose it again with tell_worker.',
+                            );
+                        case 'failed':
+                            throw new Error(`Not sent: ${who}, but ${settled.result}`);
+                        case 'confirmed':
+                            return `Already sent, nothing more to do: ${who}. ${settled.result ?? 'It is being sent now.'} Do not ask the user about it again.`;
+                    }
+                }
+                const proposal = this._proposals.get(id);
                 if (!proposal || proposal.tabId !== tabId) {
-                    throw new Error('No such proposal: it was replaced, already sent, or belongs to another task.');
+                    throw new Error('No such proposal: it was replaced, or belongs to another task.');
                 }
                 if (turn.seq <= proposal.createdTurn) {
                     throw new Error('The user has not replied since you proposed this. Ask them and wait for their answer.');
                 }
-                return this.confirmProposal(proposal.id);
+                return this._send(this._take(id), 'voice');
             }
             case 'stop_worker': {
                 if (this._worker.status(tabId).phase === 'idle') {
@@ -638,9 +723,64 @@ export class HostToolRouter {
                     ...(symbol ? { symbol } : {}),
                 });
             }
+            case 'list_viewers':
+                return formatViewers(await this._requireHands().listViewers(requireString(args, 'path')));
+            case 'open_with': {
+                const target = requireString(args, 'path');
+                const id = requireString(args, 'viewer').trim();
+                const hands = this._requireHands();
+                // Only what list_viewers offers for this file: never an arbitrary command.
+                const { path: relative, editors, commands } = await hands.listViewers(target);
+                const offered = [...editors, ...commands];
+                const viewer = offered.find((v) => v.id === id);
+                if (!viewer) {
+                    throw new Error(`${id} is not a viewer for ${relative}. Use one of: ${offered.map((v) => v.id).join(', ')}.`);
+                }
+                return hands.openWith(target, viewer, args.toSide === true);
+            }
             default:
                 throw new Error(`Unknown tool ${toolName}`);
         }
+    }
+
+    /** Takes a waiting proposal out, to be sent or dropped. */
+    private _take(id: string): Proposal {
+        const proposal = this._proposals.get(id);
+        if (!proposal) {
+            throw new Error('That proposal is gone: it was replaced or already settled.');
+        }
+        this._proposals.delete(id);
+        return proposal;
+    }
+
+    /** Remembers how a proposal ended; one settled with a button is told to the model on its next turn. */
+    private _settle(proposal: Proposal, outcome: SettledProposal['outcome'], by: SettledProposal['by']): SettledProposal {
+        const settled: SettledProposal = { id: proposal.id, tabId: proposal.tabId, message: proposal.message, outcome, by };
+        this._settled.set(settled.id, settled);
+        if (this._settled.size > MAX_SETTLED) {
+            this._settled.delete(this._settled.keys().next().value!);
+        }
+        if (by === 'button') {
+            this._unseenSettled.set(settled.tabId, [...(this._unseenSettled.get(settled.tabId) ?? []), settled]);
+        }
+        return settled;
+    }
+
+    private async _send(proposal: Proposal, by: SettledProposal['by']): Promise<string> {
+        // Settled before it goes out, so a confirm_task meanwhile does not send it twice.
+        const settled = this._settle(proposal, 'confirmed', by);
+        try {
+            const outcome = await this._worker.send(proposal.tabId, proposal.message, {
+                when: 'after',
+                includeEditorContext: proposal.includeEditorContext,
+            });
+            settled.result = OUTCOME_TEXT[outcome];
+        } catch (err: unknown) {
+            settled.outcome = 'failed';
+            settled.result = `sending it failed: ${err instanceof Error ? err.message : String(err)}`;
+            throw err;
+        }
+        return settled.result;
     }
 
     private _requireHands(): EditorHands {

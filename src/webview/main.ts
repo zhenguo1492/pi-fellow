@@ -44,22 +44,36 @@ import {
     dictationStatusHtml,
     insertDictatedText,
     micButtonHtml,
+    setMicLocked,
     setSttCheck,
 } from './dictation';
 import {
+    ICON_ROBOT,
     applyVoiceBarStatus,
     bindVoiceBar,
+    composerLocked,
     composerTarget,
     sendToVoice,
+    setBotViewShown,
     setVoiceReadiness,
     voiceBarHtml,
-    voicePlaceholder,
-    voiceTargetHtml,
 } from './voiceBar';
 import { pushWave } from './voiceWave';
+import { VOICE_OFFLINE_SEND_HINT, VOICE_OFFLINE_SEND_TITLE } from '../shared/voiceViewProtocol';
+import { handleVoiceMessage, mountVoicePanel } from './voicePanel';
+import { applyModelStatus, modelStatusEl, setModelWorkingStatus } from './modelStatus';
 
 import { vscode } from './vscodeApi';
 const iconsBaseUri = document.getElementById('app')?.dataset.iconsUri ?? '';
+
+/**
+ * The Bot view a tab shows in place of its conversation (`TabInfo.botView`). Outside the skeleton:
+ * `render()` wipes #app on tab switches and re-inserts this node, so the transcript keeps its scroll
+ * position and folds.
+ */
+const botHost = document.createElement('div');
+botHost.className = 'bot-host';
+mountVoicePanel(botHost);
 
 // ── State ──
 
@@ -94,7 +108,6 @@ const state: {
     piExtensionChrome?: PiExtensionChromeSnapshot;
     connectionStatus: ConnectionStatus;
     activeBackend: AgentBackend;
-    availableBackends: AgentBackend[];
     tuiMode: boolean;
     tuiAuthPrompt?: TuiAuthCommand;
 } = {
@@ -121,7 +134,6 @@ const state: {
     planMode: emptyPlanMode(),
     connectionStatus: { phase: 'idle' },
     activeBackend: 'pi',
-    availableBackends: [],
     tuiMode: false,
 };
 /** A queued steer keeps the prompt it arrived under, even when later turns start. */
@@ -221,6 +233,9 @@ function handleMessage(msg: ServerMessage): void {
         case 'stateSync':
             applyStateSync(msg.state);
             break;
+        case 'modelStatus':
+            applyModelStatus(msg.status);
+            break;
         case 'editorContext':
             editorContext = { context: msg.context, enabled: msg.enabled };
             updateEditorContextBar();
@@ -232,6 +247,9 @@ function handleMessage(msg: ServerMessage): void {
             break;
         case 'voiceLevel':
             pushWave(msg.source, msg.wave);
+            break;
+        case 'voice':
+            handleVoiceMessage(msg.message);
             break;
         case 'agentEvent':
             handleAgentEvent(msg.event);
@@ -361,13 +379,14 @@ function applyStateSync(s: SerializedAgentState): void {
     state.rollbackPoint = s.rollbackPoint ?? null;
     state.tabs = s.tabs ?? [];
     state.activeTabId = s.activeTabId ?? '';
+    const tabSwitched = prevTab !== state.activeTabId;
     state.streamingText = s.streamingText ?? '';
     state.streamingThinking = s.streamingThinking ?? '';
     state.isThinking = s.isThinking ?? false;
     state.thinkingStartTime = s.thinkingStartTime ?? 0;
     state.streamingThinkingDuration = s.streamingThinkingDuration ?? 0;
     // During live streaming the webview often has fresher partial text than RPC stateSync.
-    if (s.isStreaming) {
+    if (s.isStreaming && !tabSwitched) {
         if (prevStreamingText.length > state.streamingText.length) {
             state.streamingText = prevStreamingText;
         }
@@ -392,9 +411,6 @@ function applyStateSync(s: SerializedAgentState): void {
     if (s.activeBackend) {
         state.activeBackend = s.activeBackend;
     }
-    if (s.availableBackends) {
-        state.availableBackends = s.availableBackends;
-    }
     state.tuiMode = s.tuiMode ?? false;
     state.tuiAuthPrompt = s.tuiAuthPrompt;
     if (s.voiceReadiness) {
@@ -403,7 +419,13 @@ function applyStateSync(s: SerializedAgentState): void {
     }
     applyVoiceMicStatus(s.voice);
     applyVoiceBarStatus(s.voice);
-    const tabSwitched = prevTab !== state.activeTabId;
+    // Before the composer updates below: it talks to what the tab shows, and is locked in the Bot
+    // view while the voice agent is off. An edit of a worker message ends there.
+    const botView = !state.tuiMode && state.tabs.some((t) => t.isActive && t.botView);
+    setBotViewShown(botView);
+    if (botView && composerEdit) {
+        clearComposerEdit();
+    }
 
     if (tabSwitched || !skeletonBuilt) {
         render();
@@ -422,24 +444,24 @@ function applyStateSync(s: SerializedAgentState): void {
         updateAttachmentsStrip();
         updateConnectionBanner();
         updatePlanPanel();
-        if (state.isStreaming) {
-            if (state.isThinking) {
-                setStreamPhase('thinking');
-            } else if (state.streamingText) {
-                setStreamPhase('writing');
-            } else {
-                setStreamPhase('waiting');
-            }
-        } else {
-            setStreamPhase('idle');
-        }
         updateScrollButton();
+    }
+    if (state.isStreaming) {
+        if (state.isThinking) {
+            setStreamPhase('thinking');
+        } else if (state.streamingText) {
+            setStreamPhase('writing');
+        } else {
+            setStreamPhase('waiting');
+        }
+    } else {
+        setStreamPhase('idle');
     }
     updateTuiAuthBanner();
     setPickerCurrentModel(state.model);
-    updateBackendDropdown();
     updateTuiToggle();
     syncTuiView(state.tuiMode, state.tabs.map((t) => t.id), state.activeTabId);
+    document.getElementById('app')?.classList.toggle('bot-mode', botView);
 }
 
 /** Header toggle shows where a click goes: terminal icon in chat mode, chat icon in TUI mode. */
@@ -451,47 +473,6 @@ function updateTuiToggle(): void {
     btn.title = label;
     icon.alt = label;
     icon.src = `${iconsBaseUri}/${state.tuiMode ? 'chat' : 'terminal'}.svg`;
-}
-
-let backendDropdownDismissBound = false;
-
-function setBackendDropdownOpen(open: boolean): void {
-    const menu = document.getElementById('backend-dropdown-menu');
-    const button = document.getElementById('btn-backend');
-    if (!menu || !button) return;
-    menu.hidden = !open;
-    button.setAttribute('aria-expanded', open ? 'true' : 'false');
-    button.classList.toggle('active', open);
-}
-
-function updateBackendDropdown(): void {
-    const root = document.getElementById('backend-dropdown');
-    const btnText = document.getElementById('backend-btn-text');
-    const menu = document.getElementById('backend-dropdown-menu');
-    // A picker only makes sense when both CLIs are installed.
-    const backends = state.availableBackends;
-    if (root) {
-        root.style.display = backends.length > 1 ? '' : 'none';
-    }
-    if (backends.length <= 1) {
-        setBackendDropdownOpen(false);
-    }
-    if (btnText) {
-        btnText.textContent = state.activeBackend || 'omp';
-    }
-    if (menu) {
-        menu.innerHTML = backends
-            .map((b) => {
-                const isActive = b === state.activeBackend;
-                return `
-                    <button type="button" class="backend-dropdown-item${isActive ? ' active' : ''}" data-backend="${b}" role="menuitem">
-                        <span class="backend-item-label">${b}</span>
-                        <span class="backend-item-check">${isActive ? '✓' : ''}</span>
-                    </button>
-                `;
-            })
-            .join('');
-    }
 }
 
 function handleAgentEvent(event: any): void {
@@ -756,13 +737,15 @@ function commitStreamedAssistantMessage(msg: Record<string, unknown>): void {
 }
 
 function updateStreamActivityBar(): void {
+    const label = streamActivityLabel();
+    const active = state.isStreaming;
+    setModelWorkingStatus(active, label);
+
     const bar = document.getElementById('stream-activity');
     const container = document.getElementById('streaming-message');
     if (!bar || !container) {
         return;
     }
-    const label = streamActivityLabel();
-    const active = state.isStreaming;
     // Live reasoning uses the expandable thinking block; hide the duplicate status pill.
     const hideForThinkingBlock =
         state.isStreaming &&
@@ -943,20 +926,14 @@ function render(): void {
     const headerActions = el('div', 'header-right');
     headerActions.innerHTML = `
         <button class="icon-btn" id="btn-new-tab" title="New Agent"><img class="header-icon-img" src="${iconsBaseUri}/new.svg" alt="new"></button>
-        <div class="backend-dropdown" id="backend-dropdown">
-            <button type="button" class="backend-dropdown-btn" id="btn-backend" title="Agent Backend (omp / pi)" aria-haspopup="menu" aria-expanded="false">
-                <span class="backend-btn-text" id="backend-btn-text">${state.activeBackend || 'omp'}</span>
-                <svg class="dropdown-chevron" width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 5.5l5 5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-            <div class="backend-dropdown-menu" id="backend-dropdown-menu" role="menu" hidden></div>
-        </div>
         <button class="icon-btn" id="btn-tui"><img class="header-icon-img" alt=""></button>
         <button class="icon-btn" id="btn-sessions" title="Resume session"><img class="header-icon-img" src="${iconsBaseUri}/history.svg" alt="resume session"></button>
         <button class="icon-btn" id="btn-settings" title="Settings"><img class="header-icon-img" src="${iconsBaseUri}/settings.svg" alt="settings"></button>
     `;
     header.appendChild(headerActions);
-    updateBackendDropdown();
     app.appendChild(header);
+    // Over the conversation (and the TUI), as the Bot view's header is over its transcript.
+    app.appendChild(modelStatusEl);
     app.appendChild(getTuiHost());
 
     // Messages container (persistent, children managed by updateMessages)
@@ -979,6 +956,7 @@ function render(): void {
     const spacer = el('div', 'messages-spacer');
     messagesContainer.appendChild(spacer);
     app.appendChild(messagesContainer);
+    app.appendChild(botHost);
 
     // Scroll-to-bottom button (static)
     const scrollWrap = el('div', 'scroll-btn-wrap');
@@ -1103,7 +1081,7 @@ function render(): void {
             <button id="btn-model" class="composer-model-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
                 <span class="composer-model-label" id="model-chip-label"></span>
                 <svg class="dropdown-chevron" width="8" height="8" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 10.5l5-5 5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>${dictationStatusHtml}${voiceTargetHtml}
+            </button>${dictationStatusHtml}
         </div>`;
     inputContainer.appendChild(area);
     app.appendChild(inputContainer);
@@ -1594,13 +1572,7 @@ function updateTabOverflowMenu(hasOverflow: boolean): void {
         item.title = tab.name;
 
         const status = el('span', 'tab-overflow-item-status');
-        if (tab.isStreaming) {
-            status.innerHTML = '<span class="tab-spinner"></span>';
-        } else if (tab.hasNotification) {
-            status.innerHTML = `<img class="tab-icon-img" src="${iconsBaseUri}/notification.svg" alt="notification">`;
-        } else {
-            status.innerHTML = `<img class="tab-icon-img" src="${iconsBaseUri}/chat.svg" alt="chat">`;
-        }
+        status.innerHTML = tabIconHtml(tab);
         const label = el('span', 'tab-overflow-item-label');
         label.textContent = tab.name;
         const marker = el('span', 'tab-overflow-item-marker');
@@ -1642,6 +1614,18 @@ function initTabLayoutObserver(): void {
     scheduleTabCapacityUpdate();
 }
 
+function tabIconHtml(tab: TabInfo): string {
+    if (tab.botView) {
+        return `<span class="tab-icon-robot">${ICON_ROBOT}</span>`;
+    }
+    if (tab.isStreaming) {
+        return '<span class="tab-chat-icon" aria-hidden="true"></span>';
+    }
+    return tab.hasNotification
+        ? `<img class="tab-icon-img" src="${iconsBaseUri}/notification.svg" alt="notification">`
+        : `<img class="tab-icon-img" src="${iconsBaseUri}/chat.svg" alt="chat">`;
+}
+
 function updateTabs(): void {
     const tabStrip = document.querySelector('.tab-strip');
     if (!tabStrip) return;
@@ -1653,14 +1637,13 @@ function updateTabs(): void {
         const tabEl = el('div', `tab${tab.isActive ? ' tab-active' : ''}${tab.isStreaming ? ' tab-streaming' : ''}`);
         tabEl.dataset.tabId = tab.id;
 
-        const icon = el('span', 'tab-icon');
-        if (tab.isStreaming) {
-            icon.innerHTML = '<span class="tab-spinner"></span>';
-        } else if (tab.hasNotification) {
-            icon.innerHTML = `<img class="tab-icon-img" src="${iconsBaseUri}/notification.svg" alt="notification">`;
-        } else {
-            icon.innerHTML = `<img class="tab-icon-img" src="${iconsBaseUri}/chat.svg" alt="chat">`;
-        }
+        // The icon toggles what the tab shows: its conversation (chat bubble) or the Bot view (robot).
+        const icon = el('button', 'tab-icon') as HTMLButtonElement;
+        icon.type = 'button';
+        icon.dataset.tabId = tab.id;
+        icon.title = tab.botView ? 'Show the conversation' : 'Show the Bot view (voice agent conversation)';
+        icon.setAttribute('aria-pressed', String(tab.botView));
+        icon.innerHTML = tabIconHtml(tab);
 
         const name = el('span', 'tab-name');
         const displayName = tab.name.length > 20
@@ -1800,9 +1783,10 @@ function updateComposerChipRow(): void {
 function updateComposerToolbar(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
-    const canSend = hasSendableInput(text);
-    // Typed text for the voice agent neither steers nor interrupts omp.
-    const toVoice = !composerEdit && composerTarget(text, state.pendingAttachments.length) === 'voice';
+    const locked = composerLocked();
+    // The Bot view's text goes to the voice agent: text only, and it neither steers nor interrupts omp.
+    const toVoice = composerTarget() === 'voice';
+    const canSend = toVoice ? !!text && !locked : hasSendableInput(text);
 
     const steerBtn = document.getElementById('btn-steer');
     const sendBtn = document.getElementById('btn-send') as HTMLButtonElement | null;
@@ -1810,7 +1794,12 @@ function updateComposerToolbar(): void {
     if (steerBtn) {
         steerBtn.hidden = !state.isStreaming || toVoice;
     }
+    const attachBtn = document.getElementById('btn-attach') as HTMLButtonElement | null;
+    if (attachBtn) {
+        attachBtn.disabled = toVoice;
+    }
     if (sendBtn) {
+        // Nothing to send (or locked): a running worker can still be stopped.
         const showStop = state.isStreaming && !composerEdit && !canSend;
         const showInterruptSend = state.isStreaming && !composerEdit && canSend && !toVoice;
         sendBtn.classList.toggle('composer-action-btn--as-stop', showStop);
@@ -1829,6 +1818,9 @@ function updateComposerToolbar(): void {
         } else if (showStop) {
             sendBtn.title = 'Stop (Esc)';
             sendBtn.setAttribute('aria-label', 'Stop generation');
+        } else if (locked) {
+            sendBtn.title = VOICE_OFFLINE_SEND_TITLE;
+            sendBtn.setAttribute('aria-label', VOICE_OFFLINE_SEND_TITLE);
         } else if (showInterruptSend) {
             sendBtn.title = 'Send now (interrupt current work)';
             sendBtn.setAttribute('aria-label', 'Send now and interrupt current work');
@@ -1845,14 +1837,11 @@ function updateComposerToolbar(): void {
     }
 }
 
-/**
- * The composer's text goes to the voice agent (voice mode on, omp not ticked, no slash command or
- * attachment): sends it there and clears the box. False when it is for omp.
- */
+/** The Bot view: sends the composer's text to the voice agent and clears the box. False when there is nothing to send or nobody online. */
 function sendComposerToVoice(): boolean {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
-    if (!input || !text || composerEdit || composerTarget(text, state.pendingAttachments.length) !== 'voice') {
+    if (!input || !text || composerLocked()) {
         return false;
     }
     sendToVoice(text);
@@ -1905,7 +1894,11 @@ function requestAbort(): void {
 
 function handleSendButtonClick(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
-    if (sendComposerToVoice()) {
+    if (composerTarget() === 'voice') {
+        // Nothing went to the voice agent: the button was a stop button.
+        if (!sendComposerToVoice() && state.isStreaming) {
+            requestAbort();
+        }
         return;
     }
     if (state.isStreaming) {
@@ -1937,15 +1930,23 @@ function handleSteerButtonClick(): void {
 function updateInputArea(): void {
     updateComposerEditBanner();
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    const locked = composerLocked();
+    document.querySelector('.input-area')?.classList.toggle('is-locked', locked);
+    setMicLocked(locked);
     if (input) {
-        input.placeholder = composerEdit
-            ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
-            : (voicePlaceholder() ??
-              (state.isStreaming
+        input.disabled = locked;
+        input.title = locked ? VOICE_OFFLINE_SEND_TITLE : '';
+        input.placeholder = locked
+            ? VOICE_OFFLINE_SEND_HINT
+            : composerEdit
+              ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
+              : composerTarget() === 'voice'
+                ? 'Talk to the voice agent…'
+                : state.isStreaming
                   ? 'Enter to queue · ↑ send now · Ctrl+Enter steer · Esc stop...'
                   : state.planMode.enabled
                     ? 'Plan mode: describe what to build (read-only until you implement)...'
-                    : 'Ask Pi anything...'));
+                    : 'Ask Pi anything...';
     }
 
     updateComposerToolbar();
@@ -3964,7 +3965,8 @@ function bindStableEvents(): void {
                 }
                 return;
             }
-            if (sendComposerToVoice()) {
+            if (composerTarget() === 'voice') {
+                sendComposerToVoice();
                 return;
             }
             if (state.isStreaming) {
@@ -3995,7 +3997,8 @@ function bindStableEvents(): void {
         input.style.height = Math.min(input.scrollHeight, 200) + 'px';
         updateComposerToolbar();
         updateAtMenu(input);
-        if (isAtMenuVisible()) {
+        // Slash commands are the worker's; the Bot view's text goes to the voice agent as is.
+        if (isAtMenuVisible() || composerTarget() === 'voice') {
             hideSlashMenu();
         } else {
             updateSlashMenu(input);
@@ -4004,7 +4007,8 @@ function bindStableEvents(): void {
 
     document.querySelector('.input-area')?.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
-        if (target.closest('#btn-attach')) {
+        const attachBtn = target.closest('#btn-attach') as HTMLButtonElement | null;
+        if (attachBtn && !attachBtn.disabled) {
             e.preventDefault();
             vscode.postMessage({ type: 'pickAttachments' });
             return;
@@ -4024,7 +4028,8 @@ function bindStableEvents(): void {
 
     input?.addEventListener('paste', (e) => {
         const clip = e.clipboardData;
-        if (!clip) return;
+        // Images are attachments for the worker; the Bot view's text goes to the voice agent alone.
+        if (!clip || composerTarget() === 'voice') return;
         const files: File[] = [];
         for (const item of clip.items) {
             if (!item.type.startsWith('image/')) continue;
@@ -4047,48 +4052,11 @@ function bindStableEvents(): void {
     bindFileMentionMenu();
     bindModelPicker();
     bindMicButton();
-    bindVoiceBar(() => updateInputArea());
-
-    const backendBtn = document.getElementById('btn-backend');
-    const backendMenu = document.getElementById('backend-dropdown-menu');
+    bindVoiceBar();
 
     newTabBtn?.addEventListener('click', () =>
         vscode.postMessage({ type: 'createTab', backend: state.activeBackend }),
     );
-
-    backendBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const isOpen = backendBtn.getAttribute('aria-expanded') === 'true';
-        setBackendDropdownOpen(!isOpen);
-    });
-
-    backendMenu?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const item = (e.target as HTMLElement).closest('.backend-dropdown-item') as HTMLElement | null;
-        const backend = item?.dataset.backend as AgentBackend | undefined;
-        if (!backend) return;
-        setBackendDropdownOpen(false);
-        if (backend !== state.activeBackend) {
-            state.activeBackend = backend;
-            updateBackendDropdown();
-            updateModeSwitch();
-            updatePlanPanel();
-            refreshWelcome();
-            vscode.postMessage({ type: 'setBackend', backend });
-        }
-    });
-
-    if (!backendDropdownDismissBound) {
-        backendDropdownDismissBound = true;
-        document.addEventListener('click', (e) => {
-            if (!(e.target as HTMLElement).closest('#backend-dropdown')) {
-                setBackendDropdownOpen(false);
-            }
-        });
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') setBackendDropdownOpen(false);
-        });
-    }
 
     tabOverflowBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -4130,10 +4098,20 @@ function bindTabEvents(): void {
     document.querySelectorAll('.tab').forEach((tabEl) => {
         tabEl.addEventListener('click', (e) => {
             const target = e.target as HTMLElement;
-            if (target.closest('.tab-close')) return;
+            if (target.closest('.tab-close, .tab-icon')) return;
             const tabId = (tabEl as HTMLElement).dataset.tabId;
             if (tabId && tabId !== state.activeTabId) {
                 vscode.postMessage({ type: 'switchTab', tabId });
+            }
+        });
+    });
+
+    document.querySelectorAll('.tab-icon').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const tabId = (btn as HTMLElement).dataset.tabId;
+            if (tabId) {
+                vscode.postMessage({ type: 'toggleBotView', tabId });
             }
         });
     });
@@ -4208,7 +4186,8 @@ function bindChangedFileItems(): void {
 
 function sendMessage(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
-    if (!input) return;
+    // The worker's send; the Bot view's text goes to the voice agent instead.
+    if (!input || composerTarget() === 'voice') return;
     if (composerEdit) {
         submitComposerEdit('new');
         return;

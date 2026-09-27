@@ -1,7 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AgentBackend } from './agentBackend';
+import { HOST_TOOLS_COMMAND, type HostToolResultPayload } from './hostToolsProtocol';
 import { attachJsonlLineReader, serializeJsonLine } from './jsonl';
 import { cliCommand, piCliChildEnv, resolvePiCliInvocation } from './piCliPaths';
+import { PiHostTools } from './piHostTools';
 import { isVscodeOnlySlash } from './slashCommandRouter';
 import type {
     PiAgentEvent,
@@ -39,6 +41,14 @@ interface ChunkAssembly {
     parts: Buffer[];
 }
 
+export interface PiRpcBridgeOptions {
+    /**
+     * Use setHostTools. omp has them natively; pi gets the bundled Pi extension that emulates them.
+     * On pi a `--tools` allowlist in `extraArgs` must also name the host tools.
+     */
+    hostTools?: boolean;
+}
+
 /** omp `get_available_commands` source → the pi command sources the UI understands. */
 const OMP_COMMAND_SOURCE: Record<string, RpcSlashCommand['source']> = {
     builtin: 'builtin',
@@ -60,6 +70,8 @@ export class PiRpcBridge {
     /** omp renamed some RPC commands (commands list, fork → branch). */
     private _backend: AgentBackend = 'pi';
     private _chunkAssembly: ChunkAssembly | undefined;
+    /** pi with host tools only. */
+    private _piHostTools: PiHostTools | undefined;
 
     get backend(): AgentBackend {
         return this._backend;
@@ -86,7 +98,7 @@ export class PiRpcBridge {
         }
     }
 
-    async start(cwd: string, extraArgs: string[] = [], preferredBackend?: AgentBackend): Promise<void> {
+    async start(cwd: string, extraArgs: string[] = [], preferredBackend?: AgentBackend, options: PiRpcBridgeOptions = {}): Promise<void> {
         if (this._process) {
             return;
         }
@@ -94,6 +106,19 @@ export class PiRpcBridge {
         const invocation = await resolvePiCliInvocation(preferredBackend);
         this._backend = invocation.backend;
         const args = ['--mode', 'rpc', ...extraArgs];
+        let hostToolsEnv: NodeJS.ProcessEnv = {};
+        if (options.hostTools && this._backend === 'pi') {
+            const hostTools = new PiHostTools();
+            this._piHostTools = hostTools;
+            try {
+                const launch = hostTools.launch();
+                args.push(...launch.args);
+                hostToolsEnv = launch.env;
+            } catch (err) {
+                this._disposePiHostTools();
+                throw err;
+            }
+        }
 
         this._exitError = null;
         this._stderr = '';
@@ -101,6 +126,7 @@ export class PiRpcBridge {
             ...piCliChildEnv(invocation),
             PI_CURSOR_SETTING_SOURCES: 'none',
             PI_CURSOR_TOOL_MANIFEST: '0',
+            ...hostToolsEnv,
         };
 
 
@@ -122,6 +148,7 @@ export class PiRpcBridge {
                     `Pi RPC process exited (code=${code}, signal=${signal}). Stderr: ${this._stderr.slice(-2000)}`,
                 );
             }
+            this._disposePiHostTools();
             this._rejectPending(this._exitError ?? new Error('Pi RPC process exited'));
             for (const listener of this._exitListeners) {
                 listener(this._exitError);
@@ -130,6 +157,7 @@ export class PiRpcBridge {
 
         child.on('error', (error) => {
             this._exitError = new Error(`Pi RPC process error: ${error.message}`);
+            this._disposePiHostTools();
             this._rejectPending(this._exitError);
         });
 
@@ -208,6 +236,20 @@ export class PiRpcBridge {
         this.writeLine(response);
     }
 
+    /** Answers a `host_tool_call` (see setHostTools). */
+    sendHostToolResult(id: string, result: HostToolResultPayload): void {
+        if (this._piHostTools) {
+            this.writeLine(this._piHostTools.response(id, result));
+            return;
+        }
+        this.writeLine({
+            type: 'host_tool_result',
+            id,
+            result: { content: result.content },
+            ...(result.isError ? { isError: true } : {}),
+        });
+    }
+
     async stop(): Promise<void> {
         this._stopReading?.();
         this._stopReading = null;
@@ -232,8 +274,14 @@ export class PiRpcBridge {
             this._process = null;
         }
 
+        this._disposePiHostTools();
         this._pending.clear();
         this._listeners.clear();
+    }
+
+    private _disposePiHostTools(): void {
+        this._piHostTools?.dispose();
+        this._piHostTools = undefined;
     }
 
     private _handleLine(line: string): void {
@@ -256,7 +304,11 @@ export class PiRpcBridge {
             return;
         }
 
-        this._emit(data as PiRpcOutbound);
+        // The host-tools extension's frames become omp host-tool frames and never reach extension UI.
+        const outbound = this._piHostTools ? this._piHostTools.translate(data as PiRpcOutbound) : (data as PiRpcOutbound);
+        if (outbound) {
+            this._emit(outbound);
+        }
     }
 
     /** Collect one chunk; returns the decoded frame once its last chunk arrived. */
@@ -373,9 +425,26 @@ export class PiRpcBridge {
         return this._data(await this._send({ type: 'new_session' }));
     }
 
-    /** omp only: replaces the host-owned tool set; resolves with the registered names. */
+    /**
+     * Replaces the host-owned tool set; resolves with the registered names. Each call of one arrives
+     * as a `host_tool_call` event ({ id, toolName, arguments }), a `host_tool_cancel` ({ targetId })
+     * withdraws it, and sendHostToolResult answers it. omp: native. pi: needs `hostTools` at start.
+     */
     async setHostTools(tools: RpcHostToolDefinition[]): Promise<string[]> {
-        return this._data<{ toolNames: string[] }>(await this._send({ type: 'set_host_tools', tools })).toolNames;
+        if (this._backend === 'omp') {
+            return this._data<{ toolNames: string[] }>(await this._send({ type: 'set_host_tools', tools })).toolNames;
+        }
+        const hostTools = this._piHostTools;
+        if (!hostTools) {
+            throw new Error('Host tools on pi need the bridge started with the hostTools option');
+        }
+        // Unknown to pi, the command would go to the model as a prompt.
+        if (!(await this.getCommands()).some((c) => c.name === HOST_TOOLS_COMMAND)) {
+            throw new Error('pi did not load the bundled host-tools extension');
+        }
+        hostTools.writeTools(tools);
+        this._data(await this._send({ type: 'prompt', message: `/${HOST_TOOLS_COMMAND}` }));
+        return tools.map((tool) => tool.name);
     }
 
     async getState(): Promise<RpcSessionState> {

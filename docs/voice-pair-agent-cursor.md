@@ -156,7 +156,7 @@ flowchart LR
 
 ## 11. 两个模式：委派 / 结对（已实现，2026-09-25）
 
-| | 委派模式（默认，值 `omp`） | 结对模式（值 `pair`） |
+| | 委派模式（值 `omp`） | 结对模式（默认，值 `pair`） |
 |---|---|---|
 | 谁动手 | worker（`tell_worker` 等） | 语音智能体自己：`edit_file`、`run_in_terminal`，调试工具（§12） |
 | worker 工具 | 可用 | 宿主拒绝（`tell_worker` / `confirm_task` / `stop_worker` / `answer_worker`） |
@@ -164,9 +164,10 @@ flowchart LR
 
 **切换规则**（`hostTools.ts` 的 `set_mode`）：
 - 进入结对模式需要两步。第一次调用只记录请求，模型要请用户确认；之后用户的下一轮回复表示同意，才能真正切换。这个规则和 `confirm_task` 相同。
-- 切回委派立即生效。
+- 切回委派立即生效。用户要求时切；在结对模式里遇到重活（比如需要几个智能体并行），语音智能体也可以自己切，调用时带 `auto=true`，然后让 worker 去做，worker 可以自己开子智能体。
+- 自己切走的例外：只有语音智能体自己从结对带 `auto=true` 切到委派后，它可以不经确认直接切回结对（活干完后）。标记 `_autoSwitchedFromPair` 在切回结对、或用户在界面上切换模式时清除；用户要求切到委派的（口头或界面），切回结对仍要两步确认。
 - 界面上的切换（机器人工具条的模式按钮、命令 "Switch Delegate / Pair Mode"）本身就是明确的操作，不需要确认。
-- 新启动的语音智能体总是在委派模式。
+- 新启动的语音智能体总是在结对模式。用户交代任务时它先判断轻重：小改动自己做，重活自己带 `auto=true` 切到委派交给 worker，做完切回结对。
 - 主动开口的轮次不能切换模式、不能改文件、不能跑命令。
 
 **显示**：
@@ -215,6 +216,8 @@ flowchart LR
 | 工具 | 模式 | 做什么 |
 |---|---|---|
 | `read_output` | 两种模式都能用（只读） | 不带 `source`：列出能读的输出；带 `source`：返回它的最后若干行（默认 80，最多 400） |
+| `list_viewers` | 两种模式都能用（不改文件） | 列出能显示这个文件的编辑器（所有已装扩展的 custom editor）和 VS Code 内置扩展的预览命令（如 Markdown 预览）；不写死任何扩展 |
+| `open_with` | 两种模式都能用（不改文件） | 用 `list_viewers` 对同一个文件给出的某个 viewer 打开；`toSide` 在旁边的编辑组打开；最多等 8 s |
 | `debug_start` | 结对 | 按名字启动 `.vscode/launch.json` 里的配置（`noDebug` 相当于 Ctrl+F5），等到暂停或结束（默认 15 s） |
 | `debug_control` | 结对 | 按调试工具栏的按钮：continue、pause、stepOver、stepInto、stepOut、restart、stop，等到下一次暂停或结束（默认 10 s） |
 | `set_breakpoint` | 结对 | 在某行加断点（可带条件），或 `remove` 删掉 |
@@ -224,6 +227,23 @@ flowchart LR
 - **Output 面板**：VS Code 没有读别的扩展输出通道的 API，但每个通道都写成当前窗口日志目录里的文件，就在本扩展 `context.logUri` 旁边。读的是：`exthost/output_logging_<最新>/<n>-<名字>.log`（扩展的普通通道）、`exthost/<扩展 id>/<名字>.log`（日志通道，如 Git）、`exthost/exthost.log`（Extension Host）、`window<N>/output_<最新>/tasks.log`（Tasks）、窗口和会话级的 `*.log`（Window、Main、Shared 等）。只读文件末尾 256 KB。这个目录结构没有写进文档，VS Code 改了就要跟着改。
 - **Debug Console**：`DebugDriver` 用 `registerDebugAdapterTrackerFactory('*')` 收集所有调试会话的 `output` 事件（去掉 telemetry），按一次运行（顶层会话加 js-debug 的子会话）分开，保留最近 5 次。最新一次叫 `Debug Console`。
 - **终端**：用 `onDidStartTerminalShellExecution` 记录所有终端里跑的命令（包括用户自己的终端），每个终端保留最近 5 条命令和它们的输出、退出码。只有扩展启动之后、有 shell 集成的终端里跑的命令才有；没有 shell 集成的终端在列表里注明读不到。
+
+**`list_viewers` / `open_with`**（发现和匹配在纯函数模块 `viewers.ts`，执行在 `pairHands.ts`）：
+
+只留实测可靠的部分（2026-09-26）：custom editor 都用 `vscode.openWith` 打开，谁贡献的都一样可靠（draw.io 正常打开）；内置 Markdown 预览正常（bierner.markdown-mermaid 在里面画 Mermaid）。第三方扩展的预览命令各自要不同的参数和状态，不可靠：MermaidChart 的 `mermaidChart.preview` 对 `.mmd` 文件要么什么也没显示，要么 8 s 超时。所以第三方预览命令默认不列、`open_with` 也不接受，要用得打开设置 `oh-my-pi-chater.voiceAgent.discoverPreviewCommands`（默认 `false`，每次调用时读取）。
+
+提示词让模型：`.drawio` 这类图表文件用它的 custom editor 打开；Mermaid 放在 `.md` 文件的 mermaid 代码块里，用 `markdown.showPreviewToSide` 在旁边预览，一边改一边看；单独的 `.mmd` 文件可以提议搬进 Markdown。
+
+- **编辑器**：扫 `vscode.extensions.all` 的 `contributes.customEditors`，`selector.filenamePattern` 按 VS Code 的规则匹配（有 `/` 时匹配整条路径，否则只匹配文件名，不区分大小写），比如 draw.io 的 `*.drawio`、`*.dio`、`*.drawio.svg`。顺序：扩展的 `default`、内置的 `builtin`、`option`，最后是内置文本编辑器 `default`。不受上面的设置影响。
+- **内置还是第三方**：运行时扩展描述里的 `isBuiltin`（不在 API 类型里），或者扩展装在 `vscode.env.appRoot/extensions` 下，就算内置。
+- **预览命令**（内置扩展的总是找；设置打开时也找第三方的）：`contributes.commands` 里名字（id 最后一段，按驼峰拆词）或标题里有以 preview 开头的词的（`appReview` 不算），并且扩展是给这个文件的：
+  - 同一个扩展的 `menus` 里有 `when` 说明是给这个文件的：`resourceLangId`/`editorLangId`/`resourceExtname`/`resourceFilename`/`resourcePath` 的 `==` 或 `=~` 成立，且对文件的条件没有不成立的；其他上下文键（焦点、视图等）当作未知；
+  - 或者命令没有被 `commandPalette` 的 `when` 限制（命令面板里对所有文件都显示），而扩展贡献了这个文件的语言或能打开它的编辑器（设置打开时，MermaidChart 的 `mermaidChart.preview` 就是这样找到的）。
+  - 排序：编辑器标题栏 0，命令面板 1，只在右键菜单等处 2；命令面板隐藏的（`when: false`）或 id 里带 ContextMenu 的再加 2。标题相同的只留排最前的一个。最多 8 个。Markdown 的 `markdown.showPreview`、`markdown.showPreviewToSide` 从内置扩展里找到，设置开不开都有。
+- **语言**：文件已打开就用它的 `languageId`，否则按各扩展 `contributes.languages` 的 `filenames`、`filenamePatterns`、最长的 `extensions` 推断。
+- **文件在不在**：已经在 `workspace.textDocuments` 里打开的直接算在（`create_file` 刚建的文件可能还 stat 不到）；否则 `fs.stat` 最多试 5 次，间隔 200 ms。
+- **安全**：路径和其他工具一样必须在工作区里；`open_with` 先重新算一遍 `list_viewers`，id 不在里面就拒绝，所以不能用它执行任意命令。
+- **执行**：编辑器用 `vscode.openWith`。预览命令先把文件显示成活动编辑器（很多预览命令不看参数，只看活动编辑器），再带着 uri 执行；如果抛错，或 1.5 s 内没有出现新的标签页，就不带参数再执行一次。打开文件、每次执行命令都最多等 8 s，超时就返回"已经开始、还没结束"，不再等，也不再执行第二次，避免扩展的命令一直不返回时工具卡住。
 
 **调试**（`debugDriver.ts`）：
 - 控制用 VS Code 自己的命令（`workbench.action.debug.stepOver` 等），作用于你在界面上看到的那个会话和线程，调试工具栏、变量视图照常更新。

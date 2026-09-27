@@ -63,9 +63,7 @@ export interface VoiceModeOptions {
  * (`hush`), or the voice moving to another window (`standby`).
  */
 export type ReplyAudioEvent =
-    | { turnId: number; type: 'speak' | 'played'; text: string }
-    /** Audio of `text`, `durationMs` long, started playing at epoch `at`. */
-    | { turnId: number; type: 'playing'; text: string; at: number; durationMs: number }
+    | { turnId: number; type: 'speak' | 'playing' | 'played'; text: string }
     | { turnId: number; type: 'idle' }
     | { turnId: number; type: 'cut'; by: 'user' | 'hush' | 'standby' };
 
@@ -298,7 +296,7 @@ export class VoiceMode {
             this._runEffect(effect, ev);
         }
         if (ev.type === 'sentencePlaying') {
-            this._options.onAudio?.({ turnId: ev.turnId, type: 'playing', text: ev.text, at: ev.at, durationMs: ev.durationMs });
+            this._options.onAudio?.({ turnId: ev.turnId, type: 'playing', text: ev.text });
         } else if (ev.type === 'sentencePlayed') {
             this._options.onAudio?.({ turnId: ev.turnId, type: 'played', text: ev.text });
         }
@@ -324,16 +322,9 @@ export class VoiceMode {
             case 'prompt': {
                 const turn = { id: effect.turnId, ctl: new AbortController() };
                 this._turn = turn;
-                let ended = false;
-                const listener = this._replyListener(turn, this._options.transcript(effect.text, effect.source, turn.id, this._state.metrics), () => (ended = true));
-                this._options.agent
-                    .say(effect.text, effect.source, listener, { signal: turn.ctl.signal, interrupted: effect.interrupted })
-                    .catch((err: unknown) => {
-                        this._options.log(`Voice turn failed: ${err instanceof Error ? err.message : String(err)}`);
-                        if (!ended && !turn.ctl.signal.aborted) {
-                            this._dispatch({ type: 'llmEnd', turnId: turn.id, at: Date.now() });
-                        }
-                    });
+                const listener = this._replyListener(turn, this._options.transcript(effect.text, effect.source, turn.id, this._state.metrics));
+                // A turn that cannot run ends through the listener with its error (VoiceAgent.say never rejects).
+                void this._options.agent.say(effect.text, effect.source, listener, { signal: turn.ctl.signal, interrupted: effect.interrupted });
                 return;
             }
             case 'adopt':
@@ -367,7 +358,7 @@ export class VoiceMode {
      * Feeds one reply's text and end into the reducer, besides `log`; silent once the turn is cut off.
      * Anchors go to `log` as they stream and to `onAnchors` as the sentence they precede starts playing.
      */
-    private _replyListener(turn: { id: number; ctl: AbortController }, log: VoiceTurnListener, onEnded?: () => void): VoiceTurnListener {
+    private _replyListener(turn: { id: number; ctl: AbortController }, log: VoiceTurnListener): VoiceTurnListener {
         const live = () => !turn.ctl.signal.aborted;
         return {
             ...log,
@@ -389,7 +380,6 @@ export class VoiceMode {
             },
             onEnd: (result) => {
                 log.onEnd?.(result);
-                onEnded?.();
                 if (result.error) {
                     this._options.log(`Voice agent error: ${result.error}`);
                 }

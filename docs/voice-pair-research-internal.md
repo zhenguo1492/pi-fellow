@@ -127,7 +127,7 @@
 - 轮次进行中到达的观察不会 steer 进模型（design §7.7）。
 
 ### 主动轮次
-- 宿主工具只能调 `worker_status`（hostTools.ts:164-166）；内置 read/grep/glob 不经过路由器，不受限制。
+- 宿主工具只能调 `worker_status`（hostTools.ts:164-166）；内置 read/grep/glob/web_search 不经过路由器，不受限制。
 - 一轮只带一个观察（voiceAgent.ts:275-278）。用户在排队或 `floorBusy` 就放弃（:259, 265-267, 203）。语音进程启动前不会有主动轮次（:202-203）。
 
 ### 多窗口 / 多 tab

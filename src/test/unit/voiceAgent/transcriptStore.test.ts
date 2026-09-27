@@ -47,13 +47,12 @@ describe('VoiceTranscriptStore: spoken replies', () => {
         listener.onText?.('四个过了。一个失败。原因是');
         store.audio({ turnId: 1, type: 'speak', text: '四个过了。' });
         store.audio({ turnId: 1, type: 'speak', text: '一个失败。' });
-        store.audio({ turnId: 1, type: 'playing', text: '四个过了。', at: 1000, durationMs: 900 });
+        store.audio({ turnId: 1, type: 'playing', text: '四个过了。' });
         store.audio({ turnId: 1, type: 'played', text: '四个过了。' });
-        store.audio({ turnId: 1, type: 'playing', text: '一个失败。', at: 1900, durationMs: 800 });
-        // Only the playing sentence keeps its audio timing (for the spoken-word highlight).
+        store.audio({ turnId: 1, type: 'playing', text: '一个失败。' });
         expect(assistant(store.current()!.entries).sentences).toEqual([
             { text: '四个过了。', state: 'played' },
-            { text: '一个失败。', state: 'playing', playback: { at: 1900, durationMs: 800 } },
+            { text: '一个失败。', state: 'playing' },
         ]);
 
         store.audio({ turnId: 1, type: 'cut', by: 'user' });
@@ -182,5 +181,39 @@ describe('VoiceTranscriptStore: sessions', () => {
         expect(store.taskSessions().map((s) => s.taskKey)).toEqual(['/s/a.jsonl']);
         store.flush();
         expect(m.saved()!.map((s) => s.taskKey)).toEqual(['/s/a.jsonl', 'tab:t1']);
+    });
+});
+
+describe('VoiceTranscriptStore: voice sessions for the resume list', () => {
+    it('sums each worker session over its conversations and leaves out tabs without a session file', () => {
+        const { store, setTask } = setup();
+        store.addUser('no file yet', 'stt');
+        store.endRun();
+        setTask({ tabId: 't2', sessionFile: '/s/a.jsonl', name: 'A' });
+        store.addUser('把 average 修好', 'stt');
+        store.addUser('Confirmed the proposed task: fix it', 'panel');
+        store.endRun();
+        // Its voice context is gone, so the next run starts a second conversation for the same task.
+        store.addUser('还有空列表', 'text');
+
+        expect(store.voiceSessions()).toEqual([
+            expect.objectContaining({ sessionFile: '/s/a.jsonl', firstUtterance: '把 average 修好', turns: 2, title: undefined }),
+        ]);
+        expect(store.userUtterances('/s/a.jsonl')).toEqual(['把 average 修好', '还有空列表']);
+    });
+
+    it("keeps a task's name for its later conversations, and a generated name never replaces the user's", () => {
+        const { store, setTask } = setup();
+        setTask({ tabId: 't1', sessionFile: '/s/a.jsonl', name: 'New Agent' });
+        store.addUser('fix average', 'stt');
+        expect(store.nameTask('/s/a.jsonl', 'Fix average', 'auto')).toBe(true);
+        store.endRun();
+        store.addUser('and the empty list', 'stt');
+        expect(store.sessions().map((s) => s.title)).toEqual(['Fix average', 'Fix average']);
+
+        expect(store.nameTask('/s/a.jsonl', 'Average bug', 'user')).toBe(true);
+        expect(store.nameTask('/s/a.jsonl', 'Something else', 'auto')).toBe(false);
+        expect(store.voiceSessions()[0].title).toBe('Average bug');
+        expect(store.nameTask('/s/none.jsonl', 'Nobody', 'user')).toBe(false);
     });
 });

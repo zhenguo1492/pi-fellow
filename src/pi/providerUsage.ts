@@ -524,11 +524,6 @@ export function statusBarWindows(accounts: readonly ProviderAccountUsage[], mode
     return tightest ? [{ text: tightest.label, usedPercent: tightest.usedPercent }] : [];
 }
 
-function bar(percent: number, width = 10): string {
-    const filled = Math.round((clampPercent(percent) / 100) * width);
-    return '█'.repeat(filled) + '░'.repeat(width - filled);
-}
-
 function formatReset(resetsAt: number, nowMs: number): string {
     const d = new Date(resetsAt);
     const sameDay = new Date(nowMs).toDateString() === d.toDateString();
@@ -540,20 +535,21 @@ function formatReset(resetsAt: number, nowMs: number): string {
     return `resets ${abs} (in ${rel})`;
 }
 
-/** Tooltip lines mirroring Claude `/usage`: one bar per window, per account. */
-export function formatUsageTooltip(snapshot: ProviderUsageSnapshot, nowMs = Date.now()): string[] {
-    const lines: string[] = [];
+export interface UsageAccountDetail {
+    /** `provider · plan`, plus the account when several are logged in. */
+    title: string;
+    windows: Array<{ label: string; usedPercent: number; reset?: string }>;
+}
+
+/** Every window per account, mirroring Claude `/usage`, for the chat's model status details. */
+export function usageDetails(snapshot: ProviderUsageSnapshot, nowMs = Date.now()): UsageAccountDetail[] {
     const multi = snapshot.accounts.length > 1;
-    for (const acct of snapshot.accounts) {
-        const head = [snapshot.target.provider, acct.plan, multi ? acct.account : undefined].filter(Boolean).join(' · ');
-        lines.push('', `${head} usage`);
-        for (const w of acct.windows) {
-            const reset = w.resetsAt !== undefined ? ` · ${formatReset(w.resetsAt, nowMs)}` : '';
-            lines.push(`${w.label}: ${bar(w.usedPercent)} ${Math.round(w.usedPercent)}% used${reset}`);
-        }
-    }
-    if (snapshot.error) {
-        lines.push('', `Usage fetch failed: ${snapshot.error}`);
-    }
-    return lines;
+    return snapshot.accounts.map((acct) => ({
+        title: [snapshot.target.provider, acct.plan, multi ? acct.account : undefined].filter(Boolean).join(' · '),
+        windows: acct.windows.map((w) => ({
+            label: w.label,
+            usedPercent: w.usedPercent,
+            reset: w.resetsAt === undefined ? undefined : formatReset(w.resetsAt, nowMs),
+        })),
+    }));
 }
