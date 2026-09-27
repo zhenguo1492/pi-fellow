@@ -23,7 +23,6 @@ import { readPlanModeInfoFromContext } from './planModeState';
 import { tryHandleBashPrefix } from './slashCommands';
 import { isVscodeOnlySlash, tryHandleSlashCommand } from './slashCommandRouter';
 import { buildImplementPlanPrompt } from './planModeState';
-import type { ExtensionUiBridge } from './extensionUiBridge';
 import type { ToolApprovalHandler } from './types';
 import {
     enrichUserMessagesWithForkEntryIds,
@@ -89,7 +88,6 @@ export class PiRpcSessionManager {
     private _cachedSkills: SkillInfo[] = [];
     private _cachedCommands: SlashCommandListItem[] = [];
     private _sessionStats: SessionTokenStats | undefined;
-    private _extensionUiBridge: ExtensionUiBridge | undefined;
     private _postChatError: ((message: string) => void) | undefined;
     private _onOpenSessionTree: (() => Promise<void> | void) | undefined;
 
@@ -120,10 +118,6 @@ export class PiRpcSessionManager {
 
     get rpcExtensionUi(): RpcExtensionUiHandler {
         return this._rpcUi;
-    }
-
-    setExtensionUiBridge(_bridge: ExtensionUiBridge | undefined): void {
-        this._extensionUiBridge = _bridge;
     }
 
     setPostChatError(fn: (message: string) => void): void {

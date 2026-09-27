@@ -1,36 +1,7 @@
 import * as vscode from 'vscode';
-import type { SlashCommandListItem } from '../shared/protocol';
 import type { PiRpcSessionManager } from './rpcSession';
 
 export type PiChatSession = PiRpcSessionManager;
-
-/** Built-in Pi slash commands (same set as terminal `pi`). */
-export const PI_BUILTIN_SLASH_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
-    { name: 'login', description: 'Configure provider authentication' },
-    { name: 'logout', description: 'Remove stored credentials' },
-    { name: 'model', description: 'Select model' },
-    { name: 'new', description: 'Start a new session' },
-    { name: 'reload', description: 'Reload extensions, skills, packages' },
-    { name: 'settings', description: 'Open Pi settings' },
-    { name: 'compact', description: 'Compact session context' },
-    { name: 'resume', description: 'Resume another session' },
-    { name: 'session', description: 'Show session info' },
-    { name: 'tree', description: 'Explore and navigate session branch tree' },
-];
-
-export async function listSlashCommandsForUi(
-    sessionManager?: PiRpcSessionManager,
-): Promise<SlashCommandListItem[]> {
-    if (sessionManager) {
-        return sessionManager.listSlashCommands();
-    }
-    return PI_BUILTIN_SLASH_COMMANDS.map((c) => ({
-        invocation: `/${c.name}`,
-        name: c.name,
-        description: c.description,
-        source: 'builtin' as const,
-    }));
-}
 
 /**
  * Handle Pi built-in slash commands in VS Code (model picker, settings panel, etc.).
