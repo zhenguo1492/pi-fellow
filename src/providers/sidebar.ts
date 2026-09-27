@@ -1975,7 +1975,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             };
         }
         const session = tab.session.session;
-        const rpivTasks = extractRpivTodoTasks(session);
+        const rpivTasks = extractRpivTodoTasks(tab.session);
         const mergedPlan = mergePlanWithRpivTodos(planMode.planMarkdown, rpivTasks);
         state.planMode = {
             ...planMode,
@@ -2592,13 +2592,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     this.sendStateSync();
                     break;
                 case 'getSlashCommands': {
-                    let commands;
-                    if (tab.session instanceof PiRpcSessionManager) {
-                        commands = await tab.session.listSlashCommands();
-                    } else {
-                        const { listSlashCommandsForUi } = await import('../pi/slashCommands');
-                        commands = await listSlashCommandsForUi(tab.session.session);
-                    }
+                    const commands = await tab.session.listSlashCommands();
                     this._post({ type: 'slashCommands', commands });
                     break;
                 }
