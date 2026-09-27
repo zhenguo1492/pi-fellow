@@ -2,7 +2,40 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolvePiCliInvocation } from './piCliPaths';
 
-export type PiCodingAgentModule = typeof import('@earendil-works/pi-coding-agent');
+/** pi-ai `OAuthLoginCallbacks`: how `AuthStorage.login` drives the sign-in UI. */
+export interface PiOAuthLoginCallbacks {
+    onAuth(info: { url: string; instructions?: string }): void;
+    onDeviceCode?(info: { userCode: string; verificationUri: string }): void;
+    onPrompt(prompt: { message: string; placeholder?: string }): Promise<string>;
+    onSelect?(prompt: { message: string; options: Array<{ id: string; label: string }> }): Promise<string | undefined>;
+    onProgress?(message: string): void;
+    onManualCodeInput?(): Promise<string>;
+}
+
+interface PiAuthStorage {
+    getOAuthProviders(): Array<{ id: string; name: string; usesCallbackServer?: boolean }>;
+    /** Providers with stored credentials. */
+    list(): string[];
+    get(providerId: string): { type: 'oauth' | 'api_key' } | undefined;
+    set(providerId: string, credential: { type: 'api_key'; key: string }): void;
+    login(providerId: string, callbacks: PiOAuthLoginCallbacks): Promise<void>;
+    logout(providerId: string): void;
+}
+
+interface PiModelRegistry {
+    getAll(): Array<{ provider: string }>;
+    getProviderDisplayName(providerId: string): string;
+    refresh(): void;
+}
+
+/**
+ * The part of pi-coding-agent's `index.js` the VS Code /login and /logout flows use. This is the
+ * synchronous auth API of pi <= 0.80; pi 0.81 replaced it (no `getOAuthProviders`/`login`).
+ */
+export interface PiCodingAgentModule {
+    AuthStorage: { create(authPath: string): PiAuthStorage };
+    ModelRegistry: { create(authStorage: PiAuthStorage): PiModelRegistry };
+}
 
 let cached: Promise<PiCodingAgentModule> | undefined;
 

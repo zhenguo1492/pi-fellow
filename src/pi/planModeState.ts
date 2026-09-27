@@ -34,32 +34,12 @@ function readLatestPlanStateFromJsonl(entries: SessionJsonlEntry[]): RawPlanMode
     return last;
 }
 
-function readLatestPlanStateFromBranch(
-    branch: Array<{ type?: string; customType?: string; content?: unknown }>,
-): RawPlanModeState | undefined {
-    let last: RawPlanModeState | undefined;
-    for (const entry of branch) {
-        if (entry.type !== 'custom' || entry.customType !== PLAN_STATE_ENTRY) {
-            continue;
-        }
-        last = entry.data as RawPlanModeState;
-    }
-    return last;
-}
-
 /** Plan mode snapshot for RPC sessions (jsonl + live messages). */
 export function readPlanModeInfoFromContext(ctx: PlanModeContext): PlanModeInfo {
     const jsonlEntries = ctx.jsonlEntries ?? [];
     const messages = (ctx.messages ?? []) as any[];
 
-    const persisted =
-        readLatestPlanStateFromJsonl(jsonlEntries) ??
-        readLatestPlanStateFromBranch(
-            jsonlEntries as Array<{ type?: string; customType?: string; content?: unknown }>,
-        ) ??
-        readLatestPlanStateFromSessionManager(ctx);
-
-    let raw: RawPlanModeState = persisted ?? { enabled: false, awaitingAction: false };
+    const raw: RawPlanModeState = readLatestPlanStateFromJsonl(jsonlEntries) ?? { enabled: false, awaitingAction: false };
 
     const enabled = raw.enabled === true;
     // Assistant text is only a plan while plan mode is on: any message that merely mentions
@@ -85,30 +65,6 @@ export function readPlanModeInfoFromContext(ctx: PlanModeContext): PlanModeInfo 
         planMarkdown,
         todos: parsePlanTodos(planMarkdown),
     };
-}
-
-function readLatestPlanStateFromSessionManager(ctx: PlanModeContext): RawPlanModeState | undefined {
-    const sm = (ctx as { sessionManager?: { getEntries?: () => unknown[] } }).sessionManager;
-    if (!sm?.getEntries) {
-        return undefined;
-    }
-    let last: RawPlanModeState | undefined;
-    try {
-        for (const entry of sm.getEntries() as Array<{ type: string; customType?: string; data?: unknown }>) {
-            if (entry.type !== 'custom' || !entry.data) {
-                continue;
-            }
-            if (entry.customType === PLAN_STATE_ENTRY) {
-                last = entry.data as RawPlanModeState;
-            } else if (entry.customType === PLAN_STATE_ENTRY_LEGACY) {
-                const legacy = entry.data as { enabled?: boolean };
-                last = { enabled: legacy.enabled === true, awaitingAction: false };
-            }
-        }
-    } catch {
-        return undefined;
-    }
-    return last;
 }
 
 function extractPlanFromBranch(entries: SessionJsonlEntry[]): string {
@@ -254,18 +210,4 @@ export function enrichPlanModeFromExtensionChrome(
         planMarkdown,
         todos: planMode.todos.length > 0 ? planMode.todos : parsePlanTodos(planMarkdown),
     };
-}
-
-/** @deprecated Use readPlanModeInfoFromContext — kept for unit tests with mock session. */
-export function readPlanModeInfo(session: {
-    messages?: unknown[];
-    sessionManager?: {
-        getEntries?: () => Array<{ type: string; customType?: string; data?: unknown }>;
-        getBranch?: () => Array<{ type?: string; customType?: string; content?: unknown }>;
-    };
-}): PlanModeInfo {
-    return readPlanModeInfoFromContext({
-        messages: session.messages,
-        jsonlEntries: session.sessionManager?.getBranch?.() as SessionJsonlEntry[] | undefined,
-    });
 }
