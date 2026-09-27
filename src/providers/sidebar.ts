@@ -23,18 +23,15 @@ import {
     resolvePiWorkspaceCwd,
 } from '../pi/piCliPaths';
 import { readFavoriteModels } from '../pi/favoriteModels';
-import type { AgentLayout } from '../pi/agentBackend';
 import { updatePiDefaults } from '../pi/piAgentConfig';
 import { applyPiCliDefaultModel } from '../pi/piCliSync';
 import {
     buildSessionInfoFromFile,
     buildSessionListRows,
     canonicalizeSessionPath,
-    clearSessionInfoCache,
     getSessionDirForCwd,
     getSessionDisplayTitle,
     invalidateSessionInfoPath,
-    listPiSessionsForCwdAsync,
     withVoiceSessions,
     type VoiceSessionSummary,
 } from '../pi/sessionCatalog';
@@ -91,6 +88,7 @@ import {
     type VoiceViewHostMessage,
 } from '../shared/voiceViewProtocol';
 import { routeComposerSend } from './composerRoute';
+import { SessionListCache, type SessionListScope } from './sidebarSessionListCache';
 import { VoiceOriginTracker } from './voiceOrigin';
 
 interface MessageMeta {
@@ -113,9 +111,7 @@ const TUI_MODE_STATE_KEY = 'oh-my-pi-chater.tuiMode';
 const EDITOR_CONTEXT_STATE_KEY = 'oh-my-pi-chater.includeEditorContext';
 
 /** Session store + folder the resume panel lists for a tab. */
-interface SessionListTarget {
-    cwd: string;
-    layout: AgentLayout;
+interface SessionListTarget extends SessionListScope {
     currentSessionPath: string | undefined;
 }
 
@@ -293,11 +289,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private readonly _pastedStorageDir: string;
     private _sessionPanelOpen = false;
     private _sessionTreeOpen = false;
-    /** Last listing per `sessionListCacheKey`; shown instantly, then revalidated from disk. */
-    private _sessionListCache = new Map<string, SessionInfo[]>();
-    private readonly _sessionListInFlight = new Map<string, Promise<SessionInfo[]>>();
-    /** Bumped on invalidation so in-flight listings started earlier do not repopulate the cache. */
-    private _sessionListEpoch = 0;
+    private readonly _sessionLists = new SessionListCache();
     private _sessionListGeneration = 0;
     private _sessionPanelQuery = '';
     private _currentBackend: AgentBackend = 'pi';
@@ -1568,44 +1560,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         };
     }
 
-    private sessionListCacheKey(target: SessionListTarget): string {
-        return `${target.layout.agentDir}\0${target.cwd}`;
-    }
-
-    private invalidateSessionListCache(): void {
-        this._sessionListEpoch++;
-        this._sessionListCache.clear();
-        this._sessionListInFlight.clear();
-        clearSessionInfoCache();
-    }
-
-    /** List from disk (per-file metadata is mtime-cached, so repeat listings are cheap); dedupes concurrent reads. */
-    private fetchSessionList(
-        target: SessionListTarget,
-        onProgress?: (loaded: number, total: number) => void,
-    ): Promise<SessionInfo[]> {
-        const key = this.sessionListCacheKey(target);
-        const inFlight = this._sessionListInFlight.get(key);
-        if (inFlight) {
-            return inFlight;
-        }
-        const epoch = this._sessionListEpoch;
-        const pending = listPiSessionsForCwdAsync(target.cwd, target.layout, onProgress)
-            .then((sessions) => {
-                if (epoch === this._sessionListEpoch) {
-                    this._sessionListCache.set(key, sessions);
-                }
-                return sessions;
-            })
-            .finally(() => {
-                if (this._sessionListInFlight.get(key) === pending) {
-                    this._sessionListInFlight.delete(key);
-                }
-            });
-        this._sessionListInFlight.set(key, pending);
-        return pending;
-    }
-
     /** Preload current-folder session list so the resume panel opens instantly. */
     warmSessionListCache(): Promise<void> {
         const tab = this._activeTab;
@@ -1613,10 +1567,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return Promise.resolve();
         }
         const target = this.sessionListTarget(tab);
-        if (this._sessionListCache.has(this.sessionListCacheKey(target))) {
+        if (this._sessionLists.cached(target)) {
             return Promise.resolve();
         }
-        return this.fetchSessionList(target).then(
+        return this._sessionLists.fetch(target).then(
             () => undefined,
             () => undefined, // warm is best-effort
         );
@@ -1663,11 +1617,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         const target = this.sessionListTarget(tab);
 
         // Stale-while-revalidate: sessions are created/extended outside this panel (TUI, other windows).
-        const cached = this._sessionListCache.get(this.sessionListCacheKey(target));
+        const cached = this._sessionLists.cached(target);
         this.postSessionListPayload(target, cached ?? [], query, !cached);
 
         try {
-            const sessions = await this.fetchSessionList(
+            const sessions = await this._sessionLists.fetch(
                 target,
                 cached
                     ? undefined
@@ -1781,7 +1735,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             }
 
             await this._adoptVoiceTitle(tab);
-            this.invalidateSessionListCache();
+            this._sessionLists.invalidate();
             void this.warmSessionListCache();
             tab.diffManager.clearAll();
             tab.checkpointManager.clearAll();
@@ -1815,17 +1769,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
     }
 
-    private removeSessionFromListCache(sessionPath: string): void {
-        const canon = canonicalizeSessionPath(sessionPath);
-        for (const [key, list] of this._sessionListCache) {
-            this._sessionListCache.set(
-                key,
-                list.filter((s) => canonicalizeSessionPath(s.path) !== canon),
-            );
-        }
-        invalidateSessionInfoPath(sessionPath);
-    }
-
     private async deleteSessionFromPanel(sessionPath: string): Promise<void> {
         const tab = this._activeTab;
         if (!tab || !sessionPath) {
@@ -1855,7 +1798,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             return;
         }
 
-        this.removeSessionFromListCache(sessionPath);
+        this._sessionLists.removeSession(sessionPath);
         const voice = this._voiceSessionFor(sessionPath);
         if (voice) {
             this._voiceHistory?.forgetTask(voice.sessionFile);
@@ -1899,7 +1842,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 this._voiceHistory?.nameTask(voice.sessionFile, trimmed, 'user');
             }
             invalidateSessionInfoPath(sessionPath);
-            this.invalidateSessionListCache();
+            this._sessionLists.invalidate();
             void this.warmSessionListCache();
             this._post({ type: 'toast', message: 'Session renamed', variant: 'info' });
             await this.loadSessionListForPanel(this._sessionPanelQuery);
@@ -2880,7 +2823,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
         this._schedulePrewarmSession(500);
 
-        this.invalidateSessionListCache();
+        this._sessionLists.invalidate();
 
         // If target backend has no tabs, restore its persisted tabs or create a fresh one
         if (this._tabs.size === 0) {
