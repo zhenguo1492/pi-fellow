@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { PiRpcSessionManager } from '../pi/rpcSession';
+import type { PiRpcSessionManager } from '../pi/rpcSession';
 import type { PiChatSession } from '../pi/slashCommands';
 import type {
     AgentBackend,
@@ -46,7 +46,6 @@ import { openPlanDocument, type PlanDocumentProvider } from './plan-document';
 import { enrichPlanModeFromExtensionChrome } from '../pi/planModeState';
 import { mergePlanWithRpivTodos } from '../pi/planDocumentMerge';
 import { extractRpivTodoTasks, rpivTasksToPlanTodos } from '../pi/rpivTodoSync';
-import { ExtensionUiBridge } from '../pi/extensionUiBridge';
 import {
     composePrompt,
     processFilePaths,
@@ -285,7 +284,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     private _tabSubscriptions = new Map<string, (() => void)[]>();
     private _planDocument: PlanDocumentProvider;
-    private readonly _extensionUi = new ExtensionUiBridge();
     private readonly _workspaceState: vscode.Memento;
     private _persistTabsTimer: ReturnType<typeof setTimeout> | undefined;
     private _restoringTabs = false;
@@ -384,7 +382,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._tabs.set(id, tab);
         this._activeTabId = id;
         this._subscribeTab(tab);
-        tab.session.setExtensionUiBridge(this._extensionUi);
         this._schedulePrewarmSession(1500);
     }
 
@@ -491,7 +488,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         const checkpoint = new CheckpointManager();
         const diff = new DiffManager(session, checkpoint);
         const tab = makeTabState(nextTabId(), session, diff, checkpoint);
-        session.setExtensionUiBridge(this._extensionUi);
         this._wireRpcSessionUi(session);
         this._tabs.set(tab.id, tab);
         this._subscribeTab(tab);
@@ -666,7 +662,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         };
 
         webviewView.webview.html = this._getHtml(webviewView.webview);
-        this._extensionUi.setPost((m) => this._post(m));
         this._wireRpcSessionUi(this._activeTab.session);
         for (const tab of this._tabs.values()) {
             if (!this._tabSubscriptions.has(tab.id)) {
@@ -733,9 +728,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     }
 
     private _wireRpcSessionUi(session: PiChatSession): void {
-        if (!(session instanceof PiRpcSessionManager)) {
-            return;
-        }
         const post = (m: ServerMessage) => this._post(m);
         session.rpcExtensionUi.setPost(post);
         session.setPostChatError((message) => post({ type: 'error', message }));
@@ -1443,13 +1435,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         if (!tab) {
             return;
         }
-        if (tab.session instanceof PiRpcSessionManager) {
-            try {
-                await tab.session.syncFromRpc();
-            } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : String(err);
-                this._outputChannel.appendLine(`RPC sync before state push: ${msg}`);
-            }
+        try {
+            await tab.session.syncFromRpc();
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this._outputChannel.appendLine(`RPC sync before state push: ${msg}`);
         }
         this._updateTabName(tab);
         this.sendStateSync();
@@ -1512,7 +1502,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     async loadSessionTree(): Promise<void> {
         const tab = this._activeTab;
-        if (!tab || !(tab.session instanceof PiRpcSessionManager)) {
+        if (!tab) {
             return;
         }
         try {
@@ -1535,7 +1525,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     async forkSessionTree(entryId: string, summarize?: boolean, customInstructions?: string): Promise<void> {
         const tab = this._activeTab;
-        if (!tab || !(tab.session instanceof PiRpcSessionManager)) {
+        if (!tab) {
             return;
         }
         try {
@@ -1571,10 +1561,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 currentSessionPath: tui.sessionFile,
             };
         }
-        const backend = tab.session instanceof PiRpcSessionManager ? tab.session.backend : this._currentBackend;
         return {
             cwd: resolvePiWorkspaceCwd(tab.session.session?.cwd),
-            layout: getAgentLayout(backend),
+            layout: getAgentLayout(tab.session.backend),
             currentSessionPath: tab.session.session?.sessionFile,
         };
     }
@@ -1749,7 +1738,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
         const currentCwd = tab.session.session?.cwd;
         const needsRecreate =
-            (tab.session instanceof PiRpcSessionManager && tab.session.backend !== targetBackend) ||
+            tab.session.backend !== targetBackend ||
             (targetCwd && currentCwd && targetCwd !== currentCwd);
 
         if (needsRecreate) {
@@ -1759,7 +1748,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 this._unsubscribeTab(tab.id);
                 await tab.session.dispose?.();
                 tab.session = newSession;
-                tab.session.setExtensionUiBridge(this._extensionUi);
                 this._wireRpcSessionUi(newSession);
                 this._subscribeTab(tab);
             } catch (err: unknown) {
@@ -1777,7 +1765,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     this._unsubscribeTab(tab.id);
                     await tab.session.dispose?.();
                     tab.session = newSession;
-                    tab.session.setExtensionUiBridge(this._extensionUi);
                     this._wireRpcSessionUi(newSession);
                     this._subscribeTab(tab);
                     resumed = await tab.session.loadSession(sessionPath);
@@ -1956,10 +1943,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         state.pendingAttachments = toPreviewList(tab.pendingAttachments);
 
         const planModeBase = tab.session.getPlanModeInfo();
-        const chrome =
-            tab.session instanceof PiRpcSessionManager
-                ? tab.session.extensionChrome.getSnapshot()
-                : undefined;
+        const chrome = tab.session.extensionChrome.getSnapshot();
         let planMode = enrichPlanModeFromExtensionChrome(planModeBase, chrome);
         if (tab.planModeOverride !== undefined) {
             const override = tab.planModeOverride;
@@ -1989,8 +1973,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         const planBody = mergedPlan.trim();
         // Pop the editor only while pi-plan-mode is drafting. After the plan is implemented the
         // todo Progress section keeps changing the body and would reopen it on every update.
-        const planModeActive =
-            tab.session instanceof PiRpcSessionManager && tab.session.backend === 'pi' && planMode.enabled;
+        const planModeActive = tab.session.backend === 'pi' && planMode.enabled;
         if (planModeActive && planMode.hasPlan && planBody) {
             const hash = hashPlanMarkdown(planBody);
             if (tab.lastPlanEditorHash !== hash) {
@@ -2501,8 +2484,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                 case 'setModel': {
                     await tab.session.setModel(msg.provider, msg.modelId);
                     // Persist as the pi/omp CLI default so new conversations start on this model.
-                    const backend =
-                        tab.session instanceof PiRpcSessionManager ? tab.session.backend : this._currentBackend;
+                    const backend = tab.session.backend;
                     try {
                         await updatePiDefaults({ provider: msg.provider, model: msg.modelId }, undefined, backend);
                     } catch (err: unknown) {
@@ -2716,9 +2698,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'resendUserMessage': {
-                    if (!(tab.session instanceof PiRpcSessionManager)) {
-                        break;
-                    }
                     try {
                         await tab.session.resendUserMessage(
                             msg.messageIndex,
@@ -2742,9 +2721,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     break;
                 }
                 case 'regenerateAssistant': {
-                    if (!(tab.session instanceof PiRpcSessionManager)) {
-                        break;
-                    }
                     try {
                         await tab.session.regenerateAssistant(msg.assistantMessageIndex, msg.mode);
                         if (!this._uiIsStreaming(tab)) {
@@ -2854,21 +2830,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
                     );
                     break;
                 case 'extensionUiResponse':
-                    if (tab.session instanceof PiRpcSessionManager) {
-                        tab.session.rpcExtensionUi.respond({
-                            id: msg.id,
-                            cancelled: msg.cancelled,
-                            value: msg.value,
-                            confirmed: msg.confirmed,
-                        });
-                    } else {
-                        this._extensionUi.handleResponse({
-                            id: msg.id,
-                            cancelled: msg.cancelled,
-                            value: msg.value,
-                            confirmed: msg.confirmed,
-                        });
-                    }
+                    tab.session.rpcExtensionUi.respond({
+                        id: msg.id,
+                        cancelled: msg.cancelled,
+                        value: msg.value,
+                        confirmed: msg.confirmed,
+                    });
                     break;
             }
         } catch (err: any) {
@@ -3052,10 +3019,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             tab.session.session?.cwd ??
             vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
             process.cwd();
-        const backend =
-            overrideBackend ??
-            (tab.session instanceof PiRpcSessionManager ? tab.session.backend : undefined) ??
-            this._currentBackend;
+        const backend = overrideBackend ?? tab.session.backend;
 
         const existing = this._tuiProcesses.get(tabId);
         if (existing && !existing.exited && !overrideSessionFile) {
