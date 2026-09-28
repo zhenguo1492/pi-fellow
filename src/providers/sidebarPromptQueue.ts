@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import { composePrompt } from '../pi/fileAttachments';
 import type { PendingAttachment } from '../pi/pendingAttachments';
 import { isSlashOnlyInput, isVscodeOnlySlash, tryHandleSlashCommand } from '../pi/slashCommandRouter';
@@ -25,7 +24,6 @@ export class SidebarPromptQueue {
         startTurn(tab);
         tab.isStreaming = true;
         if (tab.id === this._host.activeTabId) {
-            vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
             this._host.sendStateSync();
         }
         try {
@@ -146,7 +144,6 @@ export class SidebarPromptQueue {
         startTurn(tab);
         tab.isStreaming = true;
         if (isActive) {
-            vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
             this._host.sendStateSync();
         }
         if (item.fromVoice) {
@@ -164,7 +161,6 @@ export class SidebarPromptQueue {
             this._host.outputChannel.appendLine(`Queued prompt failed: ${msg}`);
             if (isActive) {
                 this._host.post({ type: 'error', message: msg });
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', false);
                 this._host.sendStateSync();
             }
         } finally {
@@ -186,7 +182,6 @@ export class SidebarPromptQueue {
             tab.session.session.isRetrying = false;
         }
         if (tab.id === this._host.activeTabId) {
-            vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', false);
             this._host.sendStateSync();
         }
 
@@ -207,7 +202,6 @@ export class SidebarPromptQueue {
             }
             const isActive = tab.id === this._host.activeTabId;
             if (isActive) {
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', false);
                 this._host.sendStateSync();
             }
             if (!tab.suppressQueueDrain) {
@@ -297,21 +291,11 @@ export class SidebarPromptQueue {
                 if (!this.uiIsStreaming(tab)) {
                     startTurn(tab);
                     tab.isStreaming = true;
-                    if (tab.id === this._host.activeTabId) {
-                        vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-                    }
                     try {
                         await this._dispatchPrompt(tab, trimmed, attachments);
                     } finally {
                         if (!tab.session.session?.isStreaming) {
                             tab.isStreaming = false;
-                            if (tab.id === this._host.activeTabId) {
-                                vscode.commands.executeCommand(
-                                    'setContext',
-                                    'oh-my-pi-chater.isStreaming',
-                                    false,
-                                );
-                            }
                         }
                     }
                     void this._host.pushStateSync();
@@ -348,7 +332,6 @@ export class SidebarPromptQueue {
                     startTurn(tab);
                     tab.isStreaming = true;
                     if (tab.id === this._host.activeTabId) {
-                        vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
                         this._host.sendStateSync();
                     }
                     try {
@@ -356,13 +339,6 @@ export class SidebarPromptQueue {
                     } finally {
                         if (!tab.session.session?.isStreaming) {
                             tab.isStreaming = false;
-                            if (tab.id === this._host.activeTabId) {
-                                vscode.commands.executeCommand(
-                                    'setContext',
-                                    'oh-my-pi-chater.isStreaming',
-                                    false,
-                                );
-                            }
                         }
                     }
                     void this._host.pushStateSync();
@@ -442,9 +418,6 @@ export class SidebarPromptQueue {
                         startTurn(tab);
                     }
                     tab.isStreaming = true;
-                    if (tab.id === this._host.activeTabId) {
-                        vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-                    }
                     await this._host.pushStateSync();
                 } catch (err: unknown) {
                     const m = err instanceof Error ? err.message : String(err);
@@ -459,9 +432,6 @@ export class SidebarPromptQueue {
                         startTurn(tab);
                     }
                     tab.isStreaming = true;
-                    if (tab.id === this._host.activeTabId) {
-                        vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
-                    }
                     await this._host.pushStateSync();
                 } catch (err: unknown) {
                     const m = err instanceof Error ? err.message : String(err);

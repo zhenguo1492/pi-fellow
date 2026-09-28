@@ -199,6 +199,37 @@ function buildPageRow(direction: 'earlier' | 'later', count: number, container: 
     return row;
 }
 
+let widthObserver: ResizeObserver | null = null;
+let watchedTranscript: Element | null = null;
+let transcriptWidth = 0;
+
+/**
+ * Clamps are measured from layout, and a hidden transcript (the Bot view, a hidden webview) measures
+ * as zero, so prompts rendered there get no Show more. Re-measures when the transcript's width changes:
+ * when it is shown again, and when a resize rewraps the text. Height-only changes do not rewrap.
+ */
+function watchTranscriptWidth(container: HTMLElement): void {
+    if (container === watchedTranscript) {
+        return;
+    }
+    widthObserver ??= new ResizeObserver((entries) => {
+        const width = entries[entries.length - 1].contentRect.width;
+        if (width === transcriptWidth) {
+            return;
+        }
+        transcriptWidth = width;
+        if (width > 0) {
+            bindUserPromptClamps();
+            bindPendingMessageClamps();
+        }
+    });
+    if (watchedTranscript) {
+        widthObserver.unobserve(watchedTranscript);
+    }
+    widthObserver.observe(container);
+    watchedTranscript = container;
+}
+
 /**
  * Rebuilds the transcript history from `state.messages`, keeping the viewport, folds, and live nodes.
  * Only a window of turns is built (see `turnWindows`): a long history would otherwise rebuild
@@ -207,6 +238,7 @@ function buildPageRow(direction: 'earlier' | 'later', count: number, container: 
 export function updateMessages(): void {
     const container = document.getElementById('messages');
     if (!container) return;
+    watchTranscriptWidth(container);
 
     // The rebuild below tears down and recreates every history node; a layout
     // mid-rebuild clamps scrollTop to the half-built height. Pin the viewport.
@@ -426,7 +458,7 @@ function buildWelcome(): HTMLElement {
     const provider = model?.provider ? escapeHtml(model.provider) : '<span class="welcome-meta-empty">—</span>';
     w.innerHTML = `
         <div class="welcome-icon">&pi;</div>
-        <div class="welcome-title">Oh My Pi Chater</div>
+        <div class="welcome-title">PI Buddy</div>
         <div class="welcome-subtitle">Ask anything. ${backendLabel} can read, write, and execute code for you.</div>
         <dl class="welcome-meta">
             <dt>Agent</dt><dd><span class="welcome-backend-badge welcome-backend-badge--${state.activeBackend}">${backendLabel}</span></dd>
@@ -435,8 +467,6 @@ function buildWelcome(): HTMLElement {
         </dl>
         <div class="welcome-hints">
             <div class="welcome-hint">Type a message to start</div>
-            <div class="welcome-hint"><kbd>Ctrl+Shift+L</kbd> Focus chat</div>
-            <div class="welcome-hint"><kbd>Ctrl+Shift+N</kbd> New session</div>
             <div class="welcome-hint"><kbd>Enter</kbd> Send · while running, <kbd>Enter</kbd> queue · ↑ interrupt</div>
             ${planHint}
         </div>

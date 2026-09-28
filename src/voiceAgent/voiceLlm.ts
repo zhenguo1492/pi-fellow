@@ -17,7 +17,9 @@ export interface VoiceTurnHandlers {
     onToolCall(call: HostToolCall): void;
     onToolCancel(callId: string): void;
     /** One of the voice agent's own lookup tools started; `description` is omp's intent line or name + target. */
-    onBuiltinTool(description: string, call: { toolName: string; args: Record<string, unknown> }): void;
+    onBuiltinTool(description: string, call: { id: string; toolName: string; args: Record<string, unknown> }): void;
+    /** That lookup finished: its result's text blocks, joined. */
+    onBuiltinToolEnd(id: string, result: { text: string; isError: boolean }): void;
     /** One LLM call of the turn finished; reported even after the turn was cut off, since its tokens were spent. */
     onUsage(usage: VoiceCallUsage): void;
 }
@@ -31,6 +33,14 @@ export interface VoiceLlmOptions {
     model?: string;
     thinking: string;
     tools: RpcHostToolDefinition[];
+    /** Skills the user chose for the voice agent (`voiceAgent.skills`); none loads no skills. */
+    skills: VoiceSkill[];
+}
+
+/** A skill chosen for the voice agent: omp loads it by name, pi by its SKILL.md file (unknown: not loaded). */
+export interface VoiceSkill {
+    name: string;
+    filePath?: string;
 }
 
 /** extension_ui_request methods that block the run until answered. */
@@ -50,6 +60,8 @@ interface RunningTurn {
     promptId: string;
     signal: AbortSignal;
     handlers: VoiceTurnHandlers;
+    /** Tool call ids of the lookups reported through `onBuiltinTool`, until they end. */
+    lookups: Set<string>;
     finish(error?: string): void;
 }
 
@@ -68,6 +80,9 @@ interface OmpFrame {
     method?: unknown;
     intent?: unknown;
     args?: unknown;
+    toolCallId?: unknown;
+    result?: unknown;
+    isError?: unknown;
     message?: { role?: unknown; usage?: OmpUsage };
 }
 
@@ -111,29 +126,7 @@ export class VoiceLlm {
     static async start(options: VoiceLlmOptions, onExit: (error: Error | null) => void): Promise<VoiceLlm> {
         const bridge = new PiRpcBridge();
         const { backend } = resolveCliTarget();
-        const builtins = BUILTIN_TOOLS[backend];
-        const args: string[] = [];
-        if (backend === 'omp') {
-            args.push('--tools', builtins.join(','), '--no-skills', '--no-rules', '--no-extensions', '--no-lsp', '--no-title');
-            // Its tools only read or go through HostToolRouter, which enforces its own rules. A project or
-            // user approvalMode of always-ask would otherwise gate host tools behind a dialog nobody can answer.
-            args.push('--approval-mode', 'yolo');
-        } else {
-            // pi's allowlist also filters extension tools, so it names the host tools too, and keeps the
-            // user's extensions' tools out. The extensions still load: model providers can be pi packages
-            // (e.g. pi-provider-antigravity), and without them `--model` fails with "Model not found".
-            const tools = [...builtins, ...options.tools.map((tool) => tool.name)];
-            // --no-context-files, like omp's --no-rules: AGENTS.md / CLAUDE.md instruct the coding agent
-            // (e.g. a user's "reply with [英文没问题]" rule), not the voice agent, and would be read aloud.
-            args.push('--tools', tools.join(','), '--no-skills', '--no-prompt-templates', '--no-context-files');
-            args.push('--append-system-prompt', PI_TOOL_NOTE);
-        }
-        args.push('--thinking', options.thinking, '--session-dir', options.sessionDir);
-        args.push('--system-prompt', options.systemPrompt);
-        if (options.model) {
-            args.push('--model', options.model);
-        }
-        await bridge.start(options.cwd, args, backend, { hostTools: true });
+        await bridge.start(options.cwd, voiceLlmArgs(backend, options), backend, { hostTools: true });
         try {
             await bridge.setHostTools(options.tools);
             const state = await bridge.getState();
@@ -168,6 +161,7 @@ export class VoiceLlm {
             promptId,
             signal,
             handlers,
+            lookups: new Set(),
             finish: (error) => {
                 signal.removeEventListener('abort', onAbort);
                 this._turn = undefined;
@@ -255,14 +249,23 @@ export class VoiceLlm {
                 // Host tools also report here; they surface through host_tool_call instead.
                 if (turn && !turn.signal.aborted && typeof event.toolName === 'string' && BUILTIN_TOOLS[this._bridge.backend].includes(event.toolName)) {
                     const args = (event.args ?? {}) as Record<string, unknown>;
+                    const id = String(event.toolCallId ?? '');
+                    turn.lookups.add(id);
                     turn.handlers.onBuiltinTool(
                         typeof event.intent === 'string'
                             ? event.intent
                             : `${event.toolName} ${String(args.path ?? args.pattern ?? args.query ?? '')}`.trim(),
-                        { toolName: event.toolName, args },
+                        { id, toolName: event.toolName, args },
                     );
                 }
                 return;
+            case 'tool_execution_end': {
+                const id = String(event.toolCallId ?? '');
+                if (turn?.lookups.delete(id)) {
+                    turn.handlers.onBuiltinToolEnd(id, { text: resultText(event.result), isError: event.isError === true });
+                }
+                return;
+            }
             case 'host_tool_call':
                 if (turn) {
                     turn.handlers.onToolCall({
@@ -312,4 +315,59 @@ export class VoiceLlm {
                 return;
         }
     }
+}
+
+/** The text blocks of a `tool_execution_end` result (`{ content, details }`), joined; images are left out. */
+function resultText(result: unknown): string {
+    const content = typeof result === 'object' && result !== null && 'content' in result ? result.content : undefined;
+    if (typeof content === 'string') {
+        return content;
+    }
+    if (!Array.isArray(content)) {
+        return '';
+    }
+    return content
+        .flatMap((block: unknown) =>
+            typeof block === 'object' && block !== null && 'type' in block && block.type === 'text' && 'text' in block && typeof block.text === 'string'
+                ? [block.text]
+                : [],
+        )
+        .join('\n');
+}
+
+/** The voice agent process's command line after `--mode rpc`. */
+export function voiceLlmArgs(backend: AgentBackend, options: Omit<VoiceLlmOptions, 'cwd'>): string[] {
+    const builtins = BUILTIN_TOOLS[backend];
+    const args: string[] = [];
+    if (backend === 'omp') {
+        // Rules (AGENTS.md / CLAUDE.md) stay on: they tell the agent where things live. The prompt says
+        // their reply-format instructions are for the coding agent, not for speech.
+        args.push('--tools', builtins.join(','), '--no-extensions', '--no-lsp', '--no-title');
+        // Only the chosen skills: omp's --skills filters discovery by name (glob patterns, comma-separated).
+        args.push(...(options.skills.length > 0 ? [`--skills=${options.skills.map((skill) => skill.name).join(',')}`] : ['--no-skills']));
+        // Its tools only read or go through HostToolRouter, which enforces its own rules. A project or
+        // user approvalMode of always-ask would otherwise gate host tools behind a dialog nobody can answer.
+        args.push('--approval-mode', 'yolo');
+    } else {
+        // pi's allowlist also filters extension tools, so it names the host tools too, and keeps the
+        // user's extensions' tools out. The extensions still load: model providers can be pi packages
+        // (e.g. pi-provider-antigravity), and without them `--model` fails with "Model not found".
+        const tools = [...builtins, ...options.tools.map((tool) => tool.name)];
+        // Context files (AGENTS.md / CLAUDE.md) stay on for project knowledge; the prompt says their
+        // reply-format instructions are not for speech.
+        args.push('--tools', tools.join(','), '--no-skills', '--no-prompt-templates');
+        // pi has no name filter, but still loads the files given with --skill under --no-skills.
+        for (const skill of options.skills) {
+            if (skill.filePath) {
+                args.push('--skill', skill.filePath);
+            }
+        }
+        args.push('--append-system-prompt', PI_TOOL_NOTE);
+    }
+    args.push('--thinking', options.thinking, '--session-dir', options.sessionDir);
+    args.push('--system-prompt', options.systemPrompt);
+    if (options.model) {
+        args.push('--model', options.model);
+    }
+    return args;
 }

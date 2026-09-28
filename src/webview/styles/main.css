@@ -1551,116 +1551,6 @@ button.tab-icon:focus-visible {
     opacity: 0.75;
 }
 
-/* ── Session token stats (above input) ── */
-.token-stats-bar {
-    flex-shrink: 0;
-    margin: 0 8px 6px;
-    padding: 8px 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--card-bg);
-}
-
-.token-stats-inner {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
-.token-stats-divider {
-    width: 1px;
-    height: 22px;
-    background: var(--border);
-    flex-shrink: 0;
-}
-
-.token-stats-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-}
-
-.token-stats-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--muted);
-    flex-shrink: 0;
-}
-
-.token-stats-meter {
-    width: 72px;
-    height: 6px;
-    border-radius: 3px;
-    background: rgba(255, 255, 255, 0.08);
-    overflow: hidden;
-    flex-shrink: 0;
-}
-
-.token-stats-meter-fill {
-    height: 100%;
-    border-radius: 3px;
-    background: linear-gradient(90deg, #3b82f6, #6366f1);
-    transition: width 0.25s ease;
-}
-
-.token-stats-meter.warn .token-stats-meter-fill {
-    background: linear-gradient(90deg, #f59e0b, #ef4444);
-}
-
-.token-stats-values {
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    color: var(--fg);
-    white-space: nowrap;
-}
-
-.token-stats-pct {
-    font-size: 10px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    color: var(--muted);
-    min-width: 2.5em;
-    text-align: right;
-}
-
-.token-stats-io {
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.token-stats-io-item {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-}
-
-.token-io-label {
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--muted);
-}
-
-.token-io-value {
-    color: var(--fg);
-    font-weight: 600;
-}
-
-.token-stats-cache,
-.token-stats-cost {
-    font-size: 10px;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-
 /* ── Input container ── */
 .input-container {
     margin: 8px;
@@ -2670,11 +2560,9 @@ button.tab-icon:focus-visible {
     stroke: var(--link);
 }
 
-/* Unusable until its speech services pass their check (mic: STT; robot: STT and TTS): red; the tooltip says why. */
+/* Dictation unusable until STT passes its check: red; the tooltip says why. */
 .mic-btn.is-unavailable,
-.mic-btn.is-unavailable:hover,
-.voice-bar-robot.is-unavailable,
-.voice-bar-robot.is-unavailable:hover {
+.mic-btn.is-unavailable:hover {
     background: color-mix(in srgb, var(--error-fg) 22%, transparent);
     border-color: color-mix(in srgb, var(--error-fg) 60%, transparent);
     color: var(--error-fg);
@@ -2766,7 +2654,20 @@ button.tab-icon:focus-visible {
     height: 15px;
 }
 
-.voice-bar:not(.on):not([data-state='starting']) .voice-bar-toggle:hover .voice-bar-robot:not(.is-unavailable) {
+/* A chosen avatar in place of the robot: 16px keeps a pixel-art preset at whole device pixels. */
+.voice-bar-robot .av-img {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+}
+
+.voice-bar-robot .av-text {
+    font-size: 13px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.voice-bar:not(.on):not([data-state='starting']) .voice-bar-toggle:hover .voice-bar-robot {
     background: color-mix(in srgb, var(--fg) 8%, transparent);
     color: var(--fg);
 }
@@ -2813,8 +2714,11 @@ button.tab-icon:focus-visible {
     white-space: nowrap;
 }
 
-/* Muted mic while the agent is on: a grey tag; the robot keeps the agent's colour. */
-.voice-bar-muted {
+/*
+ * Grey tags next to the phase: the muted mic, and a speech service the agent works without
+ * ("Can't hear", "No voice"; buttons that open Settings → Voice). The robot keeps the agent's colour.
+ */
+.voice-bar-tag {
     padding: 0 6px;
     border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
     border-radius: 8px;
@@ -2824,7 +2728,18 @@ button.tab-icon:focus-visible {
     white-space: nowrap;
 }
 
-.voice-bar-muted[hidden] {
+button.voice-bar-tag {
+    background: transparent;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+button.voice-bar-tag:hover {
+    color: var(--fg);
+    border-color: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+
+.voice-bar-tag[hidden] {
     display: none;
 }
 
@@ -3431,7 +3346,7 @@ button.tab-icon:focus-visible {
     color: var(--fg);
 }
 
-/* omp /login|/logout hand-off to TUI mode */
+/* /login|/logout hand-off to TUI mode */
 .tui-auth-banner {
     display: flex;
     align-items: center;
@@ -4802,6 +4717,86 @@ html.tree-panel-open .input-container {
 .ms-meter i { display: block; height: 100%; border-radius: 3px; background: var(--link); }
 .ms-meter.ms-warn i { background: var(--warning-fg); }
 .ms-meter.ms-err i { background: var(--error-fg); }
+/* Context row → the TUI's Context Usage grid (one cell ≈ 0.5% of the window) and its legend. */
+.ms-ctx-toggle { cursor: pointer; }
+button.ms-ctx-toggle { padding: 0; border: 0; background: none; font: inherit; text-align: left; }
+button.ms-ctx-toggle:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1px; }
+.ms-ctx-toggle:hover, .ms-ctx-toggle:hover ~ .ms-ctx-toggle { color: var(--fg); }
+.ms-ctx-car { display: inline-block; margin-right: 4px; font-size: .7em; opacity: .7; transition: transform .15s; }
+.ms-ctx-toggle[aria-expanded="true"] .ms-ctx-car { transform: rotate(90deg); }
+.ms-ctx {
+    grid-column: 1 / -1;
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 18px;
+    margin: 3px 0 5px 12px;
+}
+.ms-ctx-msg { color: var(--muted); }
+.ms-ctx-grid { display: grid; grid-template-columns: repeat(20, 7px); gap: 3px; padding-top: 3px; }
+.ms-cell { display: inline-block; width: 7px; height: 7px; border-radius: 1.5px; box-sizing: border-box; flex-shrink: 0; }
+.ms-c-systemPrompt { background: var(--vscode-charts-blue, #3794ff); }
+.ms-c-systemTools { background: var(--vscode-charts-orange, #d18616); }
+.ms-c-systemContext { background: var(--vscode-charts-yellow, #cca700); }
+.ms-c-skills { background: var(--vscode-charts-green, #89d185); }
+.ms-c-messages { background: color-mix(in srgb, var(--fg) 60%, transparent); }
+.ms-c-other { background: var(--vscode-charts-purple, #b180d7); }
+.ms-c-free { border: 1px dashed color-mix(in srgb, var(--muted) 60%, transparent); }
+.ms-c-buffer {
+    border: 1px solid var(--warning-fg);
+    background: repeating-linear-gradient(45deg, var(--warning-fg) 0 1px, transparent 1px 3px);
+}
+.ms-ctx-legend { min-width: 0; font-family: var(--font-mono); font-size: calc(var(--ms-small) - .5px); line-height: 1.55; }
+.ms-ctx-title { color: var(--muted); font-family: var(--vscode-font-family, sans-serif); font-weight: 600; }
+.ms-ctx-li { white-space: nowrap; }
+.ms-ctx-li .ms-cell { margin-right: 6px; vertical-align: 0; }
+.ms-ctx-li b { font-weight: 600; }
+.ms-ctx-dim { color: var(--muted); }
+.ms-ctx-note { color: var(--muted); white-space: pre-wrap; }
 @media (prefers-reduced-motion: reduce) {
     .ms-dot { animation: none !important; }
+}
+
+/* ── Alt over sentences (sentencePick.ts), in the Bot view and the chat ── */
+body[data-sentence-pick],
+body[data-sentence-pick] * { cursor: pointer !important; }
+/* Under the pointer with Alt held; the one whose translation is open. */
+::highlight(vp-sentence-hover) { background-color: color-mix(in srgb, var(--link) 28%, transparent); }
+::highlight(vp-sentence-pinned) { background-color: color-mix(in srgb, var(--link) 18%, transparent); }
+/* Read aloud (Alt+click): while its speech is prepared, then while it is heard. */
+::highlight(vp-sentence-loading) { background-color: color-mix(in srgb, var(--voice-accent) 16%, transparent); }
+::highlight(vp-sentence-playing) { background-color: color-mix(in srgb, var(--voice-accent) 34%, transparent); color: var(--fg); }
+
+/* The sentence's translation (translatePopup.ts), floating by it with an arrow at its end. */
+.sentence-tp {
+    position: fixed; z-index: 1000;
+    display: flex; flex-direction: column;
+    width: 360px;
+    border: 1px solid var(--vscode-editorWidget-border, var(--border)); border-radius: 6px;
+    background: var(--card-bg); color: var(--vscode-editorWidget-foreground, var(--fg));
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+    font-size: var(--vscode-font-size, 13px); line-height: 1.55;
+    animation: sentence-tp-in .12s ease-out;
+}
+.sentence-tp[hidden] { display: none; }
+.sentence-tp-head {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    padding: 2px 3px 2px 10px;
+    font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    user-select: none;
+}
+.sentence-tp-close { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.sentence-tp-close:hover { color: var(--fg); background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, .31)); }
+.sentence-tp-close:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+.sentence-tp-body { min-height: 0; overflow: auto; padding: 6px 10px 8px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.sentence-tp-body[data-state="loading"] { color: var(--muted); }
+.sentence-tp-body[data-state="error"] { color: var(--error-fg); }
+.sentence-tp-arrow {
+    position: absolute; top: -6px; width: 10px; height: 10px; margin-left: -5px;
+    background: var(--card-bg);
+    border-left: 1px solid var(--vscode-editorWidget-border, var(--border)); border-top: 1px solid var(--vscode-editorWidget-border, var(--border));
+    transform: rotate(45deg);
+}
+.sentence-tp.up .sentence-tp-arrow { top: auto; bottom: -6px; border: 0; border-right: 1px solid var(--vscode-editorWidget-border, var(--border)); border-bottom: 1px solid var(--vscode-editorWidget-border, var(--border)); }
+@keyframes sentence-tp-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+    .sentence-tp { animation: none; }
 }

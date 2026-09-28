@@ -132,6 +132,11 @@ function setup(confirm = true) {
             commands.push(command);
             return 'Exit code 0.';
         },
+        sendToTerminal: async (input) => {
+            commands.push(`type ${JSON.stringify(input)}`);
+            return 'Typed a line.';
+        },
+        readTerminal: async (terminal) => `read ${terminal ?? 'latest'}`,
         readOutput: async (source) => `output of ${source ?? 'all'}`,
         startDebugging: async (configuration) => {
             commands.push(`debug ${configuration}`);
@@ -406,6 +411,8 @@ describe('HostToolRouter: omp and pair modes', () => {
         expect((await router.execute('create_file', { path: 'b.ts', content: 'x' }, turn(1))).isError).toBe(true);
         expect((await router.execute('delete_file', { path: 'a.ts' }, turn(1))).isError).toBe(true);
         expect((await router.execute('run_in_terminal', { command: 'ls' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('terminal_send', { text: 'select 1;' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('terminal_read', {}, turn(1))).isError).toBe(true);
         expect((await router.execute('debug_start', {}, turn(1))).isError).toBe(true);
         expect((await router.execute('set_breakpoint', { path: 'a.ts', line: 3 }, turn(1))).isError).toBe(true);
         expect((await router.execute('read_output', { source: 'Tasks' }, turn(1))).isError).toBe(false);
@@ -440,6 +447,33 @@ describe('HostToolRouter: omp and pair modes', () => {
         expect((await router.execute('run_in_terminal', { command: 'ls' }, proactive)).isError).toBe(true);
         expect((await router.execute('set_mode', { mode: 'omp' }, proactive)).isError).toBe(true);
         expect([edits, commands, router.mode]).toEqual([[], [], 'pair']);
+    });
+});
+
+describe('HostToolRouter: terminal_send / terminal_read', () => {
+    it('types into the program left running, pressing Enter and waiting 2s unless told otherwise', async () => {
+        const { router, turn, commands } = setup();
+        router.setMode('pair');
+        expect(await router.execute('terminal_send', { text: 'select 1;' }, turn(1))).toEqual({ text: 'Typed a line.', isError: false });
+        await router.execute('terminal_send', { terminal: 'Pi (2)', text: 'q', enter: false, waitSecs: 300 }, turn(1));
+        // Just Enter: accepting a prompt's default.
+        await router.execute('terminal_send', { text: '' }, turn(1));
+        expect(commands).toEqual([
+            `type ${JSON.stringify({ text: 'select 1;', enter: true, waitMs: 2000 })}`,
+            `type ${JSON.stringify({ terminal: 'Pi (2)', text: 'q', enter: false, waitMs: 30_000 })}`,
+            `type ${JSON.stringify({ text: '', enter: true, waitMs: 2000 })}`,
+        ]);
+        expect((await router.execute('terminal_read', { terminal: 'Pi (2)' }, turn(1))).text).toBe('read Pi (2)');
+        expect((await router.execute('terminal_read', {}, turn(1))).text).toBe('read latest');
+    });
+
+    it('sends nothing without text, or with nothing to type and no Enter', async () => {
+        const { router, turn, commands } = setup();
+        router.setMode('pair');
+        expect(await router.execute('terminal_send', {}, turn(1))).toEqual({ text: 'Missing text.', isError: true });
+        expect((await router.execute('terminal_send', { text: 42 }, turn(1))).isError).toBe(true);
+        expect(await router.execute('terminal_send', { text: '', enter: false }, turn(1))).toEqual({ text: expect.stringMatching(/Nothing to send/), isError: true });
+        expect(commands).toEqual([]);
     });
 });
 
@@ -655,5 +689,25 @@ describe('HostToolRouter: permission levels', () => {
             ['delete_file', 'a.ts', 'rejected'],
         ]);
         expect([edits, commands]).toEqual([['a.ts', 'create b.ts'], []]);
+    });
+
+    it('typing counts as running a command, reading does not', async () => {
+        const { worker, router, turn, commands } = setup();
+        router.setMode('pair');
+        worker.level = 'edit';
+        worker.approve = async () => false;
+        const rejected = settled(router);
+        expect((await router.execute('terminal_send', { text: 'drop table users;' }, turn(1))).text).toMatch(/Waiting for the user's approval/);
+        await rejected;
+        expect(router.takeSettledApprovals('tab-1')).toMatchObject([{ toolName: 'terminal_send', summary: 'drop table users;', outcome: 'rejected' }]);
+        expect((await router.execute('terminal_read', {}, turn(1))).text).toBe('read latest');
+
+        worker.level = 'plan';
+        expect(await router.execute('terminal_send', { text: 'select 1;' }, turn(2))).toEqual({ text: expect.stringMatching(/read-only Plan mode/), isError: true });
+        expect((await router.execute('terminal_read', {}, turn(2))).isError).toBe(false);
+        const proactive = { tabId: 'tab-1', seq: 2, userAt: 2000, proactive: true };
+        worker.level = 'auto';
+        expect((await router.execute('terminal_send', { text: 'select 1;' }, proactive)).isError).toBe(true);
+        expect(commands).toEqual([]);
     });
 });

@@ -1,7 +1,7 @@
 import type { ServerMessage } from '../../shared/protocol';
 import { applyDictationStatus, applyVoiceMicStatus, insertDictatedText } from '../dictation';
 import { dismissExtensionUi, showExtensionUiRequest } from '../extensionUi';
-import { applyModelStatus } from '../modelStatus';
+import { applyContextBreakdown, applyModelStatus } from '../modelStatus';
 import { setPickerCurrentModel, setPickerModels } from '../modelPicker';
 import { applySessionList, setSessionPanelOpen } from '../sessionPanel';
 import { applyTreePayload, setTreePanelOpen } from '../treePanel';
@@ -36,6 +36,9 @@ export function handleMessage(msg: ServerMessage): void {
             break;
         case 'modelStatus':
             applyModelStatus(msg.status);
+            break;
+        case 'contextBreakdown':
+            applyContextBreakdown(msg.breakdown, msg.error);
             break;
         case 'editorContext':
             setEditorContext(msg.context, msg.enabled);

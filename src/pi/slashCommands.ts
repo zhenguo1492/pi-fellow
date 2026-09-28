@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { TuiAuthCommand } from '../shared/protocol';
 import type { PiRpcSessionManager } from './rpcSession';
 
 export type PiChatSession = PiRpcSessionManager;
@@ -65,15 +66,21 @@ export async function tryHandleBuiltinSlashCommand(
     }
 }
 
-/** Configure provider auth (chat /login and settings button). */
-export async function runPiLoginFlow(manager?: PiChatSession): Promise<void> {
-    const { runPiAuthLogin } = await import('./piAuthFlow');
-    await runPiAuthLogin(manager);
+/*
+ * /login and /logout: neither CLI serves them over RPC, and pi's Node SDK auth API changes between
+ * releases (0.81 dropped the one earlier VS Code pickers drove). Each CLI's own TUI has the full
+ * picker (subscriptions and API keys, configured ones marked), so both hand off to the chat's TUI
+ * mode. It runs in the sidebar's active tab, i.e. the backend the window shows.
+ */
+
+/** Configure provider auth (chat /login, settings button, palette command). */
+export async function runPiLoginFlow(): Promise<void> {
+    await vscode.commands.executeCommand('oh-my-pi-chater.promptTuiAuth', 'login' satisfies TuiAuthCommand);
 }
 
-export async function runPiLogoutFlow(manager?: PiChatSession): Promise<void> {
-    const { runPiAuthLogout } = await import('./piAuthFlow');
-    await runPiAuthLogout(manager);
+/** Remove stored credentials (chat /logout, settings button, palette command). */
+export async function runPiLogoutFlow(): Promise<void> {
+    await vscode.commands.executeCommand('oh-my-pi-chater.promptTuiAuth', 'logout' satisfies TuiAuthCommand);
 }
 
 async function runResumeFlow(_manager: PiChatSession): Promise<void> {

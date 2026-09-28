@@ -1,5 +1,5 @@
 import type { TabInfo } from '../../shared/protocol';
-import { ICON_ROBOT } from '../voiceBar';
+import { ICON_ROBOT } from '../avatar';
 import { vscode } from '../vscodeApi';
 import { el } from './helpers';
 import { iconsBaseUri } from './icons';

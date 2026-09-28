@@ -46,6 +46,7 @@ vi.mock('../../../voice/dictation', () => ({
         get isRecording() {
             return this.recording;
         }
+        setPaused() {}
         start() {
             this.recording = true;
             this._events.status({ recording: true, speaking: false, pending: 0 });
@@ -59,10 +60,11 @@ vi.mock('../../../voice/dictation', () => ({
     },
 }));
 
-const settings: VoiceSettings = { sttUrl: 'http://127.0.0.1:8010/v1', sttModel: '', language: '', vadConfidence: 0.5, vadStopSecs: 0.8 };
+const settings: VoiceSettings = { sttEngine: 'custom', sttUrl: 'http://127.0.0.1:8010/v1', sttModel: '', language: '', vadConfidence: 0.5, vadStopSecs: 0.8 };
 
 vi.mock('../../../voice/voiceSettings', () => ({
-    readVoiceSettings: () => ({ sttUrl: 'http://127.0.0.1:8010/v1', sttModel: '', language: '', vadConfidence: 0.5, vadStopSecs: 0.8 }),
+    readVoiceSettings: () => ({ sttEngine: 'custom', sttUrl: 'http://127.0.0.1:8010/v1', sttModel: '', language: '', vadConfidence: 0.5, vadStopSecs: 0.8 }),
+    resolveSttConfig: async (s: VoiceSettings) => ({ url: s.sttUrl, model: s.sttModel, language: s.language }),
     sttCheck: () => ({ ok: true }),
 }));
 

@@ -62,7 +62,7 @@ describe('applyAgentEvent', () => {
         vi.setSystemTime(1000);
         const tab = fakeTab({ messages: [{ role: 'user', timestamp: 0 }, { role: 'assistant', timestamp: 1 }] });
 
-        expect(applyAgentEvent(tab, { type: 'agent_start' }, true)).toBe(true);
+        applyAgentEvent(tab, { type: 'agent_start' }, true);
         applyAgentEvent(tab, update('thinking_start'), true);
         applyAgentEvent(tab, update('thinking_delta', 'plan'), true);
         vi.setSystemTime(3000);
@@ -73,7 +73,7 @@ describe('applyAgentEvent', () => {
         // The message list may already hold the ended message: it must not count itself.
         const ended = { role: 'assistant', timestamp: 5 };
         tab.session.getMessages().push(ended);
-        expect(applyAgentEvent(tab, { type: 'message_end', message: ended }, true)).toBeUndefined();
+        applyAgentEvent(tab, { type: 'message_end', message: ended }, true);
 
         expect([...tab.messageMeta]).toEqual([[1, { thinkingDurationSec: 2, messageEndTime: 3000 }]]);
         expect(tab).toMatchObject({ streamingText: '', streamingThinking: '', isThinking: false });
@@ -91,13 +91,12 @@ describe('applyAgentEvent', () => {
         const tab = fakeTab();
         applyAgentEvent(tab, { type: 'agent_start' }, false);
 
-        const streaming = applyAgentEvent(
+        applyAgentEvent(
             tab,
             { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'error', errorMessage: ' 529 overloaded ' }, { role: 'toolResult' }] },
             false,
         );
 
-        expect(streaming).toBe(false);
         expect(tab).toMatchObject({ isStreaming: false, hasNotification: true, agentStartTime: 0 });
         expect(tab.connectionStatus).toEqual({ phase: 'failed', message: '529 overloaded' });
         expect(tab.diffManager.pruneSettledChanges).toHaveBeenCalledOnce();
@@ -107,18 +106,17 @@ describe('applyAgentEvent', () => {
         const tab = fakeTab();
         applyAgentEvent(tab, { type: 'agent_start' }, true);
 
-        const streaming = applyAgentEvent(
+        applyAgentEvent(
             tab,
             { type: 'agent_end', willRetry: true, messages: [{ role: 'assistant', errorMessage: 'socket hang up' }] },
             true,
         );
 
-        expect(streaming).toBeUndefined();
         expect(tab.isStreaming).toBe(true);
         expect(tab.hasNotification).toBe(false);
         expect(tab.connectionStatus).toEqual({ phase: 'retrying', message: 'socket hang up', attempt: 2, maxAttempts: undefined });
 
-        expect(applyAgentEvent(tab, { type: 'agent_end', messages: [] }, true)).toBe(false);
+        applyAgentEvent(tab, { type: 'agent_end', messages: [] }, true);
         expect(tab).toMatchObject({ isStreaming: false, hasNotification: false });
         expect(tab.connectionStatus).toEqual({ phase: 'idle' });
     });

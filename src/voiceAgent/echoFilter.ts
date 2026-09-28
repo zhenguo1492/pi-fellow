@@ -94,6 +94,12 @@ export function classifyBargeIn(transcript: string, botText: string): BargeInVer
     if (heard.length < MIN_TOKENS) {
         return { kind: 'reject', reason: heard.length ? '太短' : '空' };
     }
+    const ratio = echoRatio(heard, said);
+    return ratio >= ECHO_BIGRAM_RATIO ? { kind: 'reject', reason: `像回声（重合 ${Math.round(ratio * 100)}%）` } : { kind: 'user' };
+}
+
+/** Share of `heard`'s token pairs (at least two tokens) that `said` also has. */
+function echoRatio(heard: string[], said: string[]): number {
     const saidPairs = new Set<string>();
     for (let i = 0; i + 1 < said.length; i++) {
         saidPairs.add(`${said[i]} ${said[i + 1]}`);
@@ -104,8 +110,20 @@ export function classifyBargeIn(transcript: string, botText: string): BargeInVer
             echoed++;
         }
     }
-    const ratio = echoed / (heard.length - 1);
-    return ratio >= ECHO_BIGRAM_RATIO ? { kind: 'reject', reason: `像回声（重合 ${Math.round(ratio * 100)}%）` } : { kind: 'user' };
+    return echoed / (heard.length - 1);
+}
+
+/**
+ * Is `transcript` the microphone hearing `text` played back (a replayed message)? Unlike a barge-in
+ * check, a short transcript is not rejected for being short: one word counts as echo only if `text` has it.
+ */
+export function isEchoOf(transcript: string, text: string): boolean {
+    const heard = tokenize(transcript);
+    const said = tokenize(text);
+    if (heard.length === 0) {
+        return false;
+    }
+    return heard.length === 1 ? said.includes(heard[0]) : echoRatio(heard, said) >= ECHO_BIGRAM_RATIO;
 }
 
 export function isHallucination(transcript: string): boolean {

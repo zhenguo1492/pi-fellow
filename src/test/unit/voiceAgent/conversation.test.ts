@@ -153,6 +153,69 @@ describe('conversation: replies', () => {
     });
 });
 
+describe('conversation: without text-to-speech', () => {
+    const typed = run([{ type: 'typed', text: 'What failed?', at }], initialState(true, false));
+
+    it('shows the reply as text: nothing goes to TTS, thinking until it is generated, then back to listening', () => {
+        expect(typed.effects).toEqual([{ type: 'prompt', turnId: 1, text: 'What failed?', source: 'text' }]);
+        const phases: string[] = [];
+        let state = typed.state;
+        const effects: Effect[] = [];
+        for (const ev of [
+            { type: 'llmText', turnId: 1, delta: 'The average test, ', at: 1 },
+            { type: 'llmText', turnId: 1, delta: 'on an empty list. It returns NaN.', at: 2 },
+            { type: 'llmEnd', turnId: 1, at: 3 },
+        ] satisfies ConvEvent[]) {
+            const step = reduce(state, ev);
+            state = step.state;
+            effects.push(...step.effects);
+            phases.push(phaseOf(state));
+        }
+        expect(effects).toEqual([]);
+        expect(phases).toEqual(['thinking', 'thinking', 'listening']);
+        expect(floorFree(state)).toBe(true);
+        expect(state.lastMetrics).toMatchObject({ firstTextAt: 1, llmDoneAt: 3 });
+        expect(echoSource(state)).toBe('The average test, on an empty list. It returns NaN.');
+    });
+
+    it('tells the next prompt the user read, not heard, the reply they cut off', () => {
+        const writing = run([{ type: 'llmText', turnId: 1, delta: 'Half a reply.', at }], typed.state);
+        const { effects } = run([{ type: 'typed', text: 'Stop.', at }], writing.state);
+        expect(effects).toMatchObject([
+            { type: 'cancelTurn', turnId: 1 },
+            {
+                type: 'prompt',
+                turnId: 2,
+                interrupted: 'The user sent a new message while you were still writing your previous reply; they saw only the part written so far.',
+            },
+        ]);
+    });
+
+    it('speaks from the next reply once TTS becomes available, not from the middle of the one being shown', () => {
+        const writing = run([{ type: 'llmText', turnId: 1, delta: 'Half a reply. ', at }], typed.state);
+        const gained = run(
+            [
+                { type: 'voiced', voiced: true, at },
+                { type: 'llmText', turnId: 1, delta: 'The rest of it. ', at },
+                { type: 'llmEnd', turnId: 1, at },
+            ],
+            writing.state,
+        );
+        expect(gained.effects).toEqual([]);
+        expect(gained.state.voiced).toBe(true);
+        const next = run(
+            [
+                { type: 'typed', text: 'And now?', at },
+                { type: 'llmText', turnId: 2, delta: 'Spoken. ', at },
+            ],
+            gained.state,
+        );
+        expect(next.effects).toContainEqual({ type: 'speak', turnId: 2, text: 'Spoken.' });
+        // Idle, it applies at once.
+        expect(run([{ type: 'voiced', voiced: true, at }], initialState(true, false)).state.voiced).toBe(true);
+    });
+});
+
 describe('conversation: proactive turns', () => {
     it('get the floor only when nobody is talking and nothing is waiting', () => {
         const busy: ConvEvent[][] = [

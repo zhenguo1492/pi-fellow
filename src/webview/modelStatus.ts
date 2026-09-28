@@ -2,11 +2,12 @@
  * The model status line over the active tab's conversation, laid out like the Bot view's header:
  * one summary line (model · context · plan limits); clicking it floats the details (context and
  * session tokens, every usage window with its reset) over the transcript. Renders the host's
- * `ModelStatusInfo` (src/providers/model-status.ts).
+ * `ModelStatusInfo` (src/providers/model-status.ts). On omp the Context row expands into the
+ * TUI's Context Usage grid, fetched from omp's `/context` while it is shown.
  */
 import { escapeHtml } from '../shared/html';
-import type { ClientMessage, ModelStatusInfo } from '../shared/protocol';
-import { formatTokenCount } from './tokenStatsBar';
+import type { ClientMessage, ContextBreakdownCategory, ContextBreakdownInfo, ModelStatusInfo } from '../shared/protocol';
+import { formatTokenCount } from './tokenCount';
 import { vscode } from './vscodeApi';
 
 /** Arrows swapping places: opens the model QuickPick. */
@@ -20,9 +21,9 @@ function tone(usedPercent: number): string {
     return usedPercent >= 100 ? ' ms-err' : usedPercent >= 90 ? ' ms-warn' : '';
 }
 
-function meter(percent: number): string {
+function meter(percent: number, cls = tone(percent)): string {
     const pct = Math.max(0, Math.min(100, percent));
-    return `<span class="ms-meter${tone(pct)}"><i style="width:${pct}%"></i></span>`;
+    return `<span class="ms-meter${cls}"><i style="width:${pct}%"></i></span>`;
 }
 
 function row(key: string, value: string): string {
@@ -45,15 +46,30 @@ const detailEl = root.querySelector<HTMLElement>('.ms-detail')!;
 function setOpen(open: boolean): void {
     root.classList.toggle('open', open);
     sumBtn.setAttribute('aria-expanded', String(open));
+    if (open) {
+        requestBreakdownIfStale();
+    }
 }
 sumBtn.addEventListener('click', () => setOpen(!root.classList.contains('open')));
 root.querySelector('.ms-switch')!.addEventListener('click', () => {
     setOpen(false);
     vscode.postMessage({ type: 'selectModel' } satisfies ClientMessage);
 });
+detailEl.addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).closest('[data-ctx-toggle]')) {
+        return;
+    }
+    ctxExpanded = !ctxExpanded;
+    if (lastStatus) {
+        renderHeader(lastStatus);
+    }
+    requestBreakdownIfStale();
+});
 root.addEventListener('mouseleave', () => setOpen(false));
 document.addEventListener('click', (e) => {
-    if (!root.contains(e.target as Node)) {
+    // The dispatch-time path: a click that re-renders the details (the Context toggle) detaches its
+    // target, which `root.contains` would then count as outside.
+    if (!e.composedPath().includes(root)) {
         setOpen(false);
     }
 });
@@ -79,6 +95,97 @@ let lastStatus: ModelStatusInfo | undefined;
 let currentWorking = false;
 let currentWorkingLabel: string | undefined;
 
+/** The Context row shows its breakdown; kept while the details close and reopen. */
+let ctxExpanded = false;
+let breakdown: ContextBreakdownInfo | undefined;
+let breakdownError: string | undefined;
+/** Context use the shown (or requested) breakdown was fetched for; a new value refetches it. */
+let breakdownFor: string | undefined;
+let breakdownInFlight = false;
+
+/** Fetches the breakdown while it is on screen and the context moved since the last fetch; one at a time. */
+function requestBreakdownIfStale(): void {
+    const s = lastStatus;
+    if (!s?.contextBreakdown || !ctxExpanded || !root.classList.contains('open') || breakdownInFlight) {
+        return;
+    }
+    const key = `${s.model}\0${s.context?.tokens}\0${s.context?.contextWindow}`;
+    if (key === breakdownFor) {
+        return;
+    }
+    breakdownFor = key;
+    breakdownInFlight = true;
+    vscode.postMessage({ type: 'getContextBreakdown' } satisfies ClientMessage);
+}
+
+export function applyContextBreakdown(b: ContextBreakdownInfo | undefined, error: string | undefined): void {
+    breakdownInFlight = false;
+    breakdown = b;
+    breakdownError = b ? undefined : (error ?? 'No context report');
+    if (lastStatus) {
+        renderHeader(lastStatus);
+    }
+    // The context may have moved while this one was in flight.
+    requestBreakdownIfStale();
+}
+
+const GRID_CELLS = 200;
+
+type CellKind = ContextBreakdownCategory['id'] | 'free' | 'buffer';
+
+/**
+ * omp's TUI Context Usage grid: every non-empty slice gets at least one cell; when they and the
+ * auto-compact buffer overflow the grid the largest slices give cells back; free space fills the
+ * gap and the buffer takes the tail.
+ */
+function gridCells(b: ContextBreakdownInfo): CellKind[] {
+    const perCell = b.contextWindow / GRID_CELLS;
+    const cellsFor = (tokens: number) => (tokens > 0 ? Math.max(1, Math.round(tokens / perCell)) : 0);
+    const slices = b.categories.map((c) => ({ id: c.id, n: cellsFor(c.tokens) }));
+    let buffer = cellsFor(b.autoCompactBufferTokens);
+    let used = slices.reduce((sum, s) => sum + s.n, 0);
+    let excess = used - (GRID_CELLS - buffer);
+    if (excess > 0) {
+        for (const s of [...slices].sort((x, y) => y.n - x.n)) {
+            const give = Math.min(excess, s.n - 1);
+            s.n -= give;
+            excess -= give;
+        }
+        used = slices.reduce((sum, s) => sum + s.n, 0);
+        buffer = Math.min(buffer, Math.max(0, GRID_CELLS - used));
+    }
+    const cells: CellKind[] = slices.flatMap((s) => Array<CellKind>(s.n).fill(s.id));
+    const free = Math.max(0, GRID_CELLS - cells.length - buffer);
+    cells.push(...Array<CellKind>(free).fill('free'), ...Array<CellKind>(buffer).fill('buffer'));
+    return cells.slice(0, GRID_CELLS);
+}
+
+/** Share of the window as the TUI prints it: one decimal, `<0.1%` for a sliver. */
+function share(tokens: number, window: number): string {
+    const pct = window > 0 ? (tokens / window) * 100 : 0;
+    return pct > 0 && pct < 0.05 ? '<0.1%' : `${pct.toFixed(1)}%`;
+}
+
+function renderBreakdown(): string {
+    if (!breakdown) {
+        const msg = breakdownError ? `<span class="ms-err">${escapeHtml(breakdownError)}</span>` : 'Loading breakdown…';
+        return `<div class="ms-ctx ms-ctx-msg">${msg}</div>`;
+    }
+    const b = breakdown;
+    const legend = (kind: CellKind, label: string, tokens: number, unit: string) =>
+        `<div class="ms-ctx-li"><i class="ms-cell ms-c-${kind}"></i>${escapeHtml(label)}: <b>${formatTokenCount(tokens)}</b> <span class="ms-ctx-dim">${unit}(${share(tokens, b.contextWindow)})</span></div>`;
+    const items = [
+        ...b.categories.map((c) => legend(c.id, c.label, c.tokens, 'tokens ')),
+        legend('free', 'Free space', b.freeTokens, ''),
+        ...(b.autoCompactBufferTokens > 0 ? [legend('buffer', 'Autocompact buffer', b.autoCompactBufferTokens, 'tokens ')] : []),
+    ];
+    const notes = b.notes.map((n) => `<div class="ms-ctx-note">${escapeHtml(n)}</div>`).join('');
+    return `<div class="ms-ctx">
+<div class="ms-ctx-grid" aria-hidden="true">${gridCells(b).map((k) => `<i class="ms-cell ms-c-${k}"></i>`).join('')}</div>
+<div class="ms-ctx-legend"><div class="ms-ctx-title">Estimated usage by category</div>${items.join('')}${notes}</div>
+</div>`;
+}
+
 export function setModelWorkingStatus(working: boolean, label?: string): void {
     const nextWorking = Boolean(working);
     const nextLabel = working ? (label || 'Working…') : undefined;
@@ -102,6 +209,7 @@ export function setModelWorkingStatus(working: boolean, label?: string): void {
 
 export function applyModelStatus(s: ModelStatusInfo): void {
     lastStatus = s;
+    requestBreakdownIfStale();
     renderHeader(s);
 }
 
@@ -113,6 +221,7 @@ function renderHeader(s: ModelStatusInfo): void {
     const name = s.model ?? 'No model';
     const pct = s.context?.percent;
     const ctxPct = typeof pct === 'number' && !Number.isNaN(pct) ? Math.round(pct) : undefined;
+    const ctxTone = ctxPct !== undefined && ctxPct >= s.contextWarnPercent ? ' ms-warn' : '';
     const workingText = currentWorking ? (currentWorkingLabel || 'Working…') : undefined;
 
     const brief = (key: string, value: string, cls = '') => `<span class="ms-item${cls}"><span class="ms-sk">${key}</span> ${value}</span>`;
@@ -120,7 +229,7 @@ function renderHeader(s: ModelStatusInfo): void {
         sumEl,
         [
             `<span class="ms-model">${escapeHtml(name)}</span>`,
-            ...(ctxPct !== undefined ? [brief('ctx', `${ctxPct}%`)] : []),
+            ...(ctxPct !== undefined ? [brief('ctx', `${ctxPct}%`, ctxTone)] : []),
             ...s.limits.map((l) => brief(escapeHtml(l.text), `${Math.round(l.usedPercent)}%`, tone(l.usedPercent))),
             ...(s.activity === 'retrying' ? [`<span class="ms-item ms-warn">reconnecting${s.retryAttempt > 0 ? ` ${s.retryAttempt}` : ''}</span>`] : []),
         ].join(SEP),
@@ -141,12 +250,15 @@ function renderHeader(s: ModelStatusInfo): void {
     const ctx = s.context;
     if (ctx && ctx.contextWindow > 0) {
         const used = ctx.tokens === null ? '—' : formatTokenCount(ctx.tokens);
-        rows.push(
-            row(
-                'Context',
-                `${meter(ctxPct ?? 0)}${ctxPct === undefined ? '' : `${ctxPct}%${SEP}`}${used} / ${formatTokenCount(ctx.contextWindow)}`,
-            ),
-        );
+        const value = `${meter(ctxPct ?? 0, ctxTone)}${ctxPct === undefined ? '' : `<span class="${ctxTone.trim()}">${ctxPct}%</span>${SEP}`}${used} / ${formatTokenCount(ctx.contextWindow)}`;
+        if (s.contextBreakdown) {
+            rows.push(
+                `<div class="ms-row"><button type="button" class="ms-k ms-ctx-toggle" data-ctx-toggle aria-expanded="${ctxExpanded}" title="${ctxExpanded ? 'Hide' : 'Show'} usage by category"><span class="ms-ctx-car">▶</span>Context</button><span class="ms-v ms-ctx-toggle" data-ctx-toggle>${value}</span></div>`,
+                ...(ctxExpanded ? [renderBreakdown()] : []),
+            );
+        } else {
+            rows.push(row('Context', value));
+        }
     }
     const t = s.tokens;
     if (t) {

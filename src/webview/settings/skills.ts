@@ -45,14 +45,15 @@ function buildSkillsPlaceholder(): HTMLElement {
 
 export function renderSkillsSection(): void {
     const container = document.getElementById('skills-list');
-    if (!container) return;
+    const skills = settingsState.loadedSkills;
+    if (!container || !skills) return;
 
-    if (settingsState.loadedSkills.length === 0) {
+    if (skills.length === 0) {
         container.innerHTML = `<p class="setting-description">No skills found. Add skill paths in the Skills tab or place SKILL.md under <code>~/.agents/skills/</code> or <code>.agents/skills/</code>.</p>`;
         return;
     }
 
-    container.innerHTML = settingsState.loadedSkills.map(skill => {
+    container.innerHTML = skills.map(skill => {
         const invocation = skill.disableModelInvocation
             ? '<span class="skill-badge">manual only</span>'
             : '';

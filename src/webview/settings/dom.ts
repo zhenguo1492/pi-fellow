@@ -72,23 +72,6 @@ export function buildNumberInput(key: string, label: string, value: number, min:
     return row;
 }
 
-export function buildToggle(key: string, label: string, value: boolean, description: string): HTMLElement {
-    const row = el('div', 'setting-row');
-    row.innerHTML = `
-        <div class="setting-toggle-row">
-            <label class="toggle-label" for="setting-${key}">
-                <span class="toggle-switch">
-                    <input type="checkbox" id="setting-${key}" data-key="${key}" ${value ? 'checked' : ''}>
-                    <span class="toggle-slider"></span>
-                </span>
-                <span>${escapeHtml(label)}</span>
-            </label>
-        </div>
-        <p class="setting-description">${escapeHtml(description)}</p>
-    `;
-    return row;
-}
-
 export function buildRange(key: string, label: string, value: number, min: number, max: number, description: string): HTMLElement {
     const row = el('div', 'setting-row');
     row.innerHTML = `
@@ -146,7 +129,7 @@ export function buildAddRow(kind: string, label: string, placeholder: string): H
 export function buildReloadRow(): HTMLElement {
     const row = el('div', 'setting-row');
     row.innerHTML = `
-        <button type="button" class="setting-btn secondary" id="btn-reload-pi-session">Reload active session</button>
+        <button type="button" class="setting-btn secondary" data-reload-session>Reload active session</button>
         <p class="setting-description">Reloads extensions, skills, and packages into the sidebar chat without restarting VS Code.</p>
     `;
     return row;

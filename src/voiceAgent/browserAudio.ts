@@ -4,17 +4,22 @@
  * so capture and playback live in one page in a hidden Chrome; the extension exchanges raw PCM
  * with it over a local WebSocket. Protocol (voice-loop prototype doc §3.2):
  *
- * page → extension: binary, 16 kHz mono s16le, echo-cancelled, 512 samples per message
+ * page → extension: binary, 16 kHz mono s16le, echo-cancelled, 512 samples per message (not sent
+ *                   while the page only plays: opened with capture=0 and not yet told to capture)
  * extension → page: binary, [u32 LE clip id][u32 LE sample rate][s16le mono PCM], one sentence
  *                   per message, played back to back;
  *                   text {"type":"flush"} drops everything queued (barge-in);
  *                   text {"type":"mic","on":false} turns the microphone track off while another
- *                   VS Code window has the voice, and on again when this one gets it back
+ *                   VS Code window has the voice, and on again when this one gets it back;
+ *                   text {"type":"capture"} opens the microphone of a page that only played
+ *                   (speech-to-text became available), sent again on each reconnect
  * page → extension: text {"type":"started","id":…,"at":…,"durationMs":…} as a clip's audio
  *                   actually starts (epoch ms, output latency included);
  *                   text {"type":"ended","id":…,"at":…} as it finishes, or at once if the page
  *                   cannot play it; flushed clips report nothing;
- *                   text {"type":"log","message":…} (the hidden page has no visible console)
+ *                   text {"type":"log","message":…} (the hidden page has no visible console);
+ *                   text {"type":"micError","message":…} / {"type":"micOk"} whether getUserMedia
+ *                   opened the microphone, sent again on each reconnect
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -35,6 +40,8 @@ export interface BrowserAudio {
     flush(): void;
     /** Turns the page's microphone track on or off; kept across page reconnects. */
     setMic(on: boolean): void;
+    /** A page opened with `capture: false` opens the microphone and streams it from now on; kept across reconnects. */
+    enableCapture(): void;
     close(): void;
 }
 
@@ -45,6 +52,8 @@ export type PlaybackReport =
 
 export interface BrowserAudioEvents {
     mic(chunk: Buffer): void;
+    /** The page could (`undefined`) or could not (why) open the microphone; repeated on each reconnect. */
+    micStatus?(error: string | undefined): void;
     playback(report: PlaybackReport): void;
     connected(connected: boolean): void;
     log(message: string): void;
@@ -52,9 +61,9 @@ export interface BrowserAudioEvents {
 
 const PAGE = `<!doctype html>
 <meta charset="utf-8">
-<title>Oh My Pi Chater · voice audio</title>
+<title>PI Buddy · voice audio</title>
 <style>body { font: 14px system-ui, sans-serif; margin: 2em; background: #111; color: #ddd; }</style>
-<p>Microphone and speaker of Oh My Pi Chater's voice mode (Chrome echo cancellation). Keep this tab open while voice mode is on.</p>
+<p>Microphone and speaker of PI Buddy's voice mode (Chrome echo cancellation). Keep this tab open while voice mode is on.</p>
 <button id="start" hidden>Start</button>
 <div id="status">Connecting…</div>
 <script>
@@ -72,19 +81,31 @@ class Capture extends AudioWorkletProcessor {
 registerProcessor('capture', Capture);\`;
 
 let ws, playCtx, capCtx, micTrack, micOn = true, nextTime = 0;
+/** capture=0: opened without speech-to-text: the page only plays until told to capture. */
+let capture = new URLSearchParams(location.search).get('capture') !== '0';
+/** The microphone being opened, or open; undefined until then, and again after it failed. */
+let capturing;
 /** Clips scheduled and not yet ended, by id: their source and the marker that reports their start. */
 const clips = new Map();
+/** Whether the microphone opened: undefined until tried, '' if it did, else why not. Sent again on each (re)connect. */
+let micStatus;
+const reportMic = (error) => { micStatus = error; send(error ? { type: 'micError', message: error } : { type: 'micOk' }); };
 
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws' + location.search);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => status('Connected');
+  ws.onopen = () => { status('Connected'); if (micStatus !== undefined) reportMic(micStatus); };
   ws.onclose = () => { status('Disconnected, reconnecting…'); setTimeout(connect, 1000); };
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') {
       const msg = JSON.parse(ev.data);
       if (msg.type === 'flush') flush();
       if (msg.type === 'mic') { micOn = msg.on; if (micTrack) { micTrack.enabled = micOn; log('mic ' + (micOn ? 'on' : 'off')); } }
+      if (msg.type === 'capture' && !capture) {
+        capture = true;
+        // start() has run (it sets playCtx before its first await); it opens the microphone itself otherwise.
+        if (playCtx) openCapture().then(() => status('Running: voice mode is listening'), (e) => log('opening the microphone failed: ' + e.message));
+      }
       return;
     }
     play(ev.data);
@@ -142,19 +163,44 @@ function flush() {
 
 async function start() {
   document.getElementById('start').hidden = true;
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-  });
+  if (playCtx) {
+    // The Start button after the automatic start failed: the click lets the contexts run.
+    await playCtx.resume();
+    if (capCtx) await capCtx.resume();
+  } else {
+    playCtx = new AudioContext();
+  }
+  if (capture) await openCapture();
+  if (playCtx.state === 'suspended' || (capCtx && capCtx.state === 'suspended')) throw new Error('audio needs a click to start');
+  status(capture ? 'Running: voice mode is listening' : 'Running: voice mode is speaking (no microphone)');
+}
+
+/** Opens the microphone once; a failure leaves it to be tried again (the Start button). */
+function openCapture() {
+  capturing ??= openMic().catch((e) => { capturing = undefined; throw e; });
+  return capturing;
+}
+
+async function openMic() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+  } catch (e) {
+    reportMic((e.name ? e.name + ': ' : '') + e.message);
+    throw e;
+  }
+  reportMic('');
   const track = stream.getAudioTracks()[0];
   micTrack = track;
   track.enabled = micOn;
   const settings = track.getSettings();
   log('mic ' + track.label + ' ec=' + settings.echoCancellation + ' ns=' + settings.noiseSuppression + ' agc=' + settings.autoGainControl);
-  playCtx = new AudioContext();
-  capCtx = new AudioContext({ sampleRate: 16000 });
-  await capCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' })));
-  const node = new AudioWorkletNode(capCtx, 'capture');
-  capCtx.createMediaStreamSource(stream).connect(node);
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' })));
+  const node = new AudioWorkletNode(ctx, 'capture');
+  ctx.createMediaStreamSource(stream).connect(node);
   let pending = new Int16Array(512), filled = 0;
   node.port.onmessage = (ev) => {
     for (const x of ev.data) {
@@ -166,8 +212,7 @@ async function start() {
       }
     }
   };
-  if (playCtx.state === 'suspended' || capCtx.state === 'suspended') throw new Error('audio needs a click to start');
-  status('Running: voice mode is listening');
+  capCtx = ctx;
 }
 
 connect();
@@ -179,8 +224,11 @@ start().catch((e) => {
 });
 </script>`;
 
-/** Serves the audio page on 127.0.0.1; only a page opened with this session's token may connect. */
-export async function startBrowserAudio(events: BrowserAudioEvents): Promise<BrowserAudio> {
+/**
+ * Serves the audio page on 127.0.0.1; only a page opened with this session's token may connect.
+ * `capture: false`: the page only plays, and opens no microphone until `enableCapture`.
+ */
+export async function startBrowserAudio(events: BrowserAudioEvents, options: { capture?: boolean } = {}): Promise<BrowserAudio> {
     const token = randomBytes(16).toString('hex');
     const admitted = (url: string | undefined) => new URL(url ?? '/', 'http://127.0.0.1').searchParams.get('token') === token;
     const server = http.createServer((req, res) => {
@@ -197,6 +245,7 @@ export async function startBrowserAudio(events: BrowserAudioEvents): Promise<Bro
     });
     let socket: WebSocket | undefined;
     let micOn = true;
+    let capture = options.capture !== false;
     /** Clips sent to the page that have neither ended nor been flushed. */
     const playing = new Set<number>();
     /** The page that had them is gone: they will never be reported, so they count as ended now. */
@@ -214,6 +263,10 @@ export async function startBrowserAudio(events: BrowserAudioEvents): Promise<Bro
         dropPlaying();
         events.connected(true);
         ws.send(JSON.stringify({ type: 'mic', on: micOn }));
+        // The page reloads with the URL it was opened with: tell it again that it captures now.
+        if (capture) {
+            ws.send(JSON.stringify({ type: 'capture' }));
+        }
         ws.on('message', (data, isBinary) => {
             if (ws !== socket) {
                 return;
@@ -226,6 +279,10 @@ export async function startBrowserAudio(events: BrowserAudioEvents): Promise<Bro
             const msg = JSON.parse(data.toString()) as { type?: string; message?: string; id?: number; at?: number; durationMs?: number };
             if (msg.type === 'log') {
                 events.log(`audio page: ${msg.message}`);
+                return;
+            }
+            if (msg.type === 'micError' || msg.type === 'micOk') {
+                events.micStatus?.(msg.type === 'micError' ? msg.message || 'unknown error' : undefined);
                 return;
             }
             // Reports of flushed clips still in flight are dropped here.
@@ -254,7 +311,7 @@ export async function startBrowserAudio(events: BrowserAudioEvents): Promise<Bro
     });
     const { port } = server.address() as AddressInfo;
     return {
-        url: `http://127.0.0.1:${port}/?token=${token}`,
+        url: `http://127.0.0.1:${port}/?token=${token}${options.capture === false ? '&capture=0' : ''}`,
         get connected() {
             return socket !== undefined;
         },
@@ -278,6 +335,12 @@ export async function startBrowserAudio(events: BrowserAudioEvents): Promise<Bro
         setMic(on) {
             micOn = on;
             socket?.send(JSON.stringify({ type: 'mic', on }));
+        },
+        enableCapture() {
+            if (!capture) {
+                capture = true;
+                socket?.send(JSON.stringify({ type: 'capture' }));
+            }
         },
         close() {
             for (const client of wss.clients) {

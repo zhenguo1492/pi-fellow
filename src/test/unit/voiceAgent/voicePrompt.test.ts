@@ -67,6 +67,24 @@ describe('turn message: editor', () => {
     });
 });
 
+describe('turn message: names', () => {
+    const base: TurnInput = {
+        trigger: { kind: 'user', text: '你叫什么', source: 'stt' },
+        status: { phase: 'idle', queued: 0 },
+        updates: [],
+        requests: [],
+        proposals: [],
+        research: [],
+    };
+
+    it('tells the model the names only once one is not the default, quotes kept out of the attribute', () => {
+        expect(buildTurnMessage({ ...base, names: { bot: 'Bot', user: 'User' } })).not.toContain('<names');
+        const message = buildTurnMessage({ ...base, names: { bot: '小智', user: 'Zheng "Z"' } });
+        expect(message).toContain(`<names you="小智" user="Zheng 'Z'"/>`);
+        expect(message.indexOf('<names')).toBeLessThan(message.indexOf('<user'));
+    });
+});
+
 describe('turn message: proposals settled with the panel buttons', () => {
     const base: TurnInput = {
         trigger: { kind: 'user', text: '好了吗', source: 'stt' },

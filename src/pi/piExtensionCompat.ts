@@ -7,107 +7,6 @@ import { getPiAgentDir, piCliChildEnv, type PiNodeInvocation, resolvePiCliInvoca
 
 const execFileAsync = promisify(execFile);
 
-/** Minimal shape for legacy extension-load diagnostics (SDK no longer bundled). */
-export interface LoadExtensionsResult {
-    extensions?: unknown[];
-    errors?: Array<{ path: string; error: unknown }>;
-}
-
-export interface ExtensionLoadIssue {
-    path: string;
-    message: string;
-    category: 'native' | 'tui' | 'sdk' | 'other';
-    hint: string;
-}
-
-const NATIVE_RE =
-    /NODE_MODULE_VERSION|was compiled against a different|better-sqlite3|bindings\.node|dlopen|ERR_DLOPEN|native module|sqlite3/i;
-const TUI_RE = /pi-tui|no TUI|terminal|overlay|stdin|TTY|raw mode/i;
-const SDK_RE = /pi-coding-agent|theme|getMarkdownTheme|Cannot find module '@earendil-works/i;
-
-export function classifyExtensionErrorMessage(message: string): ExtensionLoadIssue['category'] {
-    if (NATIVE_RE.test(message)) {
-        return 'native';
-    }
-    if (TUI_RE.test(message)) {
-        return 'tui';
-    }
-    if (SDK_RE.test(message)) {
-        return 'sdk';
-    }
-    return 'other';
-}
-
-export function hintForExtensionCategory(category: ExtensionLoadIssue['category']): string {
-    switch (category) {
-        case 'native':
-            return 'Pi tools run in a separate pi Node process (not VS Code\'s embedded Node). Reload session (/reload). Rebuild only if "Rebuild Pi native modules" reports a load failure under pi Node.';
-        case 'tui':
-            return 'Package targets Pi terminal UI. In VS Code only tools using ctx.ui dialogs work; footers/overlays are CLI-only.';
-        case 'sdk':
-            return 'Update Oh My Pi Chater and Pi packages to matching versions, then reload session.';
-        default:
-            return 'See Output → Oh My Pi Chater. Fix or remove the package in ~/.pi/agent/settings.json.';
-    }
-}
-
-export function buildExtensionLoadIssues(
-    result: LoadExtensionsResult | undefined,
-): ExtensionLoadIssue[] {
-    if (!result?.errors?.length) {
-        return [];
-    }
-    return result.errors.map((err) => {
-        const message = err.error instanceof Error ? err.error.message : String(err.error);
-        const category = classifyExtensionErrorMessage(message);
-        return {
-            path: err.path,
-            message,
-            category,
-            hint: hintForExtensionCategory(category),
-        };
-    });
-}
-
-export function formatExtensionLoadSummary(
-    result: LoadExtensionsResult | undefined,
-): { loaded: number; issues: ExtensionLoadIssue[] } {
-    const loaded = result?.extensions?.length ?? 0;
-    const issues = buildExtensionLoadIssues(result);
-    return { loaded, issues };
-}
-
-export async function notifyExtensionLoadIssues(
-    result: LoadExtensionsResult | undefined,
-    outputChannel: vscode.OutputChannel,
-): Promise<void> {
-    const { issues } = formatExtensionLoadSummary(result);
-    if (issues.length === 0) {
-        return;
-    }
-
-    const nativeCount = issues.filter((i) => i.category === 'native').length;
-    const headline =
-        nativeCount > 0
-            ? `${issues.length} Pi package(s) failed to load (${nativeCount} native module). Memory/search packages may be unavailable.`
-            : `${issues.length} Pi package(s) failed to load. Some CLI features will not work in VS Code.`;
-
-    outputChannel.appendLine(headline);
-    for (const issue of issues) {
-        outputChannel.appendLine(`  [${issue.category}] ${issue.path}`);
-        outputChannel.appendLine(`    ${issue.message}`);
-        outputChannel.appendLine(`    -> ${issue.hint}`);
-    }
-
-    const action = nativeCount > 0 ? 'Rebuild native modules' : 'Open Output';
-    const pick = await vscode.window.showWarningMessage(headline, { modal: false }, action, 'Dismiss');
-    if (pick === 'Rebuild native modules') {
-        await vscode.commands.executeCommand('oh-my-pi-chater.rebuildNativeModules');
-    } else if (pick === 'Open Output') {
-        outputChannel.show(true);
-    }
-}
-
 function piNpmEnv(invocation: PiNodeInvocation, npmDir: string): NodeJS.ProcessEnv {
     return {
         ...piCliChildEnv(invocation),
@@ -240,7 +139,7 @@ export async function rebuildAgentNativeModules(
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'Oh My Pi Chater: rebuilding Pi native modules...',
+            title: 'PI Buddy: rebuilding Pi native modules...',
             cancellable: false,
         },
         async () => {
@@ -282,7 +181,7 @@ export async function rebuildAgentNativeModules(
                 const msg = err instanceof Error ? err.message : String(err);
                 outputChannel.appendLine(`Native rebuild failed: ${msg}`);
                 vscode.window.showErrorMessage(
-                    `Native rebuild failed. See Output → Oh My Pi Chater. ${msg.slice(0, 240)}`,
+                    `Native rebuild failed. See Output → PI Buddy. ${msg.slice(0, 240)}`,
                 );
                 throw err;
             }

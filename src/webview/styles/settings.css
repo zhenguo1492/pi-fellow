@@ -170,33 +170,6 @@ body {
     color: var(--error-fg);
 }
 
-.ext-load-issues {
-    margin: 10px 0 12px 18px;
-    font-size: 12px;
-    line-height: 1.45;
-}
-
-.ext-load-issues li {
-    margin-bottom: 10px;
-}
-
-.ext-issue-cat {
-    color: var(--muted);
-    font-size: 11px;
-}
-
-.ext-issue-hint {
-    color: var(--muted);
-    font-size: 11px;
-}
-
-.setting-actions-row {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 8px;
-}
-
 .settings-section.section-highlight {
     outline: 1px solid var(--focus-border);
     outline-offset: 4px;
@@ -315,11 +288,121 @@ body {
     border-color: color-mix(in srgb, var(--error-fg) 45%, transparent);
 }
 
-.voice-guide-note {
+/* Voice tab: hidden parts stay hidden whatever their display rule. */
+.settings-tab-panel[data-tab-panel='voice'] [hidden] {
+    display: none !important;
+}
+.settings-tab-panel[data-tab-panel='voice'] .setting-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.voice-key-state-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.voice-key-state-row .voice-status {
+    margin-top: 6px;
+}
+.voice-key-state-row .setting-btn {
+    margin-top: 6px;
+}
+
+.voice-help {
     margin-bottom: 16px;
-    color: var(--muted);
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg);
     font-size: 12px;
     line-height: 1.5;
+}
+.voice-help summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+.voice-help p,
+.voice-help ul {
+    margin-top: 8px;
+}
+.voice-help ul {
+    padding-left: 18px;
+}
+.voice-help pre {
+    margin-top: 6px;
+    padding: 8px;
+    overflow-x: auto;
+    border-radius: 4px;
+    background: var(--input-bg);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+.voice-help a {
+    color: var(--link);
+}
+
+/* The three ways to set voice up. */
+.voice-setup-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.voice-setup-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    background: var(--card-bg);
+    color: var(--fg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.voice-setup-card:hover {
+    border-color: var(--focus-border);
+}
+.voice-setup-card.selected {
+    border-color: var(--focus-border);
+    box-shadow: inset 0 0 0 1px var(--focus-border);
+}
+.voice-setup-title {
+    font-weight: 600;
+}
+.voice-setup-sub {
+    color: var(--muted);
+    font-size: 12px;
+}
+.voice-setup-panel {
+    margin-bottom: 8px;
+}
+
+/* Save for the whole Voice tab, always in view at the bottom. */
+.voice-save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+.voice-save-state {
+    flex: 1;
+    font-size: 12px;
+}
+.voice-save-state[data-state='dirty'] {
+    color: var(--warning-fg);
+    font-weight: 600;
+}
+.voice-save-state[data-state='ok'],
+.voice-save-state[data-state='testing'] {
+    color: var(--muted);
 }
 
 /* Dry run at the bottom of a Voice section, and the section's state. */
@@ -475,6 +558,231 @@ body {
     display: none;
 }
 
+/* Voice agent skills: a dropdown of checkboxes, the chosen ones as chips under it. */
+.voice-skills-picker {
+    position: relative;
+}
+.voice-skills-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--input-bg);
+    color: var(--input-fg);
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    list-style: none;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.voice-skills-summary::-webkit-details-marker {
+    display: none;
+}
+.voice-skills-summary::after {
+    content: '▾';
+    flex-shrink: 0;
+    color: var(--muted);
+}
+.voice-skills-summary:focus-visible,
+.voice-skills-picker[open] .voice-skills-summary {
+    outline: none;
+    border-color: var(--focus-border);
+}
+.voice-skills-menu {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    padding: 6px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.voice-skills-options {
+    max-height: 280px;
+    margin-top: 6px;
+    overflow-y: auto;
+}
+.voice-skill-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.voice-skill-option[hidden] {
+    display: none;
+}
+.voice-skill-option:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+.voice-skill-option input {
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+.voice-skill-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.voice-skill-name {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+    font-weight: 600;
+}
+.voice-skill-desc {
+    font-size: 11px;
+    color: var(--muted);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.voice-skills-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.voice-skills-chips:not(:empty) {
+    margin-top: 8px;
+}
+.voice-skill-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card-bg);
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px;
+}
+.voice-skill-chip.missing {
+    color: var(--muted);
+    text-decoration: line-through;
+}
+.voice-skill-remove {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 3px;
+    cursor: pointer;
+}
+.voice-skill-remove:hover {
+    color: var(--fg);
+}
+
+/* The translation language, shown only while the Alt sentence actions are on. */
+.voice-translate-to {
+    margin-top: 10px;
+}
+.voice-sentence-actions:has(input[type="checkbox"]:not(:checked)) .voice-translate-to {
+    display: none;
+}
+
+/* Names and avatars: the avatar as the Bot view draws it (32px, tinted like its User green / Bot blue), then the fields. */
+.voice-speaker {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.voice-speaker-avatar {
+    --av: var(--vscode-charts-green, #89d185);
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    color: var(--av);
+    background: color-mix(in srgb, var(--av) 20%, transparent);
+}
+.voice-speaker-avatar--bot {
+    --av: var(--vscode-charts-blue, #3794ff);
+}
+.voice-speaker-avatar svg {
+    width: 20px;
+    height: 20px;
+}
+.voice-speaker-avatar .av-img {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    object-fit: cover;
+}
+.voice-speaker-avatar .av-text {
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+}
+.voice-speaker-fields {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.voice-speaker-who {
+    font-size: 12px;
+    color: var(--muted);
+}
+.voice-speaker-name {
+    max-width: 260px;
+}
+.voice-speaker-error {
+    margin-top: 0;
+    color: var(--error-fg);
+}
+/* Pixel-art presets: the avatar box as the Bot view draws it, the chosen one ringed. */
+.voice-avatar-presets {
+    --av: var(--vscode-charts-green, #89d185);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.voice-avatar-presets--bot {
+    --av: var(--vscode-charts-blue, #3794ff);
+}
+.voice-avatar-preset {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    background: color-mix(in srgb, var(--av) 20%, transparent);
+}
+.voice-avatar-preset img {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+.voice-avatar-preset:hover {
+    border-color: var(--muted);
+}
+.voice-avatar-preset:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 1px;
+}
+.voice-avatar-preset[aria-pressed='true'] {
+    border-color: var(--focus-border);
+    box-shadow: 0 0 0 1px var(--focus-border);
+}
+
 .setting-select {
     width: 100%;
     padding: 6px 10px;
@@ -578,35 +886,6 @@ body {
     box-shadow: 0 0 0 2px var(--focus-border);
 }
 
-/* API key */
-.api-key-input-row {
-    display: flex;
-    gap: 8px;
-}
-.api-key-input-row .setting-input {
-    flex: 1;
-}
-
-.api-key-actions {
-    display: flex;
-    gap: 8px;
-}
-
-.key-status {
-    font-size: 11px;
-    padding: 1px 8px;
-    border-radius: 10px;
-    font-weight: 500;
-}
-.key-status.set {
-    background: rgba(115, 201, 145, 0.15);
-    color: var(--success-fg);
-}
-.key-status.unset {
-    background: rgba(244, 135, 113, 0.1);
-    color: var(--muted);
-}
-
 /* Buttons */
 .setting-btn {
     padding: 5px 14px;
@@ -661,32 +940,6 @@ body {
 .auth-icon {
     font-size: 14px;
     flex-shrink: 0;
-}
-
-/* Shortcuts */
-.shortcuts-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-.shortcut-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 12px;
-}
-.shortcut-item kbd {
-    background: var(--input-bg);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 2px 8px;
-    font-size: 11px;
-    font-family: var(--font-mono);
-    min-width: 100px;
-    text-align: center;
-}
-.shortcut-item span {
-    color: var(--muted);
 }
 
 /* Toast */

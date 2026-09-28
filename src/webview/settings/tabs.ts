@@ -1,6 +1,6 @@
 import type { AgentBackend } from '../../shared/protocol';
 import { vscode } from './api';
-import { el } from './dom';
+import { el, showToast } from './dom';
 import { settingsState } from './state';
 
 export type SettingsTabId = 'general' | 'auth' | 'voice' | 'packages' | 'skills' | 'mcp' | 'commands';
@@ -37,16 +37,21 @@ export function scrollToSettingsSection(section: string): void {
         switchSettingsTab(tab, false);
     }
     requestAnimationFrame(() => {
-        const el = document.getElementById(`section-${section}`);
-        if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            el.classList.add('section-highlight');
-            setTimeout(() => el.classList.remove('section-highlight'), 2000);
+        const found = document.getElementById(`section-${section}`);
+        // A section of a Voice setup not shown (e.g. the server fields on Built-in): the setup choice instead.
+        const target = found?.closest('[hidden]') && tab === 'voice' ? document.getElementById('section-voice') : found;
+        if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            target.classList.add('section-highlight');
+            setTimeout(() => target.classList.remove('section-highlight'), 2000);
         }
     });
 }
 
 export function switchSettingsTab(tabId: SettingsTabId, persist = true): void {
+    if (settingsState.activeTab === 'voice' && tabId !== 'voice' && settingsState.voiceDirty) {
+        showToast('The Voice tab has unsaved changes: they wait there until you Save or Discard.', 'error');
+    }
     settingsState.activeTab = tabId;
     if (persist) {
         vscode.setState({ ...(vscode.getState() ?? {}), activeTab: tabId });

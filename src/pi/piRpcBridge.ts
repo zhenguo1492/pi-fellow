@@ -77,6 +77,8 @@ export class PiRpcBridge {
     /** pi with host tools only. */
     private _piHostTools: PiHostTools | undefined;
     private _permissionGate: PermissionGateFile | undefined;
+    /** In-flight `/context` report: concurrent callers share it (its output frames are not correlated). */
+    private _contextReport: Promise<string> | undefined;
 
     get backend(): AgentBackend {
         return this._backend;
@@ -515,6 +517,33 @@ export class PiRpcBridge {
         return this._data(await this._send({ type: 'get_session_stats' }));
     }
 
+    /**
+     * omp only: the text of its `/context` builtin, the TUI's Context Usage breakdown. It runs
+     * locally (no agent turn, nothing recorded, fine mid-stream) and prints through `command_output`
+     * frames before its `prompt` response. pi has no such builtin: the prompt would go to the model.
+     */
+    contextReport(): Promise<string> {
+        if (this._backend !== 'omp') {
+            return Promise.reject(new Error('The context breakdown needs the omp backend'));
+        }
+        this._contextReport ??= (async () => {
+            const output: string[] = [];
+            const off = this.on((event) => {
+                if (event.type === 'command_output' && typeof event.text === 'string') {
+                    output.push(event.text);
+                }
+            });
+            try {
+                this._data(await this._send({ type: 'prompt', message: '/context' }));
+                return output.join('\n');
+            } finally {
+                off();
+                this._contextReport = undefined;
+            }
+        })();
+        return this._contextReport;
+    }
+
     async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
         return this._data(await this._send({ type: 'switch_session', sessionPath }));
     }
@@ -535,8 +564,10 @@ export class PiRpcBridge {
                 source: OMP_COMMAND_SOURCE[c.source ?? ''] ?? 'extension',
             }));
         }
-        const data = this._data<{ commands: RpcSlashCommand[] }>(await this._send({ type: 'get_commands' }));
-        return data.commands;
+        const data = this._data<{ commands: Array<Omit<RpcSlashCommand, 'path'> & { sourceInfo?: { path?: string } }> }>(
+            await this._send({ type: 'get_commands' }),
+        );
+        return data.commands.map(({ sourceInfo, ...command }) => ({ ...command, path: sourceInfo?.path }));
     }
 
     async setSessionName(name: string): Promise<void> {

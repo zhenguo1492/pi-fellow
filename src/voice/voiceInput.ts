@@ -4,7 +4,8 @@ import { SettingsPanel } from '../providers/settings-panel';
 import { DictationSession, dictationSegmenterParams } from './dictation';
 import { SileroVad } from './sileroVad';
 import { SttClient } from './stt';
-import { readVoiceSettings, sttCheck } from './voiceSettings';
+import { probeStt, readVoiceSettings, resolveSttConfig, sendsApiKey, sttCheck } from './voiceSettings';
+import { explainVoiceError } from './voiceErrors';
 
 /** Microphone dictation into the chat composer (mic button / `oh-my-pi-chater.toggleDictation`). */
 export class VoiceInput implements vscode.Disposable {
@@ -17,6 +18,8 @@ export class VoiceInput implements vscode.Disposable {
     private startCancelled = false;
     /** Voice mode owns the microphone; dictation stays off until it ends. */
     private blocked = false;
+    /** A Bot view message is being replayed through the speakers: dictation drops what it hears. */
+    private paused = false;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -49,6 +52,15 @@ export class VoiceInput implements vscode.Disposable {
         }
     }
 
+    /** While a Bot view message is replayed without voice mode, dictation drops what the microphone hears (it has no echo cancellation). */
+    setPaused(paused: boolean): void {
+        if (paused === this.paused) {
+            return;
+        }
+        this.paused = paused;
+        this.current?.setPaused(paused);
+    }
+
     dispose(): void {
         this.startCancelled = true;
         void this.current?.stop();
@@ -62,16 +74,20 @@ export class VoiceInput implements vscode.Disposable {
             this.post({ type: 'toast', message: 'Voice mode is using the microphone — dictation is off until voice mode ends.' });
             return;
         }
-        const settings = readVoiceSettings();
-        const stt = sttCheck();
-        if (!stt.ok) {
-            this.post({ type: 'toast', variant: 'error', message: stt.reason ?? 'Speech-to-text is unavailable.' });
-            SettingsPanel.showWithSection('stt');
-            return;
-        }
         this.starting = true;
         this.startCancelled = false;
         try {
+            // A failed check may be out of date (the server started since, the built-in engine retried): check again first.
+            if (!sttCheck().ok) {
+                await probeStt();
+            }
+            const stt = sttCheck();
+            if (!stt.ok) {
+                this.post({ type: 'toast', variant: 'error', message: stt.reason ?? 'Speech-to-text is unavailable.' });
+                SettingsPanel.showWithSection('voice');
+                return;
+            }
+            const settings = readVoiceSettings();
             this.vad ??= SileroVad.load(
                 vscode.Uri.joinPath(this.extensionUri, 'media', 'vad', 'silero_vad.onnx').fsPath,
                 vscode.Uri.joinPath(this.extensionUri, 'out', 'vad').fsPath,
@@ -80,13 +96,15 @@ export class VoiceInput implements vscode.Disposable {
                 throw err;
             });
             const vad = await this.vad;
-            // Voice mode may have started, or the user changed their mind, while the VAD model was loading.
+            // The built-in engine may download its models and start here.
+            const sttConfig = await resolveSttConfig(settings);
+            // Voice mode may have started, or the user changed their mind, while the VAD model or the engine was loading.
             if (this.blocked || this.startCancelled) {
                 return;
             }
             const session: DictationSession = new DictationSession(
                 vad,
-                new SttClient({ url: settings.sttUrl, model: settings.sttModel, language: settings.language }),
+                new SttClient(sttConfig),
                 dictationSegmenterParams(settings),
                 {
                     status: (status) => this.onStatus(session, status),
@@ -98,10 +116,11 @@ export class VoiceInput implements vscode.Disposable {
                 'onStop',
             );
             this.current = session;
+            session.setPaused(this.paused);
             session.start();
-            this.log.appendLine(`[voice] dictation started → ${settings.sttUrl}`);
+            this.log.appendLine(`[voice] dictation started → ${sttConfig.url}`);
         } catch (err) {
-            this.fail(err instanceof Error ? err.message : String(err));
+            this.fail(err);
         } finally {
             this.starting = false;
         }
@@ -124,8 +143,10 @@ export class VoiceInput implements vscode.Disposable {
         });
     }
 
-    private fail(message: string): void {
-        this.log.appendLine(`[voice] ${message}`);
-        this.post({ type: 'toast', variant: 'error', message: `Voice input: ${message}` });
+    /** Logs the failure as it is and shows it in plain language (see explainVoiceError). */
+    private fail(err: unknown): void {
+        const explained = explainVoiceError(err, { service: 'stt', hasKey: sendsApiKey('stt', readVoiceSettings().sttUrl) });
+        this.log.appendLine(`[voice] ${explained.detail}`);
+        this.post({ type: 'toast', variant: 'error', message: `Voice input: ${explained.message}` });
     }
 }

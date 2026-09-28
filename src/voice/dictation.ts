@@ -27,6 +27,8 @@ export interface DictationEvents {
 }
 
 const FRAME_BYTES = VAD_FRAME_SAMPLES * 2;
+/** After a replay has played, dictation keeps dropping audio this much longer: the room's echo tail. */
+const PAUSE_TAIL_MS = 300;
 
 /** When captured utterances go to STT: as each ends, or all at once when the recording stops. */
 export type TranscribeWhen = 'asSpoken' | 'onStop';
@@ -66,7 +68,7 @@ export class DictationSession {
     private proc: ChildProcess | undefined;
     private draining: Promise<void> | undefined;
     private buffered: Buffer = Buffer.alloc(0);
-    private readonly segmenter: SpeechSegmenter;
+    private segmenter: SpeechSegmenter;
     private recording = false;
     private pending = 0;
     private readonly level: MicLevelMeter;
@@ -75,11 +77,13 @@ export class DictationSession {
     private delivery: Promise<void> = Promise.resolve();
     /** Utterances waiting for `stop` (`onStop`), in speaking order. */
     private held: Int16Array[] = [];
+    /** Audio is dropped until then: a replayed message is (or just was) coming out of the speakers. */
+    private pausedUntil = 0;
 
     constructor(
         private readonly vad: SileroVad,
         private readonly stt: SttClient,
-        vadParams: SegmenterParams,
+        private readonly vadParams: SegmenterParams,
         private readonly events: DictationEvents,
         private readonly when: TranscribeWhen,
     ) {
@@ -94,6 +98,20 @@ export class DictationSession {
     /** Resolves once every transcription requested so far has been delivered. */
     get settled(): Promise<void> {
         return this.delivery;
+    }
+
+    /**
+     * Paused while a Bot view message is replayed through the speakers: without echo cancellation
+     * the microphone hears it, so the utterance in progress and everything captured until
+     * {@link PAUSE_TAIL_MS} after the pause ends is dropped, never transcribed.
+     */
+    setPaused(paused: boolean): void {
+        if (paused) {
+            this.pausedUntil = Infinity;
+            this.dropSpeech();
+        } else if (this.pausedUntil === Infinity) {
+            this.pausedUntil = Date.now() + PAUSE_TAIL_MS;
+        }
     }
 
     start(): void {
@@ -162,6 +180,9 @@ export class DictationSession {
         while (this.buffered.length >= FRAME_BYTES) {
             const bytes = this.buffered.subarray(0, FRAME_BYTES);
             this.buffered = this.buffered.subarray(FRAME_BYTES);
+            if (Date.now() < this.pausedUntil) {
+                continue;
+            }
             const frame = new Int16Array(VAD_FRAME_SAMPLES);
             for (let i = 0; i < VAD_FRAME_SAMPLES; i++) {
                 frame[i] = bytes.readInt16LE(i * 2);
@@ -175,6 +196,9 @@ export class DictationSession {
                 this.events.error(`VAD failed: ${err instanceof Error ? err.message : String(err)}`);
                 void this.stop();
                 return;
+            }
+            if (Date.now() < this.pausedUntil) {
+                continue; // paused while this frame was being scored
             }
             const wasSpeaking = this.segmenter.inSpeech;
             for (const event of this.segmenter.push(frame, confidence)) {
@@ -193,6 +217,16 @@ export class DictationSession {
             if (this.segmenter.inSpeech !== wasSpeaking) {
                 this.emitStatus();
             }
+        }
+    }
+
+    /** Forgets the utterance in progress; the VAD starts over. */
+    private dropSpeech(): void {
+        const wasSpeaking = this.segmenter.inSpeech;
+        this.segmenter = new SpeechSegmenter(this.vadParams, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE);
+        this.vad.reset();
+        if (wasSpeaking) {
+            this.emitStatus();
         }
     }
 

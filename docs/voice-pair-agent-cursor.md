@@ -190,9 +190,16 @@ flowchart LR
 **`run_in_terminal`**（`pairHands.ts`，输出清理在 `pairText.ts` 的 `cleanTerminalOutput`）：
 - 在专用的 "Pi" 终端里运行，终端显示在底部，不抢键盘。
 - 用 shell 集成的 `executeCommand` 执行，读取输出和退出码，把最后 60 行交给模型。
-- 默认等 30 s，超时后返回已有的输出，命令继续运行。
+- 默认等 30 s，超时后返回已有的输出，命令继续运行，结果里写明终端名（如 "Pi (2)"），可以接着用 `terminal_send` / `terminal_read` 操作它。
 - 上一条命令还在跑时，另开一个 "Pi (2)" 终端。
 - 终端没有 shell 集成时，只把命令发过去，并说明看不到结果。
+
+**`terminal_send` / `terminal_read`**（`pairHands.ts`，操作 `run_in_terminal` 超时后留着的交互程序，如 psql；全屏 TUI 如 vim、top 不在范围内）：
+- 超时的命令继续被跟踪：输出照样读进它的滚动缓冲（最多 200 000 字符），并记住已经给模型看过的位置。
+- `terminal_send {terminal?, text, enter?, waitSecs?}`：`terminal` 是 Pi 终端名，默认最近一个还在跑的；用 `sendText(text, enter)` 输入（`enter` 默认 true，`text` 可以为空只按回车），等到输出静下来 500 ms 或 `waitSecs`（默认 2，最多 30），只返回新输出；程序结束了就返回退出码。结果里不重复输入的文本（可能是密码）；工具描述提醒输入会回显，密码优先用 `.pgpass` 或环境变量。程序已经结束时不输入（否则会进 shell 成为新命令），只报告结束。
+- `terminal_read {terminal?}`：返回上次之后的新输出，没有新的就给最后 20 行，并说明是否还在跑。
+- 结束的命令报告一次退出码后就不再跟踪；同一终端跑新命令、终端被关掉时也丢弃。
+- 权限：`terminal_send` 和 `run_in_terminal` 一样算跑命令（Plan 拒绝，Manual 和 Edit automatically 要审批）；`terminal_read` 只读，不需要审批。两者都只在结对模式可用。
 
 **提示词约束**：
 - 只在用户明确要求时才提议进入结对模式；

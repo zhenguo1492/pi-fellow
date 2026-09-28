@@ -2,7 +2,7 @@
  * OpenAI-compatible speech-to-text (`POST {base}/audio/transcriptions`), as
  * served by OpenAI, Groq, speaches / faster-whisper-server, whisper.cpp server…
  */
-import { openAiBaseUrl, probeModels, type ModelsProbeResult } from './modelsProbe';
+import { authHeaders, modelIdsFor, openAiBaseUrl, probeModels, type ApiKeySource, type ModelsProbeResult, type ServiceOutcome } from './modelsProbe';
 
 export interface SttConfig {
     /** Base URL (`http://127.0.0.1:8010/v1`; a bare host gets `/v1`) or the full `/audio/transcriptions` URL. */
@@ -11,29 +11,32 @@ export interface SttConfig {
     model: string;
     /** ISO-639-1 hint (`zh`, `en`); empty = let the model detect it. */
     language: string;
+    /** Sent as a Bearer token on every request when it gives a key. */
+    apiKey?: ApiKeySource;
+    /** Each transcription's outcome: HTTP success (whatever the text, silence included) or the failure. */
+    onOutcome?: ServiceOutcome;
 }
 
 const TRANSCRIPTIONS_PATH = '/audio/transcriptions';
 const REQUEST_TIMEOUT_MS = 60_000;
 
 /** Lists the server's model ids; doubles as a connectivity check. */
-export async function listSttModels(url: string): Promise<string[]> {
+export async function listSttModels(url: string, apiKey?: ApiKeySource): Promise<string[]> {
     const modelsUrl = `${openAiBaseUrl(url, TRANSCRIPTIONS_PATH)}/models`;
-    const res = await fetch(modelsUrl, { signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(modelsUrl, { headers: await authHeaders(apiKey), signal: AbortSignal.timeout(10_000) });
     if (!res.ok) {
         throw new Error(`GET ${modelsUrl} → HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
     }
-    const body = (await res.json()) as { data?: { id?: unknown }[] };
-    return (body.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === 'string');
+    return modelIdsFor(await res.json(), TRANSCRIPTIONS_PATH) ?? [];
 }
 
 /** Reachable (HTTP 200 with a model list) = valid; a configured model the server lacks is only noted. */
-export async function testSttConnectivity(url: string, model?: string): Promise<ModelsProbeResult> {
+export async function testSttConnectivity(url: string, model?: string, apiKey?: ApiKeySource): Promise<ModelsProbeResult> {
     const trimmed = url.trim();
     if (!trimmed) {
         return { ok: false, message: 'Speech-to-text URL is empty', models: [] };
     }
-    const res = await probeModels(trimmed, TRANSCRIPTIONS_PATH, 'STT');
+    const res = await probeModels(trimmed, TRANSCRIPTIONS_PATH, 'STT', apiKey);
     const wanted = model?.trim();
     if (res.ok && wanted && res.models.length > 0 && !res.models.includes(wanted)) {
         return { ...res, message: `Connected (HTTP 200), but model "${wanted}" is not in server list (${res.models.join(', ')})` };
@@ -76,6 +79,17 @@ export class SttClient {
     constructor(private readonly config: SttConfig) {}
 
     async transcribe(pcm: Int16Array, sampleRate: number): Promise<string> {
+        try {
+            const text = await this._request(pcm, sampleRate);
+            this.config.onOutcome?.();
+            return text;
+        } catch (err) {
+            this.config.onOutcome?.(err);
+            throw err;
+        }
+    }
+
+    private async _request(pcm: Int16Array, sampleRate: number): Promise<string> {
         const form = new FormData();
         form.append('file', new Blob([encodeWav(pcm, sampleRate)], { type: 'audio/wav' }), 'speech.wav');
         form.append('model', await this.model());
@@ -86,6 +100,7 @@ export class SttClient {
         const endpoint = `${openAiBaseUrl(this.config.url, TRANSCRIPTIONS_PATH)}${TRANSCRIPTIONS_PATH}`;
         const res = await fetch(endpoint, {
             method: 'POST',
+            headers: await authHeaders(this.config.apiKey),
             body: form,
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
@@ -101,7 +116,7 @@ export class SttClient {
         if (configured) {
             return Promise.resolve(configured);
         }
-        this.resolvedModel ??= listSttModels(this.config.url).then((ids) => {
+        this.resolvedModel ??= listSttModels(this.config.url, this.config.apiKey).then((ids) => {
             if (ids.length === 0) {
                 throw new Error('Speech-to-text server lists no models; set oh-my-pi-chater.voice.sttModel.');
             }

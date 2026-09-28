@@ -7,24 +7,35 @@
  * cancellation scope (an AbortController): the voice agent's run, its TTS requests, the fallback
  * timer and the page's audio queue all stop on `cancelTurn`, and nothing of that turn reaches the
  * reducer afterwards. What plays, and when, comes from the audio page's reports, not estimates.
+ *
+ * Either speech service may be missing (§5.13): without STT the microphone is never opened and
+ * the user types; without TTS nothing is synthesized or played and replies are only shown as
+ * text; without both there is no audio page at all, and voice mode is a typed conversation.
  */
-import { voiceUserText, type VoiceAttachments } from '../shared/voiceViewProtocol';
+import { voiceUserText, type VoiceAttachments, type VoiceUnavailable } from '../shared/voiceViewProtocol';
 import type { CodeAnchor } from './codeAnchors';
 import { echoSource, floorFree, initialState, phaseOf, reduce, type ConvEvent, type ConvState, type Effect, type Metrics, type Phase } from './conversation';
-import { classifyBargeIn, isHallucination, type BargeInVerdict } from './echoFilter';
+import { classifyBargeIn, isEchoOf, isHallucination, type BargeInVerdict } from './echoFilter';
 import { findChrome, launchHiddenChrome, startBrowserAudio, type BrowserAudio, type PlaybackReport } from './browserAudio';
-import { TtsClient, type Pcm, type TtsConfig } from './tts';
+import type { ReplayOutput } from './replay';
+import { TtsClient, type Pcm, type TtsRequestConfig } from './tts';
 import type { ProactiveTurnHooks, VoiceAgent, VoiceTurnListener } from './voiceAgent';
 import { SileroVad, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE } from '../voice/sileroVad';
 import { MicLevelMeter, frameDb, wavePoints } from '../voice/micLevel';
 import { SpeechSegmenter } from '../voice/speechSegmenter';
 import { SttClient, listSttModels, type SttConfig } from '../voice/stt';
+import { describeError } from '../voice/modelsProbe';
+import { VoiceServiceError, explainVoiceError } from '../voice/voiceErrors';
 
 export interface VoiceModeOptions {
     agent: VoiceAgent;
     vad: { modelPath: string; runtimeDir: string };
-    stt: SttConfig;
-    tts: TtsConfig;
+    /** Speech-to-text; undefined (or no URL): voice mode cannot hear, the microphone stays closed and the user types. */
+    stt: SttConfig | undefined;
+    /** Text-to-speech; undefined (or no URL): replies are not spoken, only shown as text. */
+    tts: TtsRequestConfig | undefined;
+    /** Why `stt` / `tts` was left out, in plain words: the voice bar's tags show it. */
+    unavailable?: VoiceUnavailable;
     /** Silence that ends the user's turn (§5.2). */
     turnStopSecs: number;
     /** Silero probability at or above which a frame is speech. */
@@ -54,7 +65,20 @@ export interface VoiceModeOptions {
     onAudio?(event: ReplyAudioEvent): void;
     /** The reply points at code: called as the sentence the anchors precede starts playing. */
     onAnchors?(anchors: CodeAnchor[]): void;
+    /**
+     * Reply `turnId` has finished playing, not cut off, and every sentence it spoke was synthesized:
+     * its audio, sentence by sentence as sent to TTS, for the replay cache.
+     */
+    onSpoken?(turnId: number, pieces: Array<{ text: string; pcm: Pcm }>): void;
     log(line: string): void;
+    /**
+     * A speech service failed mid-session, the first time since it last worked (`message` in plain
+     * words). The conversation goes on: typed messages still reach the voice agent and its replies
+     * still show as text.
+     */
+    onServiceError?(service: 'stt' | 'tts', message: string): void;
+    /** The audio page could (`undefined`) or could not open the microphone; `unavailable` says so. */
+    onMicStatus?(error: string | undefined): void;
 }
 
 /**
@@ -102,6 +126,20 @@ const BOT_LEVEL_MS = 64;
 /** dBFS mapped to bot level 0 and 1: TTS output is normalized loud, speech sits around -25..-10. */
 const BOT_FLOOR_DB = -45;
 const BOT_CEIL_DB = -15;
+/** After a replay has played, the microphone stays held this much longer: the room's echo tail. */
+const REPLAY_TAIL_MS = 300;
+/** Speech starting this soon after a replay is checked against its text and dropped if it is the echo. */
+const REPLAY_ECHO_MS = 3000;
+
+/** A replay on the audio page (the Bot view's speaker button). */
+interface Replay {
+    /** As spoken: the echo reference. */
+    text: string;
+    /** Clips on the page: what to call as each starts playing and once it has played. */
+    clips: Map<number, { started?: () => void; ended: () => void }>;
+    /** Aborted when voice mode takes the speakers back. */
+    ctl: AbortController;
+}
 
 interface BargeIn {
     /** Speech-like evidence so far. */
@@ -126,8 +164,17 @@ export class VoiceMode {
     private _turn: { id: number; ctl: AbortController } | undefined;
     /** Anchors streamed since the last sentence went to TTS: they belong to the next one. */
     private _pendingAnchors: { turnId: number; anchors: CodeAnchor[] } | undefined;
-    private readonly _speaker: Speaker;
-    private readonly _stt: SttClient;
+    /** Absent without TTS: replies are only shown. Attached later when TTS becomes available (`useTts`). */
+    private _speaker: Speaker | undefined;
+    /** Absent without STT, like the VAD: the microphone is never opened. Attached later by `useStt`. */
+    private _stt: SttClient | undefined;
+    private _vad: SileroVad | undefined;
+    /** Absent without STT and TTS: nothing to hear or play. Opened when one of them is attached. */
+    private _audio: BrowserAudio | undefined;
+    /** The audio page being opened, for callers attaching a service meanwhile. */
+    private _opening: Promise<void> | undefined;
+    /** STT failed on the last utterance: its next failure is not reported again. */
+    private _sttFailed = false;
     private _segmenter: SpeechSegmenter;
     /** Owns the audio (the segmenter is not fed) from its first evidence until rejected or ended. */
     private _bargeIn: BargeIn | undefined;
@@ -139,76 +186,271 @@ export class VoiceMode {
     private _chrome: { kill(): void } | undefined;
     private _stopped = false;
     private _muted = false;
+    /** Clip ids on the audio page, shared by replies and replays. */
+    private _nextClipId = 1;
+    private _replay: Replay | undefined;
+    /** Microphone input is dropped until then after a replay, for its echo tail. */
+    private _replayTailUntil = 0;
+    /** The last replay's text: an echo reference for speech starting before `until`. */
+    private _replayEcho: { text: string; until: number } | undefined;
+    /** Input was held for a replay: the VAD and segmenter start over once it is heard again. */
+    private _heldForReplay = false;
     private readonly _level: MicLevelMeter;
+    /** The audio page could not open the microphone (getUserMedia failed): why, until it can. */
+    private _micError: string | undefined;
 
     private constructor(
         private readonly _options: VoiceModeOptions,
-        private readonly _vad: SileroVad,
-        private readonly _audio: BrowserAudio,
-        /** The STT model in use: the configured one, else the first the server lists ('' if none). */
-        readonly sttModel: string,
+        devices: { vad?: SileroVad; audio?: BrowserAudio; stt?: SttConfig; tts?: TtsRequestConfig },
+        /** The STT model in use: the configured one, else the first the server lists ('' if none or no STT). */
+        private _sttModel: string,
+        /** The speech services voice mode runs without, and why; an entry goes when its service is attached. */
+        private readonly _without: VoiceUnavailable,
     ) {
-        this._state = initialState(_options.active);
-        this._stt = new SttClient(_options.stt);
-        this._speaker = new Speaker(new TtsClient(_options.tts), _audio, (ev) => this._dispatch(ev), _options.log, (level, wave) =>
-            _options.onBotLevel?.(level, wave),
-        );
+        this._audio = devices.audio;
+        this._vad = devices.vad;
+        this._stt = devices.stt && new SttClient(devices.stt);
+        this._speaker = devices.tts && this._newSpeaker(devices.tts);
+        this._state = initialState(_options.active, this._speaker !== undefined);
         this._segmenter = this._newSegmenter();
         this._level = new MicLevelMeter((level, wave) => _options.onLevel?.(level, wave));
     }
 
-    /** Checks STT, loads the VAD, opens the audio page and waits until it is connected. */
-    static async start(options: VoiceModeOptions): Promise<VoiceMode> {
-        const { stt, tts, log } = options;
-        if (!stt.url) {
-            throw new Error('Voice mode needs a speech-to-text service: set oh-my-pi-chater.voice.sttUrl.');
-        }
-        if (!tts.url) {
-            throw new Error('Voice mode needs a text-to-speech service: set oh-my-pi-chater.voiceAgent.tts.url.');
-        }
-        const models = await listSttModels(stt.url).catch((err: unknown) => {
-            throw new Error(`Speech-to-text service unreachable (${stt.url}): ${err instanceof Error ? err.message : String(err)}`);
-        });
-        const vad = await SileroVad.load(options.vad.modelPath, options.vad.runtimeDir);
-        let mode: VoiceMode | undefined;
-        const connected = Promise.withResolvers<void>();
-        const audio = await startBrowserAudio({
-            mic: (chunk) => mode?._onMic(chunk),
-            playback: (report) => mode?._speaker.onPlayback(report),
-            connected: (on) => {
-                log(on ? 'Audio page connected.' : 'Audio page disconnected.');
-                if (on) {
-                    connected.resolve();
-                }
+    /** Plays on the audio page, which is open whenever replies are voiced. */
+    private _newSpeaker(tts: TtsRequestConfig): Speaker {
+        return new Speaker(
+            new TtsClient(tts),
+            {
+                play: (pcm) => {
+                    const clipId = this._nextClipId++;
+                    this._audio?.play(clipId, pcm.data, pcm.rate);
+                    return clipId;
+                },
+                // A flush drops every clip on the page, a replay's too.
+                flush: () => {
+                    this._preemptReplay('a reply was cut off');
+                    this._audio?.flush();
+                },
             },
-            log,
-        });
-        mode = new VoiceMode(options, vad, audio, stt.model.trim() || (models[0] ?? ''));
-        audio.setMic(options.active);
+            (ev) => this._dispatch(ev),
+            this._options.log,
+            (level, wave) => this._options.onBotLevel?.(level, wave),
+            (message) => this._options.onServiceError?.('tts', message),
+        );
+    }
+
+    /** The STT model in use: the configured one, else the first the server listed ('' if unknown or no STT). */
+    get sttModel(): string {
+        return this._sttModel;
+    }
+
+    /**
+     * Why voice mode runs without hearing (`stt`) or speaking (`tts`), in plain words: a service it
+     * runs without, or a microphone the audio page cannot open.
+     */
+    get unavailable(): VoiceUnavailable {
+        const mic = this._micError && `Can't open the microphone (${this._micError}). Check that one is connected and no other app holds it, then start the voice agent again.`;
+        const stt = this._without.stt ?? mic;
+        return { ...this._without, ...(stt ? { stt } : {}) };
+    }
+
+    /** Whether voice mode hears with STT / speaks with TTS now (it may still fail request by request). */
+    uses(service: 'stt' | 'tts'): boolean {
+        return service === 'stt' ? this._stt !== undefined : this._speaker !== undefined;
+    }
+
+    /**
+     * Hears with `config` from now on (design §5.13). Voice mode running without STT checks it,
+     * loads the VAD and has the audio page open the microphone (opening the page if there is none);
+     * already hearing, the next utterance goes to the new settings. Throws, and stays as it was, if
+     * the service or the page fails; `unavailable.stt` then says why.
+     */
+    async useStt(config: SttConfig): Promise<void> {
+        if (this._stopped) {
+            return;
+        }
+        if (this._stt) {
+            this._stt = new SttClient(config);
+            this._sttModel = config.model.trim();
+            this._sttFailed = false;
+            return;
+        }
+        try {
+            const models = await listSttModels(config.url, config.apiKey).catch(async (err: unknown) => {
+                config.onOutcome?.(err);
+                throw new VoiceServiceError('stt', err, Boolean((await config.apiKey?.())?.trim()));
+            });
+            const vad = this._vad ?? (await SileroVad.load(this._options.vad.modelPath, this._options.vad.runtimeDir));
+            if (this._stopped || this._stt) {
+                return;
+            }
+            this._vad = vad;
+            this._stt = new SttClient(config);
+            this._sttModel = config.model.trim() || (models[0] ?? '');
+            this._sttFailed = false;
+            this._dropHeardAudio();
+            await this._openAudio();
+        } catch (err) {
+            this._stt = undefined;
+            this._without.stt = explainVoiceError(err, { service: 'stt' }).message;
+            throw err;
+        }
+        delete this._without.stt;
+        this._options.log('Speech-to-text is available: voice mode listens again.');
+    }
+
+    /**
+     * Speaks with `config` from now on (design §5.13). Voice mode running without TTS opens the
+     * audio page if there is none and voices replies from the next one on (a reply being shown as
+     * text stays text); already speaking, the next sentence goes to the new settings. Throws, and
+     * stays as it was, if the page fails; `unavailable.tts` then says why.
+     */
+    async useTts(config: TtsRequestConfig): Promise<void> {
+        if (this._stopped) {
+            return;
+        }
+        if (this._speaker) {
+            this._speaker.setClient(new TtsClient(config));
+            return;
+        }
+        try {
+            await this._openAudio();
+        } catch (err) {
+            this._without.tts = explainVoiceError(err, { service: 'tts' }).message;
+            throw err;
+        }
+        if (this._stopped || this._speaker) {
+            return;
+        }
+        this._speaker = this._newSpeaker(config);
+        delete this._without.tts;
+        this._dispatch({ type: 'voiced', voiced: true, at: Date.now() });
+        this._options.log('Text-to-speech is available: replies are spoken again, from the next one.');
+    }
+
+    /**
+     * Opens the audio page if it is not open (a hidden Chrome, else the default browser) and waits
+     * until it connects; it captures the microphone while STT is attached.
+     */
+    private async _openAudio(): Promise<void> {
+        if (!this._audio) {
+            this._opening ??= this._launchAudio().finally(() => {
+                this._opening = undefined;
+            });
+            await this._opening;
+        }
+        if (this._stt) {
+            this._audio?.enableCapture();
+        }
+        this._setMic(this._state.active);
+    }
+
+    private async _launchAudio(): Promise<void> {
+        const { log } = this._options;
+        const connected = Promise.withResolvers<void>();
+        const audio = await startBrowserAudio(
+            {
+                mic: (chunk) => this._onMic(chunk),
+                micStatus: (error) => this._onMicStatus(error),
+                playback: (report) => this._onPlayback(report),
+                connected: (on) => {
+                    log(on ? 'Audio page connected.' : 'Audio page disconnected.');
+                    if (on) {
+                        connected.resolve();
+                    }
+                },
+                log,
+            },
+            { capture: this._stt !== undefined },
+        );
+        if (this._stopped) {
+            audio.close();
+            return;
+        }
+        this._audio = audio;
+        this._setMic(this._state.active);
         const chrome = findChrome();
-        if (chrome) {
-            mode._chrome = launchHiddenChrome(chrome, audio.url, options.chromeArgs, log);
-            log(`Hidden browser: ${chrome}`);
-            const timeout = setTimeout(() => connected.reject(new Error('The hidden audio page did not connect.')), CONNECT_TIMEOUT_MS);
+        if (!chrome) {
+            log('No Chrome, Edge, Chromium or Brave found: opening the audio page in the default browser. Keep that tab open.');
+            this._options.openExternal(audio.url);
+            return;
+        }
+        const hidden = launchHiddenChrome(chrome, audio.url, this._options.chromeArgs, log);
+        this._chrome = hidden;
+        log(`Hidden browser: ${chrome}`);
+        const timeout = setTimeout(() => connected.reject(new Error('The hidden audio page did not connect.')), CONNECT_TIMEOUT_MS);
+        try {
+            await connected.promise;
+        } catch (err) {
+            // Nothing is left half open: the next attempt starts over.
+            hidden.kill();
+            audio.close();
+            if (this._audio === audio) {
+                this._audio = undefined;
+                this._chrome = undefined;
+            }
+            throw err;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    /**
+     * Checks STT, loads the VAD, opens the audio page and waits until it is connected. A speech
+     * service left out, or STT failing its check, is not an error: voice mode runs without it
+     * (`unavailable` says why), and without both it opens no audio page.
+     */
+    static async start(options: VoiceModeOptions): Promise<VoiceMode> {
+        const { log } = options;
+        const unavailable: VoiceUnavailable = {};
+        let stt = options.stt?.url ? options.stt : undefined;
+        const tts = options.tts?.url ? options.tts : undefined;
+        if (!stt) {
+            unavailable.stt = options.unavailable?.stt ?? 'Speech-to-text is not set up: choose it in Settings → Voice.';
+        }
+        if (!tts) {
+            unavailable.tts = options.unavailable?.tts ?? 'Text-to-speech is not set up: choose it in Settings → Voice.';
+        }
+        let sttModel = '';
+        if (stt) {
+            const config = stt;
             try {
-                await connected.promise;
+                const models = await listSttModels(config.url, config.apiKey);
+                sttModel = config.model.trim() || (models[0] ?? '');
+            } catch (err) {
+                // A real failure of the service: readiness hears of it too.
+                config.onOutcome?.(err);
+                const hasKey = Boolean((await config.apiKey?.())?.trim());
+                unavailable.stt = explainVoiceError(new VoiceServiceError('stt', err, hasKey)).message;
+                log(`Speech-to-text failed its check: ${unavailable.stt} (${describeError(err)})`);
+                stt = undefined;
+            }
+        }
+        if (unavailable.stt) {
+            log('Voice mode does not listen: speech-to-text is unavailable. Type to the voice agent instead.');
+        }
+        if (unavailable.tts) {
+            log('Voice mode does not speak: text-to-speech is unavailable. Replies are shown as text.');
+        }
+        const vad = stt ? await SileroVad.load(options.vad.modelPath, options.vad.runtimeDir) : undefined;
+        const mode = new VoiceMode(options, { vad, stt, tts }, sttModel, unavailable);
+        if (stt || tts) {
+            try {
+                await mode._openAudio();
             } catch (err) {
                 await mode.stop();
                 throw err;
-            } finally {
-                clearTimeout(timeout);
             }
         } else {
-            log('No Chrome, Edge, Chromium or Brave found: opening the audio page in the default browser. Keep that tab open.');
-            options.openExternal(audio.url);
+            log('Neither speech service is available: no audio page. Type to the voice agent; its replies are shown as text.');
         }
         options.onPhase(phaseOf(mode._state));
         return mode;
     }
 
-    /** Someone is talking, being transcribed, or being answered: the voice agent should not speak up. */
+    /** Someone is talking, being transcribed, or being answered, or a message is being replayed: the voice agent should not speak up. */
     get floorBusy(): boolean {
-        return !floorFree(this._state);
+        return !floorFree(this._state) || this._replay !== undefined;
     }
 
     /**
@@ -230,28 +472,68 @@ export class VoiceMode {
 
     /**
      * Muted, the page's microphone is off and nothing is heard; a reply keeps playing. Speech in
-     * progress is dropped, like standing by.
+     * progress is dropped, like standing by. Without STT there is no microphone to mute.
      */
     setMuted(muted: boolean): void {
-        if (this._stopped || muted === this._muted) {
+        if (this._stopped || muted === this._muted || !this._stt) {
             return;
         }
         this._muted = muted;
-        this._audio.setMic(this._state.active && !muted);
+        this._setMic(this._state.active);
         if (muted) {
-            this._dropHeardAudio();
-            if (this._state.userSpeaking) {
-                const now = Date.now();
-                this._dispatch({ type: 'userSpeechEnd', at: now, silenceAt: now });
-                this._dispatch({ type: 'transcript', text: '', at: now });
-            }
-            this._options.onLevel?.(0);
+            this._abandonHeardSpeech();
         }
         this._options.log(muted ? 'Microphone muted.' : 'Microphone unmuted.');
     }
 
-    /** Stops the reply being spoken, as if the user had interrupted it without a new message. */
+    /** The page's microphone is on while this window has the voice, unmuted, and there is STT to hear with. */
+    private _setMic(active: boolean): void {
+        this._audio?.setMic(this._stt !== undefined && active && !this._muted);
+    }
+
+    /**
+     * Takes the audio page for a replay of `text` (the Bot view's speaker button), which Chrome's echo
+     * canceller then removes from the microphone like a reply. Refused while a reply is being
+     * synthesized or played. Until the replay is over, and {@link REPLAY_TAIL_MS} after, microphone
+     * input is dropped, and for {@link REPLAY_ECHO_MS} speech that repeats `text` is dropped as its
+     * echo. The voice agent starting to speak, hush, standing by or stopping ends it (`signal`).
+     * Undefined without an audio page (no STT and no TTS): the Bot view plays it.
+     */
+    beginReplay(text: string): ReplayOutput | string | undefined {
+        if (this._stopped) {
+            return 'Voice mode is stopping.';
+        }
+        const audio = this._audio;
+        if (!audio) {
+            return undefined;
+        }
+        if (this._state.ttsActive || this._state.botSpeaking) {
+            return 'The voice agent is speaking; replay the message once it has finished.';
+        }
+        this._endReplay(this._replay);
+        const replay: Replay = { text, clips: new Map(), ctl: new AbortController() };
+        this._replay = replay;
+        this._abandonHeardSpeech();
+        this._options.log('Replaying a message: the microphone is held until it has played.');
+        return {
+            signal: replay.ctl.signal,
+            play: (pcm, onPlaying) =>
+                new Promise<void>((resolve) => {
+                    if (this._replay !== replay) {
+                        resolve();
+                        return;
+                    }
+                    const clipId = this._nextClipId++;
+                    replay.clips.set(clipId, { started: onPlaying, ended: resolve });
+                    audio.play(clipId, pcm.data, pcm.rate);
+                }),
+            end: () => this._endReplay(replay),
+        };
+    }
+
+    /** Stops the reply being spoken, as if the user had interrupted it without a new message; a replay too. */
     hush(): void {
+        this._preemptReplay('hushed');
         this._dispatch({ type: 'hush', at: Date.now() });
     }
 
@@ -263,8 +545,9 @@ export class VoiceMode {
         if (this._stopped || active === this._state.active) {
             return;
         }
-        this._audio.setMic(active && !this._muted);
+        this._setMic(active);
         if (!active) {
+            this._preemptReplay('another window has the voice');
             this._dropHeardAudio();
         }
         this._options.log(active ? 'This window has the voice.' : 'Another VS Code window has the voice; this one stands by.');
@@ -281,9 +564,10 @@ export class VoiceMode {
             return;
         }
         this._stopped = true;
+        this._preemptReplay('voice mode stopped');
         this._turn?.ctl.abort();
         this._chrome?.kill();
-        this._audio.close();
+        this._audio?.close();
     }
 
     private _dispatch(ev: ConvEvent): void {
@@ -306,6 +590,10 @@ export class VoiceMode {
         if (after.lastMetrics && after.lastMetrics !== before.lastMetrics && before.bot) {
             const turnId = before.bot.turnId;
             this._options.onAudio?.({ turnId, type: 'idle' });
+            const spoken = this._speaker?.takeSpoken(turnId);
+            if (spoken) {
+                this._options.onSpoken?.(turnId, spoken);
+            }
             this._logLatency(after.lastMetrics);
             this._options.onMetrics?.(turnId, after.lastMetrics);
         }
@@ -337,7 +625,9 @@ export class VoiceMode {
                 this._turn = { id: effect.turnId, ctl: new AbortController() };
                 return;
             case 'speak':
-                if (this._turn?.id === effect.turnId) {
+                if (this._turn?.id === effect.turnId && this._speaker) {
+                    // The voice agent speaks: a replay stops before the reply's audio reaches the page.
+                    this._preemptReplay('the voice agent is speaking');
                     this._options.onAudio?.({ turnId: effect.turnId, type: 'speak', text: effect.text });
                     const anchors = this._pendingAnchors?.turnId === effect.turnId ? this._pendingAnchors.anchors : [];
                     this._pendingAnchors = undefined;
@@ -362,7 +652,8 @@ export class VoiceMode {
 
     /**
      * Feeds one reply's text and end into the reducer, besides `log`; silent once the turn is cut off.
-     * Anchors go to `log` as they stream and to `onAnchors` as the sentence they precede starts playing.
+     * Anchors go to `log` as they stream and to `onAnchors` as the sentence they precede starts
+     * playing, or at once when replies are not spoken.
      */
     private _replyListener(turn: { id: number; ctl: AbortController }, log: VoiceTurnListener): VoiceTurnListener {
         const live = () => !turn.ctl.signal.aborted;
@@ -377,6 +668,10 @@ export class VoiceMode {
             onAnchor: (anchor) => {
                 log.onAnchor?.(anchor);
                 if (!live()) {
+                    return;
+                }
+                if (!this._speaker) {
+                    this._options.onAnchors?.([anchor]);
                     return;
                 }
                 if (this._pendingAnchors?.turnId !== turn.id) {
@@ -419,7 +714,74 @@ export class VoiceMode {
         this._buffered = Buffer.alloc(0);
         this._bargeIn = undefined;
         this._segmenter = this._newSegmenter();
-        this._vad.reset();
+        this._vad?.reset();
+    }
+
+    /** Drops what is being heard, ending the user's turn in progress with nothing said, and zeroes the mic level. */
+    private _abandonHeardSpeech(): void {
+        this._dropHeardAudio();
+        if (this._state.userSpeaking) {
+            const now = Date.now();
+            this._dispatch({ type: 'userSpeechEnd', at: now, silenceAt: now });
+            this._dispatch({ type: 'transcript', text: '', at: now });
+        }
+        this._options.onLevel?.(0);
+    }
+
+    // ── replays of Bot view messages ─────────────────────────────────────────
+
+    /** A replay holds the microphone while it plays and for its echo tail. */
+    private _replayHoldsInput(): boolean {
+        return this._replay !== undefined || Date.now() < this._replayTailUntil;
+    }
+
+    /** The replay text speech starting at `at` could be the echo of, else ''. */
+    private _replayEchoText(at: number): string {
+        return this._replay?.text ?? (this._replayEcho && at < this._replayEcho.until ? this._replayEcho.text : '');
+    }
+
+    /** Ends `replay` if it is the current one: drops its clips still on the page and starts the echo tail. */
+    private _endReplay(replay: Replay | undefined): void {
+        if (!replay || this._replay !== replay) {
+            return;
+        }
+        this._replay = undefined;
+        if (replay.clips.size > 0) {
+            // Only the replay is on the page: a reply refuses or ends a replay before its audio goes out.
+            this._audio?.flush();
+            for (const clip of replay.clips.values()) {
+                clip.ended();
+            }
+            replay.clips.clear();
+        }
+        const now = Date.now();
+        this._replayTailUntil = now + REPLAY_TAIL_MS;
+        this._replayEcho = { text: replay.text, until: now + REPLAY_ECHO_MS };
+    }
+
+    /** Voice mode takes the speakers back from a replay. */
+    private _preemptReplay(why: string): void {
+        const replay = this._replay;
+        if (replay) {
+            this._options.log(`Replay stopped: ${why}.`);
+            this._endReplay(replay);
+            replay.ctl.abort();
+        }
+    }
+
+    /** The page's report on a clip: a replay's, else the reply speaker's. */
+    private _onPlayback(report: PlaybackReport): void {
+        const clip = this._replay?.clips.get(report.clipId);
+        if (!clip) {
+            this._speaker?.onPlayback(report);
+            return;
+        }
+        if (report.type === 'started') {
+            clip.started?.();
+        } else {
+            this._replay!.clips.delete(report.clipId);
+            clip.ended();
+        }
     }
 
     // ── microphone → VAD → segments / barge-in → STT ─────────────────────────
@@ -438,10 +800,30 @@ export class VoiceMode {
         );
     }
 
+    /** The page reports whether it could open the microphone; only a change is passed on. */
+    private _onMicStatus(error: string | undefined): void {
+        if (this._stopped || error === this._micError) {
+            return;
+        }
+        this._micError = error;
+        this._options.log(error ? `The audio page could not open the microphone: ${error}` : 'The audio page opened the microphone.');
+        this._options.onMicStatus?.(error);
+    }
+
     private _onMic(chunk: Buffer): void {
         // Standing by or muted: the page's track is off, and any frames still in flight are not ours to hear.
-        if (!this._state.active || this._muted) {
+        // Without STT the page captures nothing; nothing is ours to hear either.
+        if (!this._stt || !this._state.active || this._muted) {
             return;
+        }
+        // A replay plays: whatever the microphone hears now is not the user's turn.
+        if (this._replayHoldsInput()) {
+            this._heldForReplay = true;
+            return;
+        }
+        if (this._heldForReplay) {
+            this._heldForReplay = false;
+            this._dropHeardAudio();
         }
         this._buffered = this._buffered.length ? Buffer.concat([this._buffered, chunk]) : chunk;
         if (!this._draining) {
@@ -470,12 +852,16 @@ export class VoiceMode {
     }
 
     private async _onFrame(frame: Int16Array): Promise<void> {
+        const vad = this._vad;
+        if (!vad) {
+            return;
+        }
         const db = frameDb(frame);
         this._level.push(frame, db);
         const loud = db >= BARGE_IN_DB;
-        const confidence = await this._vad.confidence(frame);
-        if (!this._state.active || this._muted) {
-            return; // lost the voice or got muted while this frame was being scored
+        const confidence = await vad.confidence(frame);
+        if (!this._state.active || this._muted || this._replayHoldsInput()) {
+            return; // lost the voice, got muted or a replay started while this frame was being scored
         }
         this._recent.push(frame);
         if (this._recent.length > BARGE_IN_PREROLL_FRAMES) {
@@ -509,7 +895,7 @@ export class VoiceMode {
             }
         }
         if (wasSpeaking && !this._segmenter.inSpeech) {
-            this._vad.reset();
+            vad.reset();
         }
     }
 
@@ -545,11 +931,14 @@ export class VoiceMode {
     }
 
     private _verifyBargeIn(candidate: BargeIn): void {
+        const stt = this._stt;
+        if (!stt) {
+            return; // unreachable: without STT nothing is captured
+        }
         candidate.verifying = true;
         const pcm = concatFrames(candidate.frames.slice(-BARGE_IN_WINDOW_FRAMES));
-        const botText = echoSource(this._state);
-        this._stt
-            .transcribe(pcm, VAD_SAMPLE_RATE)
+        const botText = `${echoSource(this._state)} ${this._replayEchoText(Date.now())}`.trim();
+        stt.transcribe(pcm, VAD_SAMPLE_RATE)
             .then(
                 (text) => ({ text, verdict: classifyBargeIn(text, botText) }),
                 (err: unknown) => ({ text: '', verdict: { kind: 'reject', reason: `STT failed: ${String(err)}` } as BargeInVerdict }),
@@ -574,25 +963,39 @@ export class VoiceMode {
     private _endBargeIn(): void {
         this._bargeIn = undefined;
         this._segmenter = this._newSegmenter();
-        this._vad.reset();
+        this._vad?.reset();
     }
 
     /** One utterance ended. `fallback`: text a barge-in check already heard, for when the whole transcribes badly. */
     private _finishSegment(pcm: Int16Array, fallback?: string): void {
+        const stt = this._stt;
+        if (!stt) {
+            return; // unreachable: without STT nothing is captured
+        }
         const now = Date.now();
+        const echoOf = this._replayEchoText(now - (pcm.length / VAD_SAMPLE_RATE) * 1000);
         this._dispatch({ type: 'userSpeechEnd', at: now, silenceAt: now - this._options.turnStopSecs * 1000 });
-        const result = this._stt.transcribe(pcm, VAD_SAMPLE_RATE).then(
+        const result = stt.transcribe(pcm, VAD_SAMPLE_RATE).then(
             (text) => ({ text }),
-            (err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }),
+            (err: unknown) => ({ error: describeError(err) }),
         );
         this._delivery = this._delivery.then(async () => {
             const outcome = await result;
             let text = 'text' in outcome ? outcome.text : '';
             if ('error' in outcome) {
-                this._options.log(`Speech-to-text failed: ${outcome.error}`);
+                const message = explainVoiceError(outcome.error, { service: 'stt' }).message;
+                this._options.log(`Speech-to-text failed: ${message} (${outcome.error})`);
+                if (!this._sttFailed) {
+                    this._options.onServiceError?.('stt', message);
+                }
             }
+            this._sttFailed = 'error' in outcome;
             if (isHallucination(text)) {
                 this._options.log(`Dropped a speech-to-text hallucination: "${text}"`);
+                text = '';
+            }
+            if (echoOf && text.trim() && isEchoOf(text, echoOf)) {
+                this._options.log(`Dropped the echo of a replayed message: "${text}"`);
                 text = '';
             }
             if (!text.trim() && fallback) {
@@ -638,6 +1041,12 @@ interface Clip {
     onPlaying?: () => void;
 }
 
+/** The audio page as the reply speaker uses it: `play` names the clip (ids are shared with replays). */
+interface SpeakerAudio {
+    play(pcm: Pcm): number;
+    flush(): void;
+}
+
 /**
  * Synthesizes sentences concurrently and plays them in order on the audio page, which reports when
  * each clip really starts and ends (pipecat's output transport). Everything is scoped to the turn's
@@ -649,20 +1058,23 @@ class Speaker {
     private _pumping = false;
     /** Clips sent to the page, by clip id, until it reports them ended. */
     private readonly _onPage = new Map<number, { clip: Clip; pcm: Pcm; started: boolean }>();
-    private _nextClipId = 1;
     private _turnSignal: AbortSignal | undefined;
     private _ttsFailed = false;
     /** Armed while nothing is synthesizing or playing: the bot has fallen silent once it fires. */
     private _fallback: NodeJS.Timeout | undefined;
     /** Reports the level of the clip playing now, timed from the page's `started` report. */
     private _meter: { clipId: number; timer: NodeJS.Timeout } | undefined;
+    /** The audio of the reply being spoken, sentence by sentence; `undefined` for a sentence TTS failed on. */
+    private _spoken: { turnId: number; pieces: Array<{ text: string; pcm?: Pcm }> } | undefined;
 
     constructor(
-        private readonly _tts: TtsClient,
-        private readonly _audio: BrowserAudio,
+        private _tts: TtsClient,
+        private readonly _audio: SpeakerAudio,
         private readonly _dispatch: (ev: ConvEvent) => void,
         private readonly _log: (line: string) => void,
         private readonly _onLevel: (level: number, wave?: number[]) => void,
+        /** TTS failed, the first time since it last worked: what went wrong, in plain words. */
+        private readonly _onError: (message: string) => void,
     ) {}
 
     enqueue(signal: AbortSignal, turnId: number, text: string, onPlaying?: () => void): void {
@@ -679,6 +1091,19 @@ class Speaker {
         audio.catch(() => undefined);
         this._queue.push({ turnId, text, signal, audio, onPlaying });
         void this._pump();
+    }
+
+    /** New TTS settings: sentences from now on are synthesized with `tts`; those already sent keep theirs. */
+    setClient(tts: TtsClient): void {
+        this._tts = tts;
+        this._ttsFailed = false;
+    }
+
+    /** Reply `turnId`'s audio, if every sentence of it was synthesized; forgotten either way. */
+    takeSpoken(turnId: number): Array<{ text: string; pcm: Pcm }> | undefined {
+        const spoken = this._spoken?.turnId === turnId ? this._spoken.pieces : [];
+        this._spoken = undefined;
+        return spoken.length > 0 && spoken.every((piece): piece is { text: string; pcm: Pcm } => piece.pcm !== undefined) ? spoken : undefined;
     }
 
     /** The page's report on a clip; clips of a cut-off turn are no longer known here. */
@@ -731,7 +1156,9 @@ class Speaker {
                 if (!clip.signal.aborted && !this._ttsFailed) {
                     // Once per failure streak: a dead service would otherwise log every sentence.
                     this._ttsFailed = true;
-                    this._log(`Text-to-speech failed: ${err instanceof Error ? err.message : String(err)}`);
+                    const message = explainVoiceError(err, { service: 'tts' }).message;
+                    this._log(`Text-to-speech failed: ${message} (${describeError(err)})`);
+                    this._onError(message);
                 }
             }
             if (this._queue[0] !== clip) {
@@ -739,10 +1166,13 @@ class Speaker {
             }
             this._queue.shift();
             last = clip;
+            if (this._spoken?.turnId !== clip.turnId) {
+                this._spoken = { turnId: clip.turnId, pieces: [] };
+            }
+            this._spoken.pieces.push({ text: clip.text, pcm });
             if (pcm) {
-                const clipId = this._nextClipId++;
-                this._onPage.set(clipId, { clip, pcm, started: false });
-                this._audio.play(clipId, pcm.data, pcm.rate);
+                // Reports arrive asynchronously: registering after `play` misses none.
+                this._onPage.set(this._audio.play(pcm), { clip, pcm, started: false });
             } else {
                 clip.onPlaying?.();
             }

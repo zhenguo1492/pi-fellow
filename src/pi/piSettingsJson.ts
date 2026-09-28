@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { AgentBackend } from './agentBackend';
 import { getPiAgentDir } from './piCliPaths';
 
 export interface PiSettingsJson {
@@ -15,12 +16,13 @@ export interface PiSettingsJson {
     [key: string]: unknown;
 }
 
-function settingsPath(): string {
-    return path.join(getPiAgentDir(), 'settings.json');
+/** `<agent dir>/settings.json` of `backend`, else of the window's backend. */
+function settingsPath(backend?: AgentBackend): string {
+    return path.join(getPiAgentDir(backend), 'settings.json');
 }
 
-export function readPiSettingsJson(): PiSettingsJson {
-    const filePath = settingsPath();
+export function readPiSettingsJson(backend?: AgentBackend): PiSettingsJson {
+    const filePath = settingsPath(backend);
     if (!fs.existsSync(filePath)) {
         return {};
     }

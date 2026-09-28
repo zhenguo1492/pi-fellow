@@ -3,7 +3,6 @@ import type {
     SettingsClientMessage,
     SettingsServerMessage,
     SettingsData,
-    SkillInfo,
     AgentBackend,
     VoiceSettings,
 } from '../shared/protocol';
@@ -33,9 +32,12 @@ import { showPiPackageCatalogPicker } from '../pi/piPackageCatalogPicker';
 import { loadMcpSettingsSnapshot, probeMcpServer, setMcpServerEnabled } from '../pi/mcpConfig';
 import { getMissingRecommendedPackages } from '../pi/recommendedPackages';
 import { getAgentLayout, getAvailableBackends, onDidChangeWindowBackend, setWindowBackend } from '../pi/piCliPaths';
-import { rebuildAgentNativeModules } from '../pi/piExtensionCompat';
 import { runPiLoginFlow, runPiLogoutFlow } from '../pi/slashCommands';
+import { builtinVoiceEngineUrl, builtinVoiceStatus } from '../voice/builtinEngine/engine';
+import { STT_MODEL } from '../voice/builtinEngine/models';
+import { describeError, type ModelsProbeResult } from '../voice/modelsProbe';
 import { testSttConnectivity } from '../voice/stt';
+import { explainVoiceError } from '../voice/voiceErrors';
 import { VoiceDryRun } from '../voice/voiceDryRun';
 import {
     onVoiceReadinessChange,
@@ -43,40 +45,51 @@ import {
     readVoiceSettings,
     recordSttCheck,
     recordTtsCheck,
+    resolveSttConfig,
+    resolveTtsConfig,
     saveTtsSettings,
     saveVoiceSettings,
+    sendsApiKey,
+    setVoiceApiKey,
+    ownVoiceServers,
+    voiceApiKeysSet,
     voiceReadiness,
 } from '../voice/voiceSettings';
 import { testTtsConnectivity, type TtsConfig } from '../voiceAgent/tts';
+import { CLOUD_PROVIDERS } from '../shared/voicePresets';
+import { DEFAULT_TRANSLATION_LANGUAGE } from '../shared/translationLanguages';
+import { DEFAULT_SPEAKER_NAMES, type VoiceSpeakerId } from '../shared/voiceSpeakers';
+import { pickAvatar, resolveSpeakers } from '../voiceAgent/speakers';
 
-const API_KEY_PREFIX = 'oh-my-pi-chater.apiKey.';
+type VoiceServiceId = 'stt' | 'tts';
+const VOICE_SERVICE_NAMES: Record<VoiceServiceId, string> = { stt: 'speech-to-text', tts: 'text-to-speech' };
 
 export class SettingsPanel {
     private static _instance: SettingsPanel | undefined;
     private _panel: vscode.WebviewPanel;
     private _extensionUri: vscode.Uri;
-    private _secrets: vscode.SecretStorage;
-    private _piSession: PiChatSession | undefined;
+    /** The chat tab shown in the sidebar; asked on every use, so tab and backend switches are followed. */
+    private _getSession: () => PiChatSession | undefined;
     private _currentBackend: AgentBackend;
     private _extensionVersion: string;
     private _outputChannel: vscode.OutputChannel | undefined;
     private _disposables: vscode.Disposable[] = [];
     private _mcpProbeResults = new Map<string, { ok: boolean; message: string }>();
     private _voiceDryRun: VoiceDryRun;
+    /** The Voice tab has unsaved changes (the webview says so): closing the panel then warns. */
+    private _voiceDirty = false;
 
     private constructor(
         panel: vscode.WebviewPanel,
         extensionUri: vscode.Uri,
-        secrets: vscode.SecretStorage,
         extensionVersion: string,
-        piSession?: PiChatSession,
+        getSession: () => PiChatSession | undefined,
         outputChannel?: vscode.OutputChannel,
     ) {
         this._panel = panel;
         this._extensionUri = extensionUri;
-        this._secrets = secrets;
         this._extensionVersion = extensionVersion;
-        this._piSession = piSession;
+        this._getSession = getSession;
         this._currentBackend = getAgentLayout().backend;
         this._outputChannel = outputChannel;
         this._voiceDryRun = new VoiceDryRun(extensionUri, (message) => this._post(message));
@@ -116,12 +129,17 @@ export class SettingsPanel {
 
     static show(
         extensionUri: vscode.Uri,
-        secrets: vscode.SecretStorage,
-        piSession?: PiChatSession,
+        getSession: () => PiChatSession | undefined,
         extensionVersion?: string,
         outputChannel?: vscode.OutputChannel,
     ): void {
-        SettingsPanel._open(extensionUri, secrets, piSession, extensionVersion, outputChannel);
+        SettingsPanel._open(extensionUri, getSession, extensionVersion, outputChannel);
+    }
+
+    /** The shown chat tab's session when it runs the backend this panel shows; actions never reach another backend's CLI. */
+    private get _piSession(): PiChatSession | undefined {
+        const session = this._getSession();
+        return session?.backend === this._currentBackend ? session : undefined;
     }
 
     /** Open settings and scroll to a section (e.g. from /mcp in chat). */
@@ -143,13 +161,12 @@ export class SettingsPanel {
 
     private static _open(
         extensionUri: vscode.Uri,
-        secrets: vscode.SecretStorage,
-        piSession?: PiChatSession,
+        getSession: () => PiChatSession | undefined,
         extensionVersion?: string,
         outputChannel?: vscode.OutputChannel,
     ): void {
         if (SettingsPanel._instance) {
-            SettingsPanel._instance._piSession = piSession;
+            SettingsPanel._instance._getSession = getSession;
             SettingsPanel._instance._currentBackend = getAgentLayout().backend;
             if (outputChannel) {
                 SettingsPanel._instance._outputChannel = outputChannel;
@@ -164,7 +181,7 @@ export class SettingsPanel {
 
         const panel = vscode.window.createWebviewPanel(
             'oh-my-pi-chater.settings',
-            'Oh My Pi Chater Settings',
+            'PI Buddy Settings',
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
@@ -176,9 +193,8 @@ export class SettingsPanel {
         SettingsPanel._instance = new SettingsPanel(
             panel,
             extensionUri,
-            secrets,
             extensionVersion ?? '0.0.0',
-            piSession,
+            getSession,
             outputChannel,
         );
     }
@@ -191,24 +207,6 @@ export class SettingsPanel {
                     break;
                 case 'updateSetting':
                     await this._updateSetting(msg.key, msg.value);
-                    break;
-                case 'setApiKey':
-                    if (isSyncWithPiCli()) {
-                        this._post({
-                            type: 'error',
-                            message: 'API keys live in ~/.pi/agent/auth.json. Use Configure provider (/login) or Open auth.json.',
-                        });
-                        return;
-                    }
-                    await this._secrets.store(`${API_KEY_PREFIX}${msg.provider}`, msg.key);
-                    await this._sendSettings();
-                    break;
-                case 'clearApiKey':
-                    if (isSyncWithPiCli()) {
-                        return;
-                    }
-                    await this._secrets.delete(`${API_KEY_PREFIX}${msg.provider}`);
-                    await this._sendSettings();
                     break;
                 case 'getSkills':
                     await this._sendSkills();
@@ -257,20 +255,25 @@ export class SettingsPanel {
                     await showPiPackageCatalogPicker(this._piSession, this._outputChannel);
                     await this._sendSettings();
                     break;
+                case 'pickAvatar':
+                    await pickAvatar(msg.speaker);
+                    break;
                 case 'openExternalUrl':
                     await vscode.env.openExternal(vscode.Uri.parse(msg.url));
                     break;
                 case 'addPiExtensionPath':
-                    await addPiExtensionPath(msg.path, this._piSession);
+                    await addPiExtensionPath(msg.path, this._currentBackend);
+                    schedulePiSessionReload(this._piSession, this._outputChannel);
                     await this._afterPiConfigChange('Extension path added');
                     break;
                 case 'removePiExtensionPath':
-                    await removePiExtensionPathAt(msg.index, this._piSession);
+                    await removePiExtensionPathAt(msg.index, this._currentBackend);
                     schedulePiSessionReload(this._piSession, this._outputChannel);
                     await this._afterPiConfigChange('Extension path removed');
                     break;
                 case 'addPiSkillPath':
                     await addPiSkillPath(msg.path, this._piSession, this._currentBackend);
+                    schedulePiSessionReload(this._piSession, this._outputChannel);
                     await this._afterPiConfigChange('Skill path added');
                     break;
                 case 'removePiSkillPath':
@@ -294,13 +297,14 @@ export class SettingsPanel {
                     await openPiAgentFile(msg.file, this._currentBackend);
                     break;
                 case 'reloadPiSession':
-                    if (this._piSession) {
-                        await this._piSession.reloadPiAgentResources();
-                        this._mcpProbeResults.clear();
-                        await this._afterPiConfigChange('Session reloaded from ~/.pi/agent');
-                    } else {
-                        this._post({ type: 'error', message: 'No active Pi session to reload' });
+                    if (!this._piSession) {
+                        this._post({ type: 'error', message: 'No active chat session to reload' });
+                        break;
                     }
+                    // The command also refreshes the chat view of the reloaded tab.
+                    await vscode.commands.executeCommand('oh-my-pi-chater.reloadSession');
+                    this._mcpProbeResults.clear();
+                    await this._afterPiConfigChange(`Session reloaded from ${getPiAgentDir(this._currentBackend)}`);
                     break;
                 case 'getMcpSnapshot':
                     await this._sendMcpSnapshot();
@@ -324,27 +328,50 @@ export class SettingsPanel {
                 case 'runPiLogout':
                     await this._runPiLogout();
                     break;
-                case 'rebuildNativeModules':
-                    await rebuildAgentNativeModules(this._outputChannel ?? vscode.window.createOutputChannel('Oh My Pi Chater'));
-                    if (this._piSession) {
-                        await this._piSession.reloadPiAgentResources();
-                    }
-                    await this._sendSettings();
+                case 'testStt': {
+                    const s = msg.settings;
+                    await this._testVoiceService('stt', s.sttModel, s.sttEngine === 'custom', (model) => this._checkStt({ ...s, sttModel: model }));
                     break;
-                case 'testStt':
-                    await this._testStt(msg.settings);
+                }
+                case 'testTts': {
+                    const t = msg.settings;
+                    await this._testVoiceService('tts', t.model, t.engine === 'custom', (model) => this._checkTts({ ...t, model }));
                     break;
-                case 'testTts':
-                    await this._testTts(msg.settings);
-                    break;
+                }
                 case 'startSttDryRun':
-                    await this._voiceDryRun.startStt(msg.run, msg.settings);
+                    await this._voiceDryRun.startStt(msg.run, msg.settings, msg.apiKey);
                     break;
                 case 'stopSttDryRun':
                     await this._voiceDryRun.stopStt();
                     break;
                 case 'ttsDryRun':
-                    await this._voiceDryRun.synthesize(msg.settings, msg.text);
+                    await this._voiceDryRun.synthesize(msg.settings, msg.text, msg.apiKey);
+                    break;
+                case 'saveVoice':
+                    await this._saveVoice(msg.stt, msg.tts, msg.apiKeys, msg.test);
+                    break;
+                case 'removeVoiceApiKey': {
+                    const label = CLOUD_PROVIDERS.find((p) => p.id === msg.provider)?.label ?? msg.provider;
+                    await setVoiceApiKey(msg.provider, null);
+                    this._post({ type: 'success', message: `${label} API key removed.` });
+                    break;
+                }
+                case 'openVoiceKeyPage': {
+                    // Only the known providers' pages: the webview names a provider, not a URL.
+                    const provider = CLOUD_PROVIDERS.find((p) => p.id === msg.provider);
+                    if (provider) {
+                        await vscode.env.openExternal(vscode.Uri.parse(provider.apiKeyUrl));
+                    }
+                    break;
+                }
+                case 'getBuiltinVoiceStatus':
+                    await this._sendBuiltinVoiceStatus(false);
+                    break;
+                case 'prepareBuiltinVoice':
+                    await this._prepareBuiltinVoice();
+                    break;
+                case 'voiceDirty':
+                    this._voiceDirty = msg.dirty;
                     break;
             }
         } catch (err: any) {
@@ -361,12 +388,12 @@ export class SettingsPanel {
     }
 
     private async _runPiLogin(): Promise<void> {
-        await runPiLoginFlow(this._piSession);
+        await runPiLoginFlow();
         await this._sendSettings();
     }
 
     private async _runPiLogout(): Promise<void> {
-        await runPiLogoutFlow(this._piSession);
+        await runPiLogoutFlow();
         await this._sendSettings();
     }
 
@@ -405,7 +432,7 @@ export class SettingsPanel {
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
-                title: 'Testing MCP servers',
+                title: 'Checking MCP server reachability',
                 cancellable: false,
             },
             async () => {
@@ -419,7 +446,7 @@ export class SettingsPanel {
             },
         );
         await this._sendMcpSnapshot();
-        this._post({ type: 'success', message: 'MCP connection tests finished' });
+        this._post({ type: 'success', message: 'MCP reachability checks finished' });
     }
 
     private async _updateSetting(key: string, value: unknown): Promise<void> {
@@ -427,42 +454,143 @@ export class SettingsPanel {
         await config.update(key, value, vscode.ConfigurationTarget.Global);
     }
 
-    /** Saves the STT section as typed (a failing check still saves it), then checks the service. */
-    private async _testStt(settings: VoiceSettings): Promise<void> {
-        await saveVoiceSettings(settings);
-        const { sttUrl, sttModel } = readVoiceSettings();
-        const res = await testSttConnectivity(sttUrl, sttModel);
-        recordSttCheck(sttUrl, res.ok, res.message);
+    /** A check's result in plain language; the raw failure goes to the log. */
+    private _voiceCheckResult(service: VoiceServiceId, res: ModelsProbeResult, url: string, model: string | undefined): { ok: boolean; message: string } {
+        if (res.ok) {
+            // STT notes a configured model the server does not list, without failing.
+            return { ok: true, message: res.message.includes(', but ') ? res.message : `Connected${model ? ` — ${model}` : ''}.` };
+        }
+        const explained = explainVoiceError(res.message, { service, hasKey: sendsApiKey(service, url) });
+        this._outputChannel?.appendLine(`[voice] ${VOICE_SERVICE_NAMES[service]} check failed: ${explained.detail}`);
+        return { ok: false, message: explained.message };
+    }
+
+    /**
+     * Checks STT as given, nothing saved (a cloud service with its stored key). On the built-in engine
+     * that starts it, downloading its models the first time. A check of the saved setup is recorded,
+     * so the mic follows it; the engine failing to start records itself (resolveSttConfig).
+     */
+    private async _checkStt(settings: VoiceSettings): Promise<{ ok: boolean; message: string; models: string[] }> {
+        const res = await resolveSttConfig(settings).then(
+            async (stt) => {
+                const probed = await testSttConnectivity(stt.url, stt.model, stt.apiKey);
+                // Dropped unless these are the configured settings.
+                recordSttCheck(settings, probed.ok, probed.message);
+                return probed;
+            },
+            (err: unknown): ModelsProbeResult => ({ ok: false, message: describeError(err), models: [] }),
+        );
+        const model = settings.sttEngine === 'builtin' ? STT_MODEL.id : settings.sttModel || res.models[0];
+        return { ...this._voiceCheckResult('stt', res, settings.sttUrl, model), models: res.models };
+    }
+
+    /** Checks TTS as `_checkStt` does STT. */
+    private async _checkTts(settings: TtsConfig): Promise<{ ok: boolean; message: string; models: string[] }> {
+        const res = await resolveTtsConfig(settings).then(
+            async (tts) => {
+                const probed = await testTtsConnectivity(tts);
+                // Dropped unless this is the configured service.
+                recordTtsCheck(settings, probed.ok, probed.message);
+                return probed;
+            },
+            (err: unknown): ModelsProbeResult => ({ ok: false, message: describeError(err), models: [] }),
+        );
+        return { ...this._voiceCheckResult('tts', res, settings.url, settings.model || undefined), models: settings.engine === 'custom' ? res.models : [] };
+    }
+
+    /**
+     * A section's Test on your own server: checks the values as shown, nothing saved. When the model
+     * is empty or one the server does not list, the server's first model (for this task) is taken
+     * instead, checked, and handed back for the Model field to fill in.
+     */
+    private async _testVoiceService(
+        service: VoiceServiceId,
+        configured: string,
+        custom: boolean,
+        checkWith: (model: string) => Promise<{ ok: boolean; message: string; models: string[] }>,
+    ): Promise<void> {
+        const model = configured.trim();
+        let res = await checkWith(model);
+        const detected = custom && res.models.length > 0 && !res.models.includes(model) ? res.models[0] : undefined;
+        if (detected) {
+            res = await checkWith(detected);
+            if (res.ok) {
+                res = { ...res, message: model ? `Connected. The server has no model "${model}": filled in "${detected}" instead.` : `Connected. Found model "${detected}" and filled it in.` };
+            }
+        }
         this._post({
             type: 'voiceTestResult',
-            service: 'stt',
+            service,
             ok: res.ok,
-            message: res.ok ? `Saved. STT connected — ${sttModel || res.models[0] || 'ready'}` : `Saved, but the check failed: ${res.message}`,
-            check: voiceReadiness().stt,
+            message: res.message,
+            check: voiceReadiness()[service],
+            models: res.models,
+            detectedModel: detected,
         });
     }
 
-    /** Saves the TTS section as typed (a failing check still saves it), then checks the service. */
-    private async _testTts(settings: TtsConfig): Promise<void> {
-        await saveTtsSettings(settings);
-        const saved = readTtsSettings();
-        const res = await testTtsConnectivity(saved);
-        recordTtsCheck(saved, res.ok, res.message);
-        this._post({
-            type: 'voiceTestResult',
-            service: 'tts',
-            ok: res.ok,
-            message: res.ok ? `Saved. TTS connected — ${res.message}` : `Saved, but the check failed: ${res.message}`,
-            check: voiceReadiness().tts,
-        });
+    /**
+     * Save (and "Save & test"): writes both sections and the typed keys, then with `test` checks each
+     * custom service as saved. Built-in ones are not checked: that would download their models.
+     */
+    private async _saveVoice(stt: VoiceSettings, tts: TtsConfig, apiKeys: Record<string, string>, test: boolean): Promise<void> {
+        try {
+            await saveVoiceSettings(stt);
+            await saveTtsSettings(tts);
+            for (const [provider, key] of Object.entries(apiKeys)) {
+                if (key.trim()) {
+                    await setVoiceApiKey(provider, key);
+                }
+            }
+        } catch (err: unknown) {
+            this._post({ type: 'voiceSaved', saved: false, ok: false, message: `Could not save the voice settings: ${describeError(err)}`, tests: {} });
+            return;
+        }
+        const tests: Partial<Record<VoiceServiceId, { ok: boolean; message: string }>> = {};
+        if (test) {
+            const savedStt = readVoiceSettings();
+            const savedTts = readTtsSettings();
+            const [sttRes, ttsRes] = await Promise.all([
+                savedStt.sttEngine === 'custom' ? this._checkStt(savedStt) : undefined,
+                savedTts.engine === 'custom' ? this._checkTts(savedTts) : undefined,
+            ]);
+            if (sttRes) {
+                tests.stt = { ok: sttRes.ok, message: sttRes.message };
+            }
+            if (ttsRes) {
+                tests.tts = { ok: ttsRes.ok, message: ttsRes.message };
+            }
+        }
+        const checked = Object.entries(tests) as Array<[VoiceServiceId, { ok: boolean; message: string }]>;
+        const failed = checked.find(([, res]) => !res.ok);
+        const message = failed
+            ? `Saved, but ${VOICE_SERVICE_NAMES[failed[0]]} isn't working: ${failed[1].message}`
+            : checked.length > 0
+              ? `Ready: ${checked.map(([service]) => VOICE_SERVICE_NAMES[service]).join(' and ')} answered. Voice is set up.`
+              : 'Voice settings saved.';
+        this._post({ type: 'voiceSaved', saved: true, ok: !failed, message, tests });
+    }
+
+    private async _sendBuiltinVoiceStatus(busy: boolean, error?: string): Promise<void> {
+        const status = await builtinVoiceStatus().catch(() => undefined);
+        this._post({ type: 'builtinVoiceStatus', status, busy, error });
+    }
+
+    /** "Download now": downloads the built-in models (with the usual progress notification) and starts the engine. */
+    private async _prepareBuiltinVoice(): Promise<void> {
+        await this._sendBuiltinVoiceStatus(true);
+        try {
+            await builtinVoiceEngineUrl();
+            await this._sendBuiltinVoiceStatus(false);
+        } catch (err: unknown) {
+            await this._sendBuiltinVoiceStatus(false, explainVoiceError(err).message);
+        }
     }
 
     private async _sendSettings(): Promise<void> {
         const config = vscode.workspace.getConfiguration('oh-my-pi-chater');
         const backend = this._currentBackend;
         const sync = isSyncWithPiCli();
-        const provider = config.get<string>('apiProvider', '');
-        const agentDir = getPiAgentDir(backend);
         const piSummary = sync ? readAgentSettingsSummary(backend) : undefined;
         let piConfig: SettingsData['piConfig'];
         let piConfigLoadError: string | undefined;
@@ -472,54 +600,40 @@ export class SettingsPanel {
             piConfigLoadError = loaded.error;
         }
 
-        let apiKeySet = false;
-        if (!sync && provider) {
-            const stored = await this._secrets.get(`${API_KEY_PREFIX}${provider}`);
-            apiKeySet = !!stored;
-        }
-
-        const authMethod = this._detectAuthMethod(provider, apiKeySet, sync, piConfig?.authProviders, backend);
-
         const data: SettingsData = {
             backend,
             availableBackends: getAvailableBackends(),
             extensionVersion: this._extensionVersion,
             syncWithPiCli: sync,
-            piAgentDir: agentDir,
+            piAgentDir: getPiAgentDir(backend),
             piConfigLoadError,
             piDefaultProvider: piSummary?.defaultProvider,
             piDefaultModel: piSummary?.defaultModel,
             piDefaultThinkingLevel: piSummary?.defaultThinkingLevel,
-            piPackageCount: piSummary?.packageCount ?? piConfig?.packages.length ?? 0,
             piConfig,
-            apiProvider: sync ? (piSummary?.defaultProvider ?? '') : provider,
-            apiBaseUrl: config.get<string>('apiBaseUrl', ''),
-            apiKeySet,
-            authMethod,
-            defaultModel: sync ? (piSummary?.defaultModel ?? '') : config.get<string>('defaultModel', ''),
-            thinkingLevel: sync
-                ? (piSummary?.defaultThinkingLevel ?? 'off')
-                : config.get<string>('thinkingLevel', 'off'),
+            authMethod: detectAuthMethod(piConfig?.authProviders),
             defaultPermissionLevel: readDefaultPermissionLevel(),
             allowedTools: config.get<string[]>('allowedTools', []),
-            autoSaveSessions: config.get<boolean>('autoSaveSessions', true),
-            sessionStoragePath: config.get<string>('sessionStoragePath', ''),
             contextUsageWarningThreshold: config.get<number>('contextUsageWarningThreshold', 80),
             voice: readVoiceSettings(),
             tts: readTtsSettings(),
             voiceReadiness: voiceReadiness(),
+            voiceApiKeys: voiceApiKeysSet(),
+            voiceOwnServers: ownVoiceServers(),
+            voiceSkills: config.get<string[]>('voiceAgent.skills', []),
+            voiceMessageButtons: config.get<boolean>('voiceAgent.messageButtons', false),
+            voiceTranslateTo: config.get<string>('voiceAgent.translateTo', DEFAULT_TRANSLATION_LANGUAGE),
+            voiceSpeakers: await this._voiceSpeakers(config),
         };
-
-        if (this._piSession && this._piSession.backend === backend) {
-            data.extensionLoadIssues = this._piSession.getExtensionLoadIssues();
-            data.loadedExtensionCount = this._piSession.getLoadedExtensionCount();
-        }
 
         if (sync && piConfig) {
             data.mcpSnapshot = await loadMcpSettingsSnapshot(piConfig.packages, this._mcpProbeResults, backend);
-            const slash = (this._piSession && this._piSession.backend === backend)
-                ? (await this._piSession.listSlashCommands()).map((c) => c.name.replace(/^skill:/, ''))
-                : [];
+            let slash: string[] = [];
+            try {
+                slash = (await this._piSession?.listSlashCommands() ?? []).map((c) => c.name.replace(/^skill:/, ''));
+            } catch {
+                // The tab's CLI is (re)starting: judge the recommended packages by settings alone.
+            }
             const missing = getMissingRecommendedPackages(piConfig.packages, slash, backend);
             if (missing.length > 0) {
                 data.recommendedPackagesMissing = missing.map((p) => p.source);
@@ -531,6 +645,17 @@ export class SettingsPanel {
         }
     }
 
+    private async _voiceSpeakers(config: vscode.WorkspaceConfiguration): Promise<SettingsData['voiceSpeakers']> {
+        const { speakers, errors } = await resolveSpeakers();
+        const setting = (id: VoiceSpeakerId) => ({
+            name: config.get<string>(`voiceAgent.${id}Name`, DEFAULT_SPEAKER_NAMES[id]),
+            avatar: config.get<string>(`voiceAgent.${id}Avatar`, ''),
+            resolved: speakers[id].avatar,
+            error: errors[id],
+        });
+        return { user: setting('user'), bot: setting('bot') };
+    }
+
     private async _sendSkills(): Promise<void> {
         if (this._piSession) {
             const skills = await this._piSession.getSkillsAsync();
@@ -538,48 +663,6 @@ export class SettingsPanel {
             return;
         }
         this._post({ type: 'skills', skills: [] });
-    }
-
-    private _detectAuthMethod(
-        provider: string,
-        hasManualKey: boolean,
-        sync: boolean,
-        authProviders?: { id: string; configured: boolean }[],
-        backend: AgentBackend = 'pi',
-    ): SettingsData['authMethod'] {
-        if (!sync && hasManualKey) {
-            return 'manual';
-        }
-
-        if (sync && authProviders?.some((p) => p.configured)) {
-            return 'pi-login';
-        }
-
-        const envVarMap: Record<string, string> = {
-            anthropic: 'ANTHROPIC_API_KEY',
-            openai: 'OPENAI_API_KEY',
-            google: 'GEMINI_API_KEY',
-            deepseek: 'DEEPSEEK_API_KEY',
-            cursor: 'CURSOR_API_KEY',
-        };
-
-        if (provider && envVarMap[provider] && process.env[envVarMap[provider]]) {
-            return 'env';
-        }
-
-        const fs = require('fs');
-        const path = require('path');
-        const authPath = path.join(
-            require('os').homedir(),
-            backend === 'omp' ? '.omp' : '.pi',
-            'agent',
-            backend === 'omp' ? 'agent.db' : 'auth.json',
-        );
-        if (fs.existsSync(authPath)) {
-            return 'pi-login';
-        }
-
-        return 'none';
     }
 
     private _post(message: SettingsServerMessage): void {
@@ -592,6 +675,11 @@ export class SettingsPanel {
             d.dispose();
         }
         this._disposables = [];
+        if (this._voiceDirty) {
+            void vscode.window
+                .showWarningMessage('Voice settings: your unsaved changes were discarded when Settings closed.', 'Open Voice Settings')
+                .then((pick) => pick && SettingsPanel.showWithSection('voice'));
+        }
     }
 
     private _getHtml(): string {
@@ -609,9 +697,9 @@ export class SettingsPanel {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; media-src data:;">
+          content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}'; media-src data:;">
     <link rel="stylesheet" href="${styleUri}">
-    <title>Oh My Pi Chater Settings</title>
+    <title>PI Buddy Settings</title>
 </head>
 <body>
     <div id="settings-app"></div>
@@ -619,6 +707,15 @@ export class SettingsPanel {
 </body>
 </html>`;
     }
+}
+
+/** Credentials in the backend's login store (pi auth.json, omp agent.db / models.yml), else a provider API key env var. */
+function detectAuthMethod(authProviders?: { configured: boolean }[]): SettingsData['authMethod'] {
+    if (authProviders?.some((p) => p.configured)) {
+        return 'login';
+    }
+    const envKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'DEEPSEEK_API_KEY', 'CURSOR_API_KEY'];
+    return envKeys.some((key) => process.env[key]) ? 'env' : 'none';
 }
 
 function getNonce(): string {

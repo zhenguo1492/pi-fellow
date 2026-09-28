@@ -3,8 +3,9 @@ import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { VoiceSessionSummary } from '../pi/sessionCatalog';
-import type { VoiceEntry, VoiceHearing, VoiceLatency, VoiceObservationKind, VoiceSentence } from '../shared/voiceViewProtocol';
+import type { VoiceEntry, VoiceHearing, VoiceLatency, VoiceObservationKind, VoiceSentence, VoiceToolEntry, VoiceToolResearch } from '../shared/voiceViewProtocol';
 import type { Metrics } from './conversation';
+import type { ResearchJob } from './research';
 import type { VoiceTurnListener, VoiceTurnResult } from './voiceAgent';
 import type { ReplyAudioEvent } from './voiceMode';
 import { provisionalTaskKey, taskKey } from './workerController';
@@ -41,6 +42,8 @@ export interface TranscriptLimits {
 
 const STORAGE_KEY = 'voiceAgent.transcripts';
 const SAVE_DELAY_MS = 1000;
+/** A lookup's result is kept up to this many characters: the transcript is saved in workspace state. */
+const LOOKUP_RESULT_CHARS = 8000;
 
 /**
  * The voice panel's record of what was said, grouped by task: an entry per user turn, reply,
@@ -56,9 +59,10 @@ export class VoiceTranscriptStore {
     /** Sessions this extension host started; saved `tab:` keys from earlier windows name no tab now. */
     private readonly _started = new WeakSet<VoiceSessionRecord>();
     private readonly _replies = new Map<number, AssistantEntry>();
+    /** The tool entry of each research job still running, filled in when it settles. */
+    private readonly _research = new WeakMap<ResearchJob, VoiceToolEntry>();
     /** The last reply was cut off by the user's voice or typing: their next entry barged in. */
     private _bargeIn = false;
-    private _nextId = 1;
     private _saveTimer: NodeJS.Timeout | undefined;
     private readonly _listeners = new Set<() => void>();
 
@@ -69,6 +73,18 @@ export class VoiceTranscriptStore {
         private readonly _taskOf: () => BoundTask | undefined,
     ) {
         this._sessions = _memento.get<VoiceSessionRecord[]>(STORAGE_KEY) ?? [];
+        // Ids once restarted at e1 with every extension host while a resumed conversation kept its
+        // old entries: later ones repeating an id get their own, so each names one entry again.
+        const seen = new Set<string>();
+        for (const entry of this._sessions.flatMap((s) => s.entries)) {
+            if (seen.has(entry.id)) {
+                entry.id = this._id();
+            }
+            seen.add(entry.id);
+            if (entry.kind === 'assistant') {
+                reviveTools(entry);
+            }
+        }
     }
 
     onDidChange(listener: () => void): { dispose(): void } {
@@ -244,7 +260,6 @@ export class VoiceTranscriptStore {
             ...(options.proactive ? { proactive: options.proactive } : {}),
             text: '',
             tools: [],
-            lookups: [],
             done: false,
         };
         const session = this._push(entry);
@@ -265,11 +280,29 @@ export class VoiceTranscriptStore {
                 this._changed();
             },
             onToolCall: (name, args, result) => {
-                entry.tools.push({ name, args, result: result.text, isError: result.isError });
+                const tool: VoiceToolEntry = { name, args, result: result.text, isError: result.isError };
+                if (result.research) {
+                    tool.research = researchState(result.research);
+                    if (result.research.status === 'running') {
+                        this._research.set(result.research, tool);
+                    }
+                }
+                entry.tools.push(tool);
                 this._changed();
             },
-            onLookup: (description) => {
-                entry.lookups.push(description);
+            onLookup: ({ id, name, args }) => {
+                entry.tools.push({ id, name, args, result: '', isError: false, running: true });
+                this._changed();
+            },
+            onLookupEnd: (id, result) => {
+                const tool = entry.tools.find((t) => t.running && t.id === id);
+                if (!tool) {
+                    return;
+                }
+                delete tool.running;
+                const { text } = result;
+                tool.result = text.length > LOOKUP_RESULT_CHARS ? `${text.slice(0, LOOKUP_RESULT_CHARS)}\n… ${text.length - LOOKUP_RESULT_CHARS} more characters not kept` : text;
+                tool.isError = result.isError;
                 this._changed();
             },
             onUsage: (usage) => {
@@ -279,6 +312,22 @@ export class VoiceTranscriptStore {
             onEnd: (result) => this._endReply(session, entry, result),
         };
         return { listener, bindTurn };
+    }
+
+    /** A research job settled: its call's entry shows the findings. */
+    researchSettled(job: ResearchJob): void {
+        const tool = this._research.get(job);
+        if (!tool) {
+            return;
+        }
+        this._research.delete(job);
+        tool.research = researchState(job);
+        this._changed();
+    }
+
+    /** The entry of voice mode reply `turnId`, until it is cut off or voice mode ends. */
+    entryIdOfTurn(turnId: number): string | undefined {
+        return this._replies.get(turnId)?.id;
     }
 
     /** Voice mode playback of a reply. */
@@ -356,6 +405,10 @@ export class VoiceTranscriptStore {
                 cutUnheard(entry.sentences);
             }
         }
+        // A lookup the cut-off run never finished.
+        for (const tool of entry.tools) {
+            delete tool.running;
+        }
         // A proactive turn that lost the floor before saying or doing anything left nothing to show.
         if (entry.proactive && result.interrupted && !entry.text && entry.tools.length === 0) {
             session.entries = session.entries.filter((e) => e !== entry);
@@ -430,8 +483,12 @@ export class VoiceTranscriptStore {
         return key;
     }
 
+    /**
+     * Unique across extension hosts: a resumed conversation keeps its saved entries, and the Bot
+     * view, the replay cache and the translations find an entry by its id.
+     */
     private _id(): string {
-        return `e${this._nextId++}`;
+        return randomUUID();
     }
 
     private _changed(save = true): void {
@@ -451,6 +508,35 @@ export class VoiceTranscriptStore {
 /** What the user said in a conversation, spoken or typed; panel actions (approve, cancel) are not talk. */
 function userTexts(session: VoiceSessionRecord): string[] {
     return session.entries.flatMap((e) => (e.kind === 'user' && e.source !== 'panel' ? [e.text] : []));
+}
+
+function researchState(job: ResearchJob): VoiceToolResearch {
+    return {
+        status: job.status,
+        startedAt: job.startedAt,
+        ...(job.finishedAt !== undefined ? { finishedAt: job.finishedAt } : {}),
+        ...(job.result !== undefined ? { result: job.result } : {}),
+    };
+}
+
+/**
+ * A saved reply as this run shows it: nothing of an earlier run is still running, and lookups saved
+ * as descriptions only (`lookups`, before they became tool entries) join its tools.
+ */
+function reviveTools(entry: AssistantEntry): void {
+    const legacy: unknown = Reflect.get(entry, 'lookups');
+    if (Array.isArray(legacy)) {
+        Reflect.deleteProperty(entry, 'lookups');
+        for (const description of legacy) {
+            entry.tools.push({ name: 'lookup', args: { description: String(description) }, result: '', isError: false });
+        }
+    }
+    for (const tool of entry.tools) {
+        delete tool.running;
+        if (tool.research?.status === 'running') {
+            tool.research = { ...tool.research, status: 'failed', result: 'Stopped: the window closed before it finished.' };
+        }
+    }
 }
 
 /** Moves the first matching sentence to `to`. */

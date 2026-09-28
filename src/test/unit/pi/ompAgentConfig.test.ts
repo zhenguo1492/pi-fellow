@@ -48,11 +48,7 @@ describe('ompAgentConfig', () => {
     it('updates omp defaults (thinkingLevel and modelRoles.default)', async () => {
         const dir = createTempAgentDir();
         try {
-            await updateOmpDefaults(
-                { provider: 'anthropic', model: 'claude-sonnet-5', thinkingLevel: 'xhigh' },
-                undefined,
-                dir,
-            );
+            updateOmpDefaults({ provider: 'anthropic', model: 'claude-sonnet-5', thinkingLevel: 'xhigh' }, dir);
 
             const cfg = readOmpConfig(dir);
             expect(cfg.defaultThinkingLevel).toBe('xhigh');

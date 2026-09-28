@@ -8,7 +8,7 @@ import { updateTabName } from './sidebarTabs';
 import { resetTabUiState, tabReady, type TabState } from './sidebarTabState';
 import { TabTuis } from './sidebarTui';
 
-/** Per-tab TUI mode (`TabState.tuiMode`): a tab shows its CLI's TUI instead of the chat UI; plus omp's /login and /logout banner that switches there. */
+/** Per-tab TUI mode (`TabState.tuiMode`): a tab shows its CLI's TUI instead of the chat UI; plus the /login and /logout banner that switches there. */
 export class SidebarTuiMode {
     readonly tuis = new TabTuis({
         start: (options) => TuiProcess.start(options),
@@ -21,8 +21,10 @@ export class SidebarTuiMode {
             if (tab) this._setTuiBusy(tab, busy);
         },
     });
-    /** omp /login or /logout waiting on the chat banner that switches to the TUI to run it. */
+    /** /login or /logout waiting on the chat banner that switches to the TUI to run it. */
     private _authPrompt: TuiAuthCommand | undefined;
+    /** Tabs whose TUI was sent to /login or /logout: the RPC process caches credentials, so it restarts on return. */
+    private readonly _authTabs = new Set<string>();
 
     constructor(private readonly _host: SidebarHost) {}
 
@@ -40,10 +42,12 @@ export class SidebarTuiMode {
         this._host.sendStateSync();
     }
 
-    /** omp only logs in from its TUI: show a chat banner that switches there and runs the command. */
+    /** Neither CLI logs in over RPC: show a chat banner that switches to the TUI and runs the command. */
     async promptAuth(command: TuiAuthCommand): Promise<void> {
         await vscode.commands.executeCommand('oh-my-pi-chater.chat.focus');
-        if (this._host.activeTab?.tuiMode) {
+        const active = this._host.activeTab;
+        if (active?.tuiMode) {
+            this._authTabs.add(active.id);
             this._host.post({ type: 'toast', message: `Type /${command} in the terminal.`, variant: 'info' });
             return;
         }
@@ -60,7 +64,9 @@ export class SidebarTuiMode {
         // A chat tab has no TUI process; the toggle below starts this tab's, which types it.
         this.tuis.typeOnStart(tab.id, `/${command}\r`);
         await this._toggle(tab);
-        if (!tab.tuiMode) {
+        if (tab.tuiMode) {
+            this._authTabs.add(tab.id);
+        } else {
             this.tuis.cancelTypeOnStart(tab.id); // refused: a response is streaming
         }
     }
@@ -80,11 +86,13 @@ export class SidebarTuiMode {
             return;
         }
         const hadTui = !!this.tuis.get(tab.id);
+        const ranAuth = this._authTabs.delete(tab.id);
         await this.tuis.stop(tab.id);
         if (hadTui) {
             // The TUI appended to the tab's session file; the idle RPC process holds stale state.
+            // After /login or /logout its model/auth snapshot is stale too: only a restart re-reads it.
             try {
-                await tab.session.reloadSessionFromDisk();
+                await (ranAuth ? tab.session.reloadPiAgentResources() : tab.session.reloadSessionFromDisk());
                 resetTabUiState(tab);
                 updateTabName(tab);
             } catch (err: unknown) {

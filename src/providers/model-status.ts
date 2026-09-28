@@ -59,6 +59,11 @@ export class ModelStatusTracker implements vscode.Disposable {
     readonly onDidChange = this._changed.event;
     private readonly _usage = new ProviderUsageTracker(fetchUsage, () => this._update());
     private readonly _usagePoll = setInterval(() => this._usage.refresh(), USAGE_POLL_MS);
+    private readonly _config = vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('oh-my-pi-chater.contextUsageWarningThreshold')) {
+            this._update();
+        }
+    });
 
     constructor(session: PiChatSession) {
         this._session = session;
@@ -107,11 +112,13 @@ export class ModelStatusTracker implements vscode.Disposable {
             activity: retrying ? 'retrying' : agentSession?.isStreaming ? 'streaming' : 'idle',
             retryAttempt: retrying ? (agentSession?.retryAttempt ?? 0) : 0,
             context: agentSession?.getContextUsage(),
+            contextWarnPercent: vscode.workspace.getConfiguration('oh-my-pi-chater').get<number>('contextUsageWarningThreshold', 80),
             tokens: session.getSessionTokenStats(),
             thinking: session.getThinkingLevel(),
             limits: snapshot && model ? statusBarWindows(snapshot.accounts, model.id) : [],
             usage: snapshot ? usageDetails(snapshot) : [],
             usageError: snapshot?.error,
+            contextBreakdown: session.backend === 'omp',
         };
         this._changed.fire(this._status);
     }
@@ -119,6 +126,7 @@ export class ModelStatusTracker implements vscode.Disposable {
     dispose(): void {
         this._unsubscribe?.();
         clearInterval(this._usagePoll);
+        this._config.dispose();
         this._changed.dispose();
     }
 }

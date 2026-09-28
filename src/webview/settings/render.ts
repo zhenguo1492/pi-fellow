@@ -10,7 +10,8 @@ import { buildOmpPluginsTab, buildPackagesTab } from './packages';
 import { buildSkillsTab, renderSkillsSection } from './skills';
 import { settingsState } from './state';
 import { buildTabNav, switchSettingsTab } from './tabs';
-import { buildVoiceTab, restoreVoiceDrafts } from './voice';
+import { renderVoiceSkills } from './voice';
+import { buildVoiceTab, restoreVoiceDrafts } from './voiceSetup';
 
 function buildHeader(data: SettingsData): HTMLElement {
     const header = el('div', 'settings-header');
@@ -19,7 +20,7 @@ function buildHeader(data: SettingsData): HTMLElement {
     header.innerHTML = `
         <div class="settings-header-top">
             <div class="settings-title-group">
-                <h1>Oh My Pi Chater Settings</h1>
+                <h1>PI Buddy Settings</h1>
                 <p class="settings-version">Extension v${escapeHtml(data.extensionVersion ?? '?')}</p>
             </div>
             <div class="backend-toggle-group">
@@ -74,6 +75,7 @@ export function render(data: SettingsData): void {
     bindEvents();
     restoreVoiceDrafts();
     renderSkillsSection();
+    renderVoiceSkills();
     window.scrollTo(0, scrollY);
     const refocus = typing && document.getElementById(typing.id);
     if (typing && refocus instanceof HTMLInputElement) {

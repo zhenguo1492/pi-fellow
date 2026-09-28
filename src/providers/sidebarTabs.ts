@@ -377,10 +377,7 @@ export class SidebarTabs {
 
     private _handleTabEvent(tab: TabState, event: PiAgentEvent): void {
         const isActive = tab.id === this._host.activeTabId;
-        const streaming = applyAgentEvent(tab, event, isActive);
-        if (streaming !== undefined && isActive) {
-            vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', streaming);
-        }
+        applyAgentEvent(tab, event, isActive);
 
         updateTabName(tab);
 
@@ -466,7 +463,6 @@ export class SidebarTabs {
 
         const tab = this._host.activeTab;
         tab.hasNotification = false;
-        vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', tab.isStreaming);
 
         this._host.sendStateSync();
         this._host.postModelFooter(tab);

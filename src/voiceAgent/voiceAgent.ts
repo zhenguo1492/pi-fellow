@@ -5,7 +5,7 @@ import { FloorArbiter, type ArbiterSettings, type ArbiterView, type Observation 
 import { HostToolRouter, VOICE_HOST_TOOLS, type AgentMode, type EditorHands, type Proposal, type ToolResult, type ToolTurn } from './hostTools';
 import { readTarget, type FocusTarget } from './piFocus';
 import { ResearchRunner, type ResearchJob } from './research';
-import { VoiceLlm } from './voiceLlm';
+import { VoiceLlm, type VoiceSkill } from './voiceLlm';
 import { SilenceGate, VOICE_SYSTEM_PROMPT, buildTurnMessage, type EditorSnapshot, type OpeningReason, type TurnInput } from './voicePrompt';
 import { provisionalTaskKey, taskKey, type WorkerController, type WorkerTask } from './workerController';
 import { WorkerDigest, clip, type DigestEntry } from './workerDigest';
@@ -20,6 +20,8 @@ export interface VoiceAgentOptions {
     /** `provider/id`; empty follows the worker's model when the process starts (design §5.4). */
     model: string;
     thinking: string;
+    /** The skills to load, asked each time the process starts; absent loads none. Research never gets skills. */
+    skills?: () => Promise<VoiceSkill[]>;
     confirmBeforeDispatch: () => boolean;
     /** Read at every decision, so settings changes apply right away. */
     arbiter: () => ArbiterSettings;
@@ -31,6 +33,8 @@ export interface VoiceAgentOptions {
     hush?: () => void;
     /** Proposals or research changed (voice panel cards). */
     onChange?: () => void;
+    /** A research job a `research` call started has settled: its findings or error are in it. */
+    onResearchSettled?: (job: ResearchJob) => void;
     /** The user's editor, attached to every turn; without it the agent does not see the editor. */
     editor?: () => EditorSnapshot | undefined;
     /** The agent reads this file itself (Pi focus). */
@@ -39,6 +43,8 @@ export interface VoiceAgentOptions {
     hands?: EditorHands;
     /** Switched between omp and pair mode, by a tool call or setMode. */
     onModeChange?: (mode: AgentMode) => void;
+    /** The names set for the voice agent and the user, read at every turn. */
+    names?: () => { bot: string; user: string };
     log: (line: string) => void;
 }
 
@@ -86,12 +92,25 @@ export interface VoiceTurnListener {
     onText?(delta: string): void;
     /** The reply points at code here, between the text before and after it. */
     onAnchor?(anchor: CodeAnchor): void;
+    /** `result.research` is the job a `research` call started. */
     onToolCall?(name: string, args: Record<string, unknown>, result: ToolResult): void;
     /** The voice agent is looking something up itself (read, grep, glob, web_search). */
-    onLookup?(description: string): void;
+    onLookup?(lookup: VoiceLookup): void;
+    /** That lookup finished. */
+    onLookupEnd?(id: string, result: ToolResult): void;
     /** One LLM call of the turn finished (several when it uses tools). */
     onUsage?(usage: VoiceCallUsage): void;
     onEnd?(result: VoiceTurnResult): void;
+}
+
+/** One of the voice agent's own lookups, as it starts. */
+export interface VoiceLookup {
+    /** The model's tool call id; `onLookupEnd` names the same one. */
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    /** omp's intent line, or the tool name and its target. */
+    description: string;
 }
 
 export interface VoiceToolCallRecord {
@@ -416,6 +435,7 @@ export class VoiceAgent {
             research: context.research,
             editor: this._editorFor(context),
             mode: this._router.mode,
+            names: this._options.names?.(),
             interrupted: this._takeInterrupted(options.interrupted),
         });
         context.seenSeq = digest.lastSeq;
@@ -481,6 +501,7 @@ export class VoiceAgent {
             research,
             editor: this._editorFor(context),
             mode: this._router.mode,
+            names: this._options.names?.(),
             interrupted: this._takeInterrupted(),
         });
         context.seenSeq = digest.lastSeq;
@@ -610,12 +631,13 @@ export class VoiceAgent {
             onToolCancel: (callId) => cancelled.add(callId),
             onBuiltinTool: (description, call) => {
                 lookups.push(description);
-                listener.onLookup?.(description);
+                listener.onLookup?.({ id: call.id, name: call.toolName, args: call.args, description });
                 const target = call.toolName === 'read' ? readTarget(call.args) : undefined;
                 if (target) {
                     this._options.onRead?.(target);
                 }
             },
+            onBuiltinToolEnd: (id, result) => listener.onLookupEnd?.(id, result),
             onUsage: (usage) => listener.onUsage?.(usage),
         }, images);
         // Aborted while queued: the prompt still goes in (the context keeps the user's words), cut off at once.
@@ -648,14 +670,16 @@ export class VoiceAgent {
 
     private _ensureLlm(task: WorkerTask): Promise<VoiceLlm> {
         if (!this._llm) {
-            const { cwd, sessionDir, model, thinking, log } = this._options;
-            const started = VoiceLlm.start(
-                { cwd, sessionDir, systemPrompt: VOICE_SYSTEM_PROMPT, model: model || task.model, thinking, tools: VOICE_HOST_TOOLS },
-                (error) => {
-                    log(`Voice agent process exited${error ? `: ${error.message}` : ''}; it restarts on the next message.`);
-                    this._llm = undefined;
-                    this._loadedKey = undefined;
-                },
+            const { cwd, sessionDir, model, thinking, log, skills } = this._options;
+            const started = (skills?.() ?? Promise.resolve([])).then((chosen) =>
+                VoiceLlm.start(
+                    { cwd, sessionDir, systemPrompt: VOICE_SYSTEM_PROMPT, model: model || task.model, thinking, tools: VOICE_HOST_TOOLS, skills: chosen },
+                    (error) => {
+                        log(`Voice agent process exited${error ? `: ${error.message}` : ''}; it restarts on the next message.`);
+                        this._llm = undefined;
+                        this._loadedKey = undefined;
+                    },
+                ),
             );
             this._llm = started;
             this._loadedKey = undefined;
@@ -761,6 +785,7 @@ export class VoiceAgent {
                     ? `Research ${done.id} finished after ${seconds}s (${question}).`
                     : `Research ${done.id} failed after ${seconds}s: ${done.result}`,
             );
+            this._options.onResearchSettled?.(done);
             this._options.onChange?.();
             this._maybeProactive();
         });

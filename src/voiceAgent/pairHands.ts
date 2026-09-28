@@ -6,17 +6,26 @@ import type { CodeAnchor } from './codeAnchors';
 import type { DebugDriver } from './debugDriver';
 import { FileHands } from './fileHands';
 import type { DebugAction, EditorHands } from './hostTools';
-import { cleanTerminalOutput, insideFolder, locateEdit } from './pairText';
+import { cleanTerminalOutput, insideFolder, locateEdit, pickName } from './pairText';
 import { findViewers, languageOf, runPreviewCommand, settleWithin, type FileViewers, type Viewer } from './viewers';
 import type { OutputReader } from './vscodeOutput';
 
-/** Typing speed: one line per this long, or faster so the whole edit takes at most MAX_TYPING_MS. */
-const LINE_MS = 90;
-const MAX_TYPING_MS = 2000;
+/**
+ * Typing speed while the user follows Pi: one character per CHAR_MS, like a fast typist; a long edit
+ * types several characters per step so the whole edit takes at most MAX_TYPING_MS. Not followed, an
+ * edit goes in at once.
+ */
+const CHAR_MS = 40;
+const MAX_TYPING_MS = 8000;
 /** A new terminal's shell integration normally arrives within a second or two. */
 const SHELL_INTEGRATION_WAIT_MS = 5000;
 /** Output kept while a command runs; only its tail goes to the model. */
 const MAX_OUTPUT_CHARS = 200_000;
+/** terminal_send returns once a program's output has been quiet this long. */
+const QUIET_MS = 500;
+const POLL_MS = 100;
+/** A command's stream ends right after it; its last chunk may still be on the way. */
+const LAST_CHUNK_MS = 500;
 /** How long open_with waits for an editor to open or an extension's preview command to return. */
 const OPEN_WITH_TIMEOUT_MS = 8000;
 /** How long after a preview command returns its editor or panel may take to show up as a tab. */
@@ -27,13 +36,17 @@ const STAT_RETRY_MS = 200;
 
 /**
  * The voice agent's hands in the user's VS Code (docs/voice-pair-agent-cursor.md §11-§13): it opens
- * code and reads VS Code's output, and in pair mode types edits into the editor line by line at Pi's
+ * code and reads VS Code's output, and in pair mode types edits into the editor character by character (at once when not followed) at Pi's
  * writing highlight, manages files, runs commands in a Pi terminal the user can see, and drives the debugger.
  */
 export class PairHands implements EditorHands, vscode.Disposable {
     /** Pi terminals, oldest first; a busy one is running a command. */
     private readonly _terminals: vscode.Terminal[] = [];
     private readonly _busy = new Set<vscode.Terminal>();
+    /** Commands run_in_terminal left running, oldest first, for terminal_send and terminal_read; one that ended stays until its end is reported. */
+    private _leftRunning: TerminalRun[] = [];
+    /** The last send queued per running command, so the next one waits for it. */
+    private readonly _sending = new WeakMap<TerminalRun, Promise<unknown>>();
     private readonly _subscription: vscode.Disposable;
     /** Every path the pair tools touch goes through its workspace check. */
     private readonly _files: FileHands;
@@ -52,6 +65,7 @@ export class PairHands implements EditorHands, vscode.Disposable {
                 this._terminals.splice(i, 1);
             }
             this._busy.delete(terminal);
+            this._leftRunning = this._leftRunning.filter((run) => run.terminal !== terminal);
         });
     }
 
@@ -212,26 +226,26 @@ export class PairHands implements EditorHands, vscode.Disposable {
         const editor = await this._cursor.write(uri, new vscode.Range(startLine, 0, document.positionAt(place.end).line, 0));
 
         // The removal and every typed line form one undo step: only the first edit opens it, only the last closes it.
-        const lines = edit.newText.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const chunks = typingChunks(edit.newText, this._cursor.following);
         const removal = new vscode.Range(document.positionAt(place.start), document.positionAt(place.end));
-        if (!(await this._cursor.selfEdit(editor.edit((b) => b.delete(removal), { undoStopBefore: true, undoStopAfter: lines.length === 0 })))) {
+        if (!(await this._cursor.selfEdit(editor.edit((b) => b.delete(removal), { undoStopBefore: true, undoStopAfter: chunks.length === 0 })))) {
             throw new Error(`Could not edit ${relative}: its editor was closed.`);
         }
-        const pause = Math.min(LINE_MS, MAX_TYPING_MS / Math.max(lines.length, 1));
+        const pause = CHAR_MS;
         let offset = place.start;
-        for (let i = 0; i < lines.length; i++) {
+        for (let i = 0; i < chunks.length; i++) {
             const version = document.version;
             const at = document.positionAt(offset);
-            const last = i === lines.length - 1;
-            const typed = await this._cursor.selfEdit(editor.edit((b) => b.insert(at, lines[i]), { undoStopBefore: false, undoStopAfter: last }));
+            const last = i === chunks.length - 1;
+            const typed = await this._cursor.selfEdit(editor.edit((b) => b.insert(at, chunks[i]), { undoStopBefore: false, undoStopAfter: last }));
             // Someone else changed the file meanwhile (the user typing): offsets no longer hold, so stop here.
             if (!typed || document.version !== version + 1) {
-                const done = typed ? i + 1 : i;
+                const written = offset - place.start + (typed ? chunks[i].length : 0);
                 throw new Error(
-                    `Stopped after ${done} of ${lines.length} lines of ${relative}: ${typed ? 'the file changed while I was typing' : 'its editor was closed'}. Read it again before going on.`,
+                    `Stopped after ${written} of ${edit.newText.length} characters of ${relative}: ${typed ? 'the file changed while I was typing' : 'its editor was closed'}. Read it again before going on.`,
                 );
             }
-            offset += lines[i].length;
+            offset += chunks[i].length;
             this._cursor.writing(editor, new vscode.Range(startLine, 0, document.positionAt(offset).line, 0));
             if (!last) {
                 await sleep(pause);
@@ -241,7 +255,7 @@ export class PairHands implements EditorHands, vscode.Disposable {
         this._cursor.writing(editor, new vscode.Range(startLine, 0, endLine, 0));
         // Saving would also save the user's own unsaved changes in this file: leave that to them.
         const saved = !hadUnsavedChanges && (await document.save());
-        const where = lines.length === 0 ? `removed text at line ${startLine + 1}` : `wrote lines ${startLine + 1}-${endLine + 1}`;
+        const where = chunks.length === 0 ? `removed text at line ${startLine + 1}` : `wrote lines ${startLine + 1}-${endLine + 1}`;
         const state = saved ? 'saved' : 'not saved, because the file already had the user\'s unsaved changes';
         return `Edited ${relative}: ${where} (${state}). One Ctrl+Z in the editor undoes it.`;
     }
@@ -254,37 +268,113 @@ export class PairHands implements EditorHands, vscode.Disposable {
             terminal.sendText(command);
             return `Typed into the ${terminal.name} terminal, but its shell reports no shell integration, so the output and exit code are not visible to you: ask the user what happened.`;
         }
+        // An earlier command there has ended: what it left unreported goes with it.
+        this._leftRunning = this._leftRunning.filter((r) => r.terminal !== terminal);
         this._busy.add(terminal);
-        const execution = shell.executeCommand(command);
-        let output = '';
-        const reading = (async () => {
-            for await (const data of execution.read()) {
-                output = (output + data).slice(-MAX_OUTPUT_CHARS);
-            }
-        })().catch(() => undefined);
-        const { promise: ended, resolve: end } = Promise.withResolvers<number | undefined>();
+        const run = new TerminalRun(terminal, shell.executeCommand(command));
         const subscription = vscode.window.onDidEndTerminalShellExecution((e) => {
-            if (e.execution === execution) {
+            if (e.execution === run.execution) {
                 subscription.dispose();
                 this._busy.delete(terminal);
-                end(e.exitCode);
+                run.finish(e.exitCode);
             }
         });
         const timeout = new AbortController();
-        const outcome = await Promise.race([
-            ended.then((exitCode) => ({ done: true as const, exitCode })),
-            sleep(timeoutMs, { done: false as const }, { signal: timeout.signal }).catch(() => ({ done: false as const })),
+        const done = await Promise.race([
+            run.ended.then(() => true),
+            sleep(timeoutMs, false, { signal: timeout.signal }).catch(() => false),
         ]);
         timeout.abort();
-        if (!outcome.done) {
-            const soFar = cleanTerminalOutput(output);
-            return `Still running after ${Math.round(timeoutMs / 1000)}s; it keeps running in the ${terminal.name} terminal. Output so far:\n${soFar || '(none)'}`;
+        if (!done) {
+            this._leftRunning.push(run);
+            const soFar = cleanTerminalOutput(run.output);
+            run.shown = run.received;
+            return (
+                `Still running after ${Math.round(timeoutMs / 1000)}s in the "${terminal.name}" terminal. It keeps running; if it waits for input, ` +
+                `type a line into it with terminal_send, and see what it printed since with terminal_read (terminal "${terminal.name}"). Output so far:\n${soFar || '(none)'}`
+            );
         }
-        // The stream ends right after the command; wait briefly for its last chunk.
-        await Promise.race([reading, sleep(500)]);
-        const text = cleanTerminalOutput(output);
-        const exit = outcome.exitCode === undefined ? 'unknown (the shell did not report it)' : String(outcome.exitCode);
-        return `Exit code ${exit}.\n${text || '(no output)'}`;
+        await Promise.race([run.reading, sleep(LAST_CHUNK_MS)]);
+        const exit = run.exitCode === undefined ? 'unknown (the shell did not report it)' : String(run.exitCode);
+        return `Exit code ${exit}.\n${cleanTerminalOutput(run.output) || '(no output)'}`;
+    }
+
+    /**
+     * Sends to one terminal go one after another: a line typed while the previous one's output is still
+     * coming in would have its output reported as the previous one's.
+     */
+    sendToTerminal(input: { terminal?: string; text: string; enter: boolean; waitMs: number }): Promise<string> {
+        const run = this._leftRun(input.terminal);
+        const previous = this._sending.get(run) ?? Promise.resolve();
+        const next = previous.then(() => this._sendNow(run, input));
+        this._sending.set(run, next.catch(() => undefined));
+        return next;
+    }
+
+    private async _sendNow(run: TerminalRun, input: { text: string; enter: boolean; waitMs: number }): Promise<string> {
+        if (run.done) {
+            // Typing now would go to the shell as a new command, not to the program.
+            return `Nothing was typed: ${await this._report(run)}`;
+        }
+        run.terminal.show(true);
+        const before = run.received;
+        run.terminal.sendText(input.text, input.enter);
+        const deadline = Date.now() + input.waitMs;
+        while (!run.done && Date.now() < deadline && !(run.received > before && Date.now() - run.lastDataAt >= QUIET_MS)) {
+            await sleep(POLL_MS);
+        }
+        // The text itself is not repeated: it may be a secret.
+        return `Typed ${input.enter ? 'a line' : 'text'} into "${run.terminal.name}". ${await this._report(run)}`;
+    }
+
+    async readTerminal(terminal: string | undefined): Promise<string> {
+        const run = this._leftRun(terminal);
+        if (!run.done && run.received === run.shown) {
+            const last = cleanTerminalOutput(run.output, 20, 2000);
+            return `"${run.terminal.name}" is still running, with no new output since you last looked. Its last lines:\n${last || '(none)'}`;
+        }
+        return this._report(run);
+    }
+
+    /** The left-running command in the Pi terminal named `name`, else the latest still running (else the latest). */
+    private _leftRun(name: string | undefined): TerminalRun {
+        const runs = this._leftRunning;
+        if (runs.length === 0) {
+            throw new Error('No command is left running in a Pi terminal: start one with run_in_terminal.');
+        }
+        if (name === undefined) {
+            return runs.findLast((r) => !r.done) ?? runs[runs.length - 1];
+        }
+        const picked = pickName(
+            runs.map((r) => r.terminal.name),
+            name,
+            'Pi terminal with a command left running',
+        );
+        if ('error' in picked) {
+            throw new Error(picked.error);
+        }
+        return runs.find((r) => r.terminal.name === picked.name)!;
+    }
+
+    /**
+     * The output not yet shown (once an ended command's last chunk is in), and whether it still runs;
+     * an ended command is reported once, then forgotten.
+     */
+    private async _report(run: TerminalRun): Promise<string> {
+        if (run.done) {
+            await Promise.race([run.reading, sleep(LAST_CHUNK_MS)]);
+        }
+        // Only what the buffer still holds of it.
+        const unseen = run.received - run.shown;
+        const fresh = cleanTerminalOutput(unseen >= run.output.length ? run.output : run.output.slice(run.output.length - unseen));
+        run.shown = run.received;
+        const name = `"${run.terminal.name}"`;
+        if (run.done) {
+            this._leftRunning = this._leftRunning.filter((r) => r !== run);
+            const exit = run.exitCode === undefined ? 'unknown (the shell did not report it)' : String(run.exitCode);
+            return `The command in ${name} has ended, exit code ${exit}.${fresh ? ` Its last output:\n${fresh}` : ''}`;
+        }
+        return `${name} is still running. ${fresh ? `New output:\n${fresh}` : 'No new output yet: it may still be working; look again with terminal_read.'}`;
     }
 
     /** An idle Pi terminal, or a new one: a command never goes into a program still running. */
@@ -300,10 +390,67 @@ export class PairHands implements EditorHands, vscode.Disposable {
     }
 }
 
+/** One command run in a Pi terminal: its output as it arrives, and how far the model has seen it. */
+class TerminalRun {
+    /** The last MAX_OUTPUT_CHARS of output. */
+    output = '';
+    /** Characters received in all, and how many of them the model has been shown. */
+    received = 0;
+    shown = 0;
+    lastDataAt = Date.now();
+    done = false;
+    exitCode: number | undefined;
+    readonly reading: Promise<void>;
+    readonly ended: Promise<void>;
+    private readonly _end: () => void;
+
+    constructor(
+        readonly terminal: vscode.Terminal,
+        readonly execution: vscode.TerminalShellExecution,
+    ) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        this.ended = promise;
+        this._end = resolve;
+        this.reading = (async () => {
+            for await (const data of execution.read()) {
+                this.output = (this.output + data).slice(-MAX_OUTPUT_CHARS);
+                this.received += data.length;
+                this.lastDataAt = Date.now();
+            }
+        })().catch(() => undefined);
+    }
+
+    finish(exitCode: number | undefined): void {
+        this.done = true;
+        this.exitCode = exitCode;
+        this._end();
+    }
+}
+
 /** A tab by its group, title, and what it shows: a file, or a webview or custom editor's view type. */
 function tabKey(tab: vscode.Tab): string {
     const input = tab.input as { uri?: vscode.Uri; viewType?: string } | undefined;
     return [tab.group.viewColumn, tab.label, input?.viewType ?? '', input?.uri?.toString() ?? ''].join('\u0000');
+}
+
+/**
+ * The pieces an edit is typed in: followed, a character at a time (several when that would take over
+ * MAX_TYPING_MS); not followed, all at once. Splits by code point, so no surrogate pair is cut.
+ */
+export function typingChunks(text: string, following: boolean): string[] {
+    if (text.length === 0) {
+        return [];
+    }
+    if (!following) {
+        return [text];
+    }
+    const chars = Array.from(text);
+    const size = Math.ceil(chars.length / Math.max(1, Math.floor(MAX_TYPING_MS / CHAR_MS)));
+    const chunks: string[] = [];
+    for (let i = 0; i < chars.length; i += size) {
+        chunks.push(chars.slice(i, i + size).join(''));
+    }
+    return chunks;
 }
 
 function shellIntegration(terminal: vscode.Terminal): Promise<vscode.TerminalShellIntegration | undefined> {

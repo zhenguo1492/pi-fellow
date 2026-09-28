@@ -17,6 +17,10 @@ export interface ToolViewPayload {
     /** Streaming output tail while running. */
     partial?: string;
     defaultOpen?: boolean;
+    /** Renders this card instead of the registry's renderer for `name` (the Bot view's host tools). */
+    renderer?: ToolRenderer;
+    /** Header name instead of `name`, which then shows as its tooltip (the Bot view's plain-language labels). */
+    label?: string;
 }
 
 interface CardState {
@@ -105,8 +109,8 @@ function cardModel(payload: ToolViewPayload): CardModel {
         };
     }
     return {
-        label: payload.name,
-        renderer: resolveToolRenderer(payload.name),
+        label: payload.label ?? payload.name,
+        renderer: payload.renderer ?? resolveToolRenderer(payload.name),
         props: { name: payload.name, args, result: payload.result, running: payload.running },
         intent,
     };
@@ -171,6 +175,7 @@ function renderCard(view: HTMLElement, state: CardState): void {
     head.type = 'button';
     head.setAttribute('aria-expanded', String(state.open));
     if (model.intent) head.title = model.intent;
+    else if (payload.label) head.title = payload.name;
     head.addEventListener('click', (event) => {
         const path = view.dataset.filepath;
         if (path && openFile && event.target instanceof Element && event.target.closest('.tv-path')) {

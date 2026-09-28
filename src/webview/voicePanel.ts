@@ -20,9 +20,16 @@ import {
     type VoiceViewHostMessage,
     type VoiceViewState,
 } from '../shared/voiceViewProtocol';
+import { DEFAULT_SPEAKER_NAMES, type VoiceSpeakers } from '../shared/voiceSpeakers';
+import { DEFAULT_AVATAR, avatarMarkup } from './avatar';
 import { copyPlainText } from './chat/toast';
-import { formatTokenCount } from './tokenStatsBar';
-import { ICON_ROBOT } from './voiceBar';
+import { formatTokenCount } from './tokenCount';
+import { handleSentenceMessage } from './sentenceActions';
+import { voiceToolRenderer } from './toolCards/voice';
+import type { ToolResultPayload } from './toolCards/types';
+import { createToolView, toToolResult, updateToolView, type ToolViewPayload } from './toolView';
+import { setVoiceBarAvatar } from './voiceBar';
+import { pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from './sentencePick';
 import { vscode } from './vscodeApi';
 
 /** Within this many pixels of the bottom, the transcript follows new content. */
@@ -47,13 +54,37 @@ const HISTORY_ICON =
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2.25 2.5V5h2.5"/><path d="M8 5v3.25l2 1.25"/></svg>';
 
 const SVG_OPEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
-/** Avatars per speaker; the bot's is the robot that starts voice mode. */
-const AVATAR: Record<'user' | 'bot' | 'narr' | 'sys', string> = {
-    user: `${SVG_OPEN}<circle cx="8" cy="5.5" r="2.75"/><path d="M2.75 14a5.25 5.25 0 0 1 10.5 0"/></svg>`,
-    bot: ICON_ROBOT,
+
+/** Avatars of the turns that are not the user's or the voice agent's replies. */
+const AVATAR: Record<'narr' | 'sys', string> = {
     narr: `${SVG_OPEN}<path d="M3 12h10l-1.25-1.5V7a3.75 3.75 0 0 0-7.5 0v3.5z"/><path d="M6.5 13.75a1.5 1.5 0 0 0 3 0"/></svg>`,
     sys: `${SVG_OPEN}<path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>`,
 };
+
+/**
+ * The user's and the voice agent's names (escaped) and avatar markup, as set; built once per
+ * `speakers` message, so every turn shares the same strings and `setHtml` sees no change.
+ */
+const speakerView: Record<'user' | 'bot', { name: string; avatar: string }> = {
+    user: { name: DEFAULT_SPEAKER_NAMES.user, avatar: DEFAULT_AVATAR.user },
+    bot: { name: DEFAULT_SPEAKER_NAMES.bot, avatar: DEFAULT_AVATAR.bot },
+};
+/** Bumped per `speakers` message: pictures scale asynchronously, and only the newest applies. */
+let speakersLoad = 0;
+
+async function applySpeakers(speakers: VoiceSpeakers): Promise<void> {
+    const load = ++speakersLoad;
+    const [user, bot] = await Promise.all([avatarMarkup(speakers.user.avatar, DEFAULT_AVATAR.user), avatarMarkup(speakers.bot.avatar, DEFAULT_AVATAR.bot)]);
+    if (load !== speakersLoad) {
+        return;
+    }
+    speakerView.user = { name: escapeHtml(speakers.user.name), avatar: user };
+    speakerView.bot = { name: escapeHtml(speakers.bot.name), avatar: bot };
+    setVoiceBarAvatar(bot);
+    if (lastState) {
+        renderStream(lastState);
+    }
+}
 
 function post(message: VoiceViewClientMessage): void {
     vscode.postMessage({ type: 'voice', message } satisfies ClientMessage);
@@ -177,7 +208,7 @@ function renderHead(s: VoiceViewState): void {
         row('STT', [escapeHtml(shortUrl(stt.url)), escapeHtml(stt.model), `language ${escapeHtml(stt.language)}`].join(sep), 'oh-my-pi-chater.voice.*'),
         row(
             'TTS',
-            [escapeHtml(tts.provider), escapeHtml(shortUrl(tts.url)), escapeHtml(tts.model), `voice ${escapeHtml(tts.voice)}`, `speed ${tts.speed}`, `language: ${escapeHtml(tts.language)}`].join(sep),
+            [escapeHtml(tts.engine), escapeHtml(shortUrl(tts.url)), escapeHtml(tts.model), `voice ${escapeHtml(tts.voice)}`, `speed ${tts.speed}`, `language: ${escapeHtml(tts.language)}`].join(sep),
             'oh-my-pi-chater.voiceAgent.tts.*',
         ),
     ];
@@ -220,7 +251,7 @@ function renderHead(s: VoiceViewState): void {
         [
             brief('LLM', escapeHtml(llm.model ?? 'chat tab’s model')),
             brief('STT', escapeHtml(shortUrl(stt.url))),
-            brief('TTS', escapeHtml(tts.provider)),
+            brief('TTS', escapeHtml(shortUrl(tts.url))),
             ...(u ? [brief('Tokens', `${formatTokenCount(u.input + u.output)}${sep}${cost(u.cost)}`)] : calls.length ? [brief('Tokens', `${calls.length} call${calls.length === 1 ? '' : 's'}`)] : []),
         ].join(sep),
     );
@@ -252,10 +283,12 @@ interface TurnView {
     pre: HTMLElement;
     /** Holds `pre`, `body` and `post`; clamped to three lines for long user / setting texts. */
     line: HTMLElement;
+    /** `dataset.mode`: per-sentence spans (`sentences`) or plain text (`text`); the Alt gestures read it too. */
     body: HTMLElement;
     post: HTMLElement;
     error: HTMLElement;
-    chips: HTMLElement;
+    /** The reply's tool calls and lookups, as the worker's tool cards. */
+    tools: HTMLElement;
     /** Show more / Copy under a clamped `line`; hidden unless the text overflows three lines. */
     clamp: HTMLElement;
     more: HTMLButtonElement;
@@ -264,13 +297,11 @@ interface TurnView {
     /** Stopwatch button after the header's time, shown on hover; toggles `timingBody` (the turn's latency breakdown). */
     timing: HTMLButtonElement;
     timingBody: HTMLElement;
-    /** Whether `body` holds per-sentence spans or plain text. */
-    mode?: 'sentences' | 'text';
 }
 
 const turns = new Map<string, TurnView>();
-/** Keys of expanded chips (`<entry id>:<chip>`), kept across re-renders and snapshots. */
-const openChips = new Set<string>();
+/** Keys of expanded latency breakdowns (`<entry id>:timing`), kept across re-renders and snapshots. */
+const openTimings = new Set<string>();
 /** Entry ids of long user / setting turns the user expanded. */
 const expandedTurns = new Set<string>();
 let sessionId: string | undefined;
@@ -280,7 +311,7 @@ function createTurn(): TurnView {
     el.innerHTML =
         '<div class="vp-av" aria-hidden="true"></div><time class="vp-gtime"></time><div class="vp-who"><span class="vp-name"></span><time class="vp-time"></time><button type="button" class="vp-timing" aria-expanded="false" hidden>' +
         TIMING_ICON +
-        '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-clamp" hidden><button type="button" class="vp-more"></button><button type="button" class="vp-copy" title="Copy message">Copy</button></div><div class="vp-err" hidden></div><div class="vp-chips"></div><div class="vp-chip-body vp-timing-body" hidden></div></div>';
+        '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-clamp" hidden><button type="button" class="vp-more"></button><button type="button" class="vp-copy" title="Copy message">Copy</button></div><div class="vp-err" hidden></div><div class="vp-tools"></div><div class="vp-timing-body" hidden></div></div>';
     const part = <T extends HTMLElement = HTMLElement>(sel: string) => el.querySelector<T>(sel)!;
     return {
         el,
@@ -294,7 +325,7 @@ function createTurn(): TurnView {
         body: part('.vp-body'),
         post: part('.vp-post'),
         error: part('.vp-err'),
-        chips: part('.vp-chips'),
+        tools: part('.vp-tools'),
         clamp: part('.vp-clamp'),
         more: part<HTMLButtonElement>('.vp-more'),
         timing: part<HTMLButtonElement>('.vp-timing'),
@@ -311,7 +342,7 @@ function renderStream(s: VoiceViewState): void {
     if (s.session.id !== sessionId) {
         sessionId = s.session.id;
         turns.clear();
-        openChips.clear();
+        openTimings.clear();
         expandedTurns.clear();
         stream.replaceChildren(emptyEl);
     }
@@ -378,16 +409,16 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     }
     if (entry.kind === 'user') {
         view.el.className = 'vp-turn user';
-        setHtml(view.avatar, AVATAR.user);
+        setHtml(view.avatar, speakerView.user.avatar);
         const [icon, title] = SOURCE_ICON[entry.source] ?? SOURCE_ICON.text;
-        setHtml(view.who, `User<span class="vp-src" title="${title}">${icon}</span>`);
+        setHtml(view.who, `<span class="vp-nm">${speakerView.user.name}</span><span class="vp-src" title="${title}">${icon}</span>`);
         setHtml(view.attach, '');
         setHtml(view.pre, entry.bargeIn ? '<span class="vp-barge">Barged in</span>' : '');
         setText(view, entry.text);
         setClampText(view, entry.text);
         setHtml(view.post, '');
         setError(view, undefined);
-        setHtml(view.chips, '');
+        view.tools.replaceChildren();
         const heard = entry.latency;
         const toText = heard?.endOfTurn !== undefined && heard.stt !== undefined ? heard.endOfTurn + heard.stt : undefined;
         setTiming(
@@ -411,7 +442,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         setClampText(view, entry.text);
         setHtml(view.post, '');
         setError(view, undefined);
-        setHtml(view.chips, '');
+        view.tools.replaceChildren();
         setTiming(view, entry.id, []);
         return;
     }
@@ -419,22 +450,21 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     const kind = entry.proactive ? 'narr' : 'bot';
     view.el.className = `vp-turn ${kind}${entry.silent ? ' silent' : ''}`;
     setClampText(view, undefined);
-    setHtml(view.avatar, AVATAR[kind]);
-    setHtml(view.who, `${entry.proactive ? 'Update' : 'Bot'}<span class="vp-badge">AI</span>`);
+    setHtml(view.avatar, entry.proactive ? AVATAR.narr : speakerView.bot.avatar);
+    setHtml(view.who, `<span class="vp-nm">${entry.proactive ? 'Update' : speakerView.bot.name}</span><span class="vp-badge">AI</span>`);
     setHtml(view.attach, debug && entry.input ? escapeHtml(entry.input) : '');
     setHtml(view.pre, entry.proactive ? `<span class="vp-kind ${escapeHtml(entry.proactive)}">${escapeHtml(entry.proactive)}</span>` : '');
 
     const sentences = entry.sentences ?? [];
     const cut = sentences.some((x) => x.state === 'cut');
     if (entry.silent) {
-        const said = entry.text.replace(/<silent\s*\/>/g, '').trim();
-        setText(view, said);
+        setText(view, entry.text.replace(/<silent\s*\/>/g, '').trim());
         setHtml(view.post, '<span class="vp-partial">&lt;silent/&gt; · not spoken</span>');
     } else {
         if (sentences.length > 0) {
             setSentences(view, sentences);
         } else if (!entry.done && !entry.text) {
-            view.mode = 'text';
+            view.body.dataset.mode = 'text';
             setHtml(view.body, '<span class="vp-dots"><i></i><i></i><i></i></span>');
         } else {
             setText(view, entry.text);
@@ -449,7 +479,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         );
     }
     setError(view, entry.error);
-    renderChips(view.chips, entry.id, entry.tools, entry.lookups);
+    renderTools(view.tools, entry.id, entry.tools);
     const latency = entry.latency;
     setTiming(
         view,
@@ -483,7 +513,7 @@ function setTiming(view: TurnView, entryId: string, parts: Array<[string, number
         return;
     }
     const key = `${entryId}:timing`;
-    const open = openChips.has(key);
+    const open = openTimings.has(key);
     view.timing.dataset.key = key;
     view.timing.title = summary ? `Timing: ${summary}\n${detail}` : `Timing\n${detail}`;
     view.timing.setAttribute('aria-expanded', String(open));
@@ -494,12 +524,13 @@ function setTiming(view: TurnView, entryId: string, parts: Array<[string, number
     view.timingBody.hidden = !open;
 }
 
+/** Plain text in `body`. */
 function setText(view: TurnView, text: string): void {
-    if (view.mode !== 'text' || htmlCache.has(view.body) || view.body.textContent !== text) {
+    if (view.body.dataset.mode !== 'text' || htmlCache.has(view.body) || view.body.textContent !== text) {
         view.body.textContent = text;
         htmlCache.delete(view.body);
+        view.body.dataset.mode = 'text';
     }
-    view.mode = 'text';
 }
 
 /** Lines a long user / setting turn shows until expanded. */
@@ -580,8 +611,8 @@ function setError(view: TurnView, error: string | undefined): void {
 const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
 
 function setSentences(view: TurnView, sentences: VoiceSentence[]): void {
-    if (view.mode !== 'sentences') {
-        view.mode = 'sentences';
+    if (view.body.dataset.mode !== 'sentences') {
+        view.body.dataset.mode = 'sentences';
         view.body.replaceChildren();
         htmlCache.delete(view.body);
     }
@@ -618,129 +649,84 @@ function setSentences(view: TurnView, sentences: VoiceSentence[]): void {
     }
 }
 
-interface Chip {
-    key: string;
-    cls: string;
-    html: string;
-}
+/** What a card shows of a tool entry: snapshots arrive many times a second, and cards are redrawn only when it changes. */
+const cardShown = new WeakMap<Element, string>();
 
-function str(value: unknown): string | undefined {
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function firstLine(text: string): string {
-    return text.trim().split('\n', 1)[0] ?? '';
-}
-
-function toolChip(tool: VoiceToolEntry): { cls: string; label: string; title: string; status?: [string, string]; detail?: string } {
-    const args = tool.args ?? {};
-    const result = tool.result ?? '';
-    const done: [string, string] = ['vp-st-ok', '✓'];
+/**
+ * How a tool entry looks in the Bot view, as the chips before it: a plain-language label, and a kind
+ * that colours it (`data-kind`, voice.css). Lookups keep their tool names.
+ */
+function toolLook(tool: VoiceToolEntry): { label: string; kind: string } {
+    if (tool.id !== undefined) {
+        return { label: tool.name, kind: 'read' };
+    }
     switch (tool.name) {
-        case 'tell_worker': {
-            const proposed = /^not sent yet/i.test(result.trim());
-            const opts = [str(args.when) && `when: ${str(args.when)}`, typeof args.readOnly === 'boolean' && `readOnly: ${args.readOnly}`]
-                .filter(Boolean)
-                .join(' · ');
-            return {
-                cls: proposed ? 'proposal' : 'dispatch',
-                label: proposed ? 'Proposed' : 'Sent to worker',
-                title: str(args.message) ?? '',
-                status: proposed ? ['vp-st-wait', 'awaiting confirmation'] : done,
-                detail: [opts, str(args.message)].filter(Boolean).join('\n\n'),
-            };
-        }
+        case 'tell_worker':
+            return /^not sent yet/i.test(tool.result.trim()) ? { label: 'Proposed', kind: 'proposal' } : { label: 'Sent to worker', kind: 'dispatch' };
         case 'confirm_task':
-            return { cls: 'confirm', label: 'Confirmed task', title: firstLine(result), status: done };
-        case 'answer_worker': {
-            const answer =
-                str(args.value) ??
-                (typeof args.confirmed === 'boolean' ? (args.confirmed ? 'Yes' : 'No') : args.cancel === true ? 'Cancelled' : undefined);
-            return { cls: 'answer', label: 'Answered worker', title: answer ?? firstLine(result), status: done };
-        }
+            return { label: 'Confirmed task', kind: 'confirm' };
+        case 'answer_worker':
+            return { label: 'Answered worker', kind: 'answer' };
         case 'stop_worker':
-            return { cls: 'stop', label: 'Stopped worker', title: firstLine(result), status: done };
+            return { label: 'Stopped worker', kind: 'stop' };
         case 'research':
-            return { cls: 'research', label: 'Research', title: str(args.question) ?? '', detail: str(args.question) };
+            return { label: 'Research', kind: 'research' };
         case 'worker_status':
-            return { cls: 'status', label: 'Checked worker', title: firstLine(result) };
-        default: {
-            const main = str(args.message) ?? str(args.question);
-            return { cls: 'status', label: tool.name, title: main ?? firstLine(result), detail: main };
-        }
+            return { label: 'Checked worker', kind: 'status' };
+        // Lookups saved as descriptions only, before they were tool entries.
+        case 'lookup':
+            return { label: 'Looked up', kind: 'read' };
+        default:
+            return { label: tool.name, kind: 'status' };
     }
 }
 
-function chipHtml(label: string, title: string, rawName: string | undefined, status: [string, string] | undefined, body: string): string {
-    const st = status ? `<span class="${status[0]}">${escapeHtml(status[1])}</span>` : '';
-    const tn = `<span class="vp-tn"${rawName ? ` title="${escapeHtml(rawName)}"` : ''}>${escapeHtml(label)}</span>`;
-    return `<summary><span class="vp-car">▶</span>${tn}<span class="vp-t">${escapeHtml(title)}</span>${st}</summary>${body ? `<div class="vp-chip-body">${body}</div>` : ''}`;
+/**
+ * A host tool call or lookup as a tool card. `research` only starts a job: its card runs until the job
+ * settles, then holds the findings. Every field is set, so an update clears what no longer applies.
+ */
+function toolCard(tool: VoiceToolEntry, label: string): ToolViewPayload {
+    const { research } = tool;
+    let result: ToolResultPayload | undefined;
+    if (research) {
+        result = research.status === 'running' ? undefined : toToolResult(research.result ?? '', research.status === 'failed');
+    } else if (!tool.running) {
+        result = toToolResult(tool.result, tool.isError);
+    }
+    return {
+        name: tool.name,
+        label,
+        args: tool.args,
+        result,
+        running: tool.running === true || research?.status === 'running',
+        // Lookups are the worker's own tools; host tools have renderers of their own.
+        renderer: tool.id === undefined ? voiceToolRenderer(tool.name) : undefined,
+    };
 }
 
-function renderChips(container: HTMLElement, entryId: string, tools: VoiceToolEntry[], lookups: string[]): void {
-    const chips: Chip[] = tools.map((tool, i) => {
-        const c = toolChip(tool);
-        const status: [string, string] | undefined = tool.isError ? ['vp-st-no', '✗'] : c.status;
-        const parts: string[] = [];
-        if (c.detail) {
-            parts.push(escapeHtml(c.detail));
-        }
-        if (tool.result) {
-            parts.push(`<span class="vp-res">${escapeHtml(tool.result)}</span>`);
-        }
-        return {
-            key: `${entryId}:t${i}`,
-            cls: `vp-chip ${c.cls}${tool.isError ? ' failed' : ''}`,
-            html: chipHtml(c.label, c.title, tool.name, status, parts.join('')),
-        };
-    });
-    if (lookups.length > 0) {
-        const title = lookups.length > 1 ? `${lookups[0]} +${lookups.length - 1}` : lookups[0];
-        chips.push({
-            key: `${entryId}:lookups`,
-            cls: 'vp-chip read',
-            html: chipHtml('Looked up', title, undefined, undefined, escapeHtml(lookups.join('\n'))),
-        });
-    }
+function renderTools(container: HTMLElement, entryId: string, tools: VoiceToolEntry[]): void {
     const existing = container.children;
-    chips.forEach((chip, i) => {
-        const el = existing[i] as HTMLDetailsElement | undefined;
-        if (el && el.dataset.key === chip.key && el.className === chip.cls && htmlCache.get(el) === chip.html) {
+    tools.forEach((tool, i) => {
+        // A tool entry's arguments never change; its result and research state fill in once.
+        const shown = `${tool.name}|${tool.running}|${tool.isError}|${tool.result.length}|${tool.research?.status}|${tool.research?.result?.length}`;
+        let card = existing[i] as HTMLElement | undefined;
+        if (card && cardShown.get(card) === shown) {
             return;
         }
-        const details = document.createElement('details');
-        details.className = chip.cls;
-        details.dataset.key = chip.key;
-        details.innerHTML = chip.html;
-        htmlCache.set(details, chip.html);
-        details.open = openChips.has(chip.key);
-        if (el) {
-            el.replaceWith(details);
+        const { label, kind } = toolLook(tool);
+        if (card) {
+            updateToolView(card, toolCard(tool, label));
         } else {
-            container.append(details);
+            card = createToolView(`${entryId}:t${i}`, toolCard(tool, label));
+            container.append(card);
         }
+        card.dataset.kind = kind;
+        cardShown.set(card, shown);
     });
-    while (existing.length > chips.length) {
+    while (existing.length > tools.length) {
         existing[existing.length - 1].remove();
     }
 }
-
-// `toggle` does not bubble; listen in the capture phase.
-stream.addEventListener(
-    'toggle',
-    (e) => {
-        const details = e.target as HTMLElement;
-        if (!(details instanceof HTMLDetailsElement) || !details.dataset.key) {
-            return;
-        }
-        if (details.open) {
-            openChips.add(details.dataset.key);
-        } else {
-            openChips.delete(details.dataset.key);
-        }
-    },
-    true,
-);
 
 stream.addEventListener('click', (e) => {
     const clampButton = (e.target as Element).closest<HTMLButtonElement>('.vp-more, .vp-copy');
@@ -760,14 +746,67 @@ stream.addEventListener('click', (e) => {
     if (!button || !key) {
         return;
     }
-    const open = !openChips.delete(key);
+    const open = !openTimings.delete(key);
     if (open) {
-        openChips.add(key);
+        openTimings.add(key);
     }
     button.classList.toggle('open', open);
     button.setAttribute('aria-expanded', String(open));
     button.closest('.vp-turn')!.querySelector<HTMLElement>('.vp-timing-body')!.hidden = !open;
 });
+
+/**
+ * The Bot view's user turns and replies, for the Alt gestures (sentenceActions.ts): plain text cut
+ * into sentences as TTS reads it, or a spoken reply's own sentences, one span each. Setting lines
+ * are left out.
+ */
+export const botSentences: SentenceSurface = {
+    name: 'bot',
+    pick(node, offset) {
+        const body = node.parentElement?.closest<HTMLElement>('.vp-body');
+        const turn = body?.closest<HTMLElement>('.vp-turn');
+        const entryId = turn?.dataset.id;
+        if (!body || !turn || !entryId || turn.classList.contains('sys') || !stream.contains(turn)) {
+            return undefined;
+        }
+        if (body.dataset.mode === 'sentences') {
+            const span = node.parentElement!.closest('.vp-s');
+            const index = span ? Array.prototype.indexOf.call(body.children, span) : -1;
+            const text = span?.firstChild;
+            return index >= 0 && text instanceof Text && text.data.trim()
+                ? { surface: botSentences, entryId, piece: { text: text.data, sentence: index }, source: text.data }
+                : undefined;
+        }
+        const nodes = textNodesIn(body);
+        const shown = nodes.map((n) => n.data).join('');
+        let at = offset;
+        for (const t of nodes) {
+            if (t === node) {
+                break;
+            }
+            at += t.length;
+        }
+        const piece = pieceAt(shown, at);
+        return piece && { surface: botSentences, entryId, piece, source: shown.slice(...piece.range!) };
+    },
+    rangeOf({ entryId, piece, source }: PickedSentence) {
+        const body = stream.querySelector<HTMLElement>(`.vp-turn[data-id="${CSS.escape(entryId)}"] .vp-body`);
+        if (!body) {
+            return undefined;
+        }
+        if (piece.sentence !== undefined) {
+            const node = body.dataset.mode === 'sentences' ? body.children[piece.sentence]?.firstChild : undefined;
+            if (!(node instanceof Text) || node.data !== source) {
+                return undefined;
+            }
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            return range;
+        }
+        const nodes = body.dataset.mode === 'text' && piece.range ? textNodesIn(body) : [];
+        return nodes.map((n) => n.data).join('').slice(...piece.range!) === source && nodes.length > 0 ? rangeInNodes(nodes, ...piece.range!) : undefined;
+    },
+};
 
 // ── Cards above the transcript: tasks to confirm, background research ──
 // The worker and its requests are not repeated here: the chat around the panel shows them.
@@ -894,15 +933,20 @@ cardsEl.addEventListener('click', (e) => {
     }
 });
 
-// ── Snapshot ──
+// ── Host messages ──
 
 export function handleVoiceMessage(msg: VoiceViewHostMessage): void {
-    const s = msg.state;
-    root.dataset.state = s.phase;
-    root.classList.toggle('readonly', s.session.readonly);
-    renderHead(s);
-    renderCards(s);
-    renderStream(s);
+    if (msg.type === 'state') {
+        root.dataset.state = msg.state.phase;
+        root.classList.toggle('readonly', msg.state.session.readonly);
+        renderHead(msg.state);
+        renderCards(msg.state);
+        renderStream(msg.state);
+    } else if (msg.type === 'speakers') {
+        void applySpeakers(msg.speakers);
+    } else {
+        handleSentenceMessage(msg);
+    }
 }
 
 post({ type: 'ready' });

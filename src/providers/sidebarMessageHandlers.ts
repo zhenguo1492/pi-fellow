@@ -22,6 +22,15 @@ export function conversationHandlers(host: SidebarHost, planDocument: PlanDocume
         selectModel: async () => {
             await vscode.commands.executeCommand('oh-my-pi-chater.selectModel');
         },
+        getContextBreakdown: async (_msg, tab) => {
+            // Always answered, even after a tab switch: the webview has one request in flight at a time
+            // and refetches when the status line's context changes.
+            const reply = await tab.session.getContextBreakdown().then(
+                (breakdown) => ({ breakdown }),
+                (err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }),
+            );
+            host.post({ type: 'contextBreakdown', ...reply });
+        },
         getModels: (_msg, tab) => {
             host.postModelFooter(tab);
         },
@@ -159,7 +168,6 @@ export function conversationHandlers(host: SidebarHost, planDocument: PlanDocume
             tab.isThinking = false;
             tab.agentStartTime = Date.now();
             if (tab.id === host.activeTabId) {
-                vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', true);
                 host.sendStateSync();
             }
             try {
@@ -167,7 +175,6 @@ export function conversationHandlers(host: SidebarHost, planDocument: PlanDocume
             } catch (err) {
                 tab.isStreaming = false;
                 if (tab.id === host.activeTabId) {
-                    vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.isStreaming', false);
                     host.sendStateSync();
                 }
                 throw err;

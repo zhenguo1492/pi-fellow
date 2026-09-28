@@ -57,6 +57,22 @@ const piExtensionConfig = {
     minify: false,
 };
 
+/**
+ * The built-in voice engine, a separate process (src/voice/builtinEngine/server.ts). sherpa-onnx-node
+ * is a native addon: not bundled, copied next to the server by copyVoiceEngineRuntime.
+ */
+const voiceEngineConfig = {
+    entryPoints: ['src/voice/builtinEngine/server.ts'],
+    bundle: true,
+    outfile: 'out/voice-engine/server.js',
+    external: ['sherpa-onnx-node'],
+    format: 'cjs',
+    platform: 'node',
+    target: 'node22',
+    sourcemap: true,
+    minify: false,
+};
+
 async function copyStyles() {
     const stylesDir = path.join('out', 'webview', 'styles');
     await fs.promises.mkdir(stylesDir, { recursive: true });
@@ -80,21 +96,35 @@ async function copyOrtRuntime() {
     }
 }
 
+/**
+ * sherpa-onnx-node and this platform's prebuilt binaries, as out/voice-engine/node_modules: the VSIX
+ * is packaged with --no-dependencies. Its loader finds the binaries in the sibling package directory.
+ */
+async function copyVoiceEngineRuntime() {
+    const modulesDir = path.join('out', 'voice-engine', 'node_modules');
+    const platform = process.platform === 'win32' ? 'win' : process.platform;
+    for (const pkg of ['sherpa-onnx-node', `sherpa-onnx-${platform}-${process.arch}`]) {
+        await fs.promises.cp(path.dirname(require.resolve(`${pkg}/package.json`)), path.join(modulesDir, pkg), { recursive: true });
+    }
+}
+
 async function build() {
     if (isWatch) {
-        await Promise.all([copyStyles(), copyOrtRuntime()]);
+        await Promise.all([copyStyles(), copyOrtRuntime(), copyVoiceEngineRuntime()]);
         const extCtx = await esbuild.context(extensionConfig);
         const webCtx = await esbuild.context(webviewConfig);
         const settingsCtx = await esbuild.context(settingsWebviewConfig);
         const piExtensionCtx = await esbuild.context(piExtensionConfig);
-        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), piExtensionCtx.watch()]);
+        const voiceEngineCtx = await esbuild.context(voiceEngineConfig);
+        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), piExtensionCtx.watch(), voiceEngineCtx.watch()]);
         console.log('Watching for changes...');
     } else {
         await esbuild.build(extensionConfig);
         await esbuild.build(webviewConfig);
         await esbuild.build(settingsWebviewConfig);
         await esbuild.build(piExtensionConfig);
-        await Promise.all([copyStyles(), copyOrtRuntime()]);
+        await esbuild.build(voiceEngineConfig);
+        await Promise.all([copyStyles(), copyOrtRuntime(), copyVoiceEngineRuntime()]);
         console.log('Build complete.');
     }
 }

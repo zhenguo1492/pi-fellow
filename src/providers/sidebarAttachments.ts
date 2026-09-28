@@ -55,7 +55,7 @@ export class SidebarAttachments {
         const processed = await processFilePaths(unique, cwd);
         if (processed.length === 0) {
             vscode.window.showWarningMessage(
-                'Oh My Pi Chater: dropped files could not be read or are unsupported.',
+                'PI Buddy: dropped files could not be read or are unsupported.',
             );
             return;
         }
@@ -169,7 +169,7 @@ export class SidebarAttachments {
                     types.includes('application/vnd.code.uri-list');
                 if (fromExplorer) {
                     void vscode.window.showInformationMessage(
-                        'Oh My Pi Chater: From Explorer, hold Shift while dropping on the message box. Or right-click the file → Add to Chat.',
+                        'PI Buddy: From Explorer, hold Shift while dropping on the message box. Or right-click the file → Add to Chat.',
                     );
                 }
             },

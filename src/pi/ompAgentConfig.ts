@@ -180,34 +180,27 @@ export async function readOmpAgentConfigData(
     };
 }
 
-export async function updateOmpDefaults(
+/** `modelRoles.default` and `defaultThinkingLevel` in config.yml; `''` model clears the default (auto). */
+export function updateOmpDefaults(
     fields: { provider?: string; model?: string; thinkingLevel?: string },
-    sessionManager?: PiChatSession,
     agentDir: string = getOmpAgentDir(),
-): Promise<void> {
+): void {
     writeOmpConfig((current) => {
         const next = { ...current };
         if (fields.thinkingLevel !== undefined) {
             next.defaultThinkingLevel = fields.thinkingLevel;
         }
-        if (fields.model !== undefined || fields.provider !== undefined) {
+        if (fields.model !== undefined) {
             const modelRoles = { ...(next.modelRoles || {}) };
             if (fields.model) {
                 modelRoles.default = fields.provider ? `${fields.provider}/${fields.model}` : fields.model;
+            } else {
+                delete modelRoles.default;
             }
             next.modelRoles = modelRoles;
         }
         return next;
     }, agentDir);
-
-    if (sessionManager) {
-        if (fields.provider && fields.model) {
-            await sessionManager.setModel(fields.provider, fields.model).catch(() => {});
-        }
-        if (fields.thinkingLevel) {
-            sessionManager.setThinkingLevel(fields.thinkingLevel);
-        }
-    }
 }
 
 export async function addOmpSkillPath(skillPath: string, agentDir: string = getOmpAgentDir()): Promise<void> {

@@ -11,9 +11,9 @@ export function buildAuthTab(data: SettingsData): HTMLElement {
     return buildTabPanel('auth', [
         buildSection('Authentication', [
             buildReadOnlyRow('Agent directory', data.piAgentDir),
-            buildAuthActionsRow(),
+            buildAuthActionsRow(data.backend),
             buildFileButtons(data.backend),
-            buildAuthIndicator(data.authMethod),
+            buildAuthIndicator(data.authMethod, data.backend),
             buildAuthProvidersList(cfg, data.backend),
         ], 'auth'),
         buildSection(defaultsTitle, [
@@ -40,15 +40,16 @@ function buildFileButtons(backend: AgentBackend = 'pi'): HTMLElement {
     return row;
 }
 
-function buildAuthActionsRow(): HTMLElement {
+function buildAuthActionsRow(backend: AgentBackend): HTMLElement {
     const row = el('div', 'setting-row auth-actions');
+    const store = backend === 'omp' ? 'agent.db' : 'auth.json';
     row.innerHTML = `
         <div class="setting-label-row"><label>Provider authentication</label></div>
         <div class="btn-row">
             <button type="button" class="setting-btn primary" id="btn-pi-login">Configure provider (/login)</button>
             <button type="button" class="setting-btn secondary" id="btn-pi-logout">Remove credentials (/logout)</button>
         </div>
-        <p class="setting-description">Same flow as typing <code>/login</code> in chat. Saves API keys and OAuth tokens to <code>auth.json</code>. No Pi CLI required.</p>
+        <p class="setting-description">Runs <code>/login</code> or <code>/logout</code> in the chat's terminal view, the same flow as the ${backend} CLI. Credentials are stored in <code>${store}</code>.</p>
     `;
     return row;
 }
@@ -71,42 +72,42 @@ function buildAuthProvidersList(cfg: PiAgentConfigData, backend: AgentBackend = 
     return row;
 }
 
+/** `<option>`s of the default model select: the models of `provider`, or every model while it is auto. */
+export function modelOptionsHtml(models: PiAgentConfigData['availableModels'], provider: string, selected: string): string {
+    const shown = provider ? models.filter((m) => m.provider === provider) : models;
+    return [
+        { value: '', label: '(auto)' },
+        ...shown.map((m) => ({ value: m.id, label: m.name ? `${m.id} — ${m.name}` : m.id })),
+    ].map((o) =>
+        `<option value="${escapeHtml(o.value)}" ${o.value === selected ? 'selected' : ''}>${escapeHtml(o.label)}</option>`,
+    ).join('');
+}
+
 function buildPiModelDefaults(data: SettingsData, cfg: PiAgentConfigData): HTMLElement {
     const providers = [...new Set(cfg.availableModels.map((m) => m.provider))].sort();
     const currentProvider = data.piDefaultProvider ?? '';
-    const currentModel = data.piDefaultModel ?? '';
+    const configFile = data.backend === 'omp' ? 'config.yml' : 'settings.json';
 
     const providerOpts = [
         { value: '', label: '(auto)' },
         ...providers.map((p) => ({ value: p, label: p })),
     ];
 
-    const modelsForProvider = currentProvider
-        ? cfg.availableModels.filter((m) => m.provider === currentProvider)
-        : cfg.availableModels;
-
-    const modelOpts = [
-        { value: '', label: '(auto)' },
-        ...modelsForProvider.map((m) => ({ value: m.id, label: m.name ? `${m.id} — ${m.name}` : m.id })),
-    ];
-
     const row = el('div', 'setting-row pi-defaults');
     row.innerHTML = `
         <div class="setting-label-row"><label>Default provider / model</label></div>
         <div class="two-col">
-            <select id="pi-default-provider" class="setting-select" data-pi-field="provider">
+            <select id="pi-default-provider" class="setting-select">
                 ${providerOpts.map((o) =>
                     `<option value="${escapeHtml(o.value)}" ${o.value === currentProvider ? 'selected' : ''}>${escapeHtml(o.label)}</option>`,
                 ).join('')}
             </select>
-            <select id="pi-default-model" class="setting-select" data-pi-field="model">
-                ${modelOpts.map((o) =>
-                    `<option value="${escapeHtml(o.value)}" ${o.value === currentModel ? 'selected' : ''}>${escapeHtml(o.label)}</option>`,
-                ).join('')}
+            <select id="pi-default-model" class="setting-select">
+                ${modelOptionsHtml(cfg.availableModels, currentProvider, data.piDefaultModel ?? '')}
             </select>
         </div>
         <button type="button" class="setting-btn primary" id="btn-save-pi-defaults">Save defaults</button>
-        <p class="setting-description">Written to settings.json; active chat session picks this up on reload.</p>
+        <p class="setting-description">Saved to ${configFile} for new sessions; the chat tab shown now switches to it too.</p>
     `;
     return row;
 }
@@ -141,24 +142,18 @@ function buildPiModeSelect(
     return row;
 }
 
-function buildAuthIndicator(method: SettingsData['authMethod']): HTMLElement {
+function buildAuthIndicator(method: SettingsData['authMethod'], backend: AgentBackend): HTMLElement {
     const row = el('div', 'setting-row auth-indicator');
-    const labels: Record<string, string> = {
+    const labels: Record<SettingsData['authMethod'], string> = {
+        login: `Signed in (${backend === 'omp' ? '~/.omp/agent/agent.db' : '~/.pi/agent/auth.json'})`,
         env: 'Authenticated via environment variable',
-        'pi-login': 'Authenticated via ~/.pi/agent/auth.json',
-        manual: 'Authenticated via stored API key',
         none: 'No credentials detected',
     };
-    const icons: Record<string, string> = {
-        env: '&#10003;',
-        'pi-login': '&#10003;',
-        manual: '&#10003;',
-        none: '&#10007;',
-    };
+    const icon = method === 'none' ? '&#10007;' : '&#10003;';
     const cls = method === 'none' ? 'auth-none' : 'auth-ok';
     row.innerHTML = `
         <div class="auth-status ${cls}">
-            <span class="auth-icon">${icons[method]}</span>
+            <span class="auth-icon">${icon}</span>
             <span>${labels[method]}</span>
         </div>
     `;

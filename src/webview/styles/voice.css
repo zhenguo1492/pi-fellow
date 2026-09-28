@@ -212,13 +212,17 @@ body.vscode-high-contrast-light .vp {
 .vp-turn.user .vp-av { --av: var(--vscode-charts-green, #89d185); }
 .vp-turn.bot .vp-av  { --av: var(--vscode-charts-blue, #3794ff); }
 .vp-av svg { width: 20px; height: 20px; }
+/* A custom avatar: a picture fills the box; text (an emoji or initials) sits in it. */
+.vp-av .av-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.vp-av .av-text { font-size: 17px; font-weight: 600; line-height: 1; white-space: nowrap; }
 .vp-gtime {
     grid-area: av; justify-self: end; align-self: start; display: none;
     font-size: calc(var(--vp-small) - 1.5px); line-height: calc(var(--vp-font) * var(--vp-line)); white-space: nowrap; color: var(--muted); cursor: default;
 }
 .vp-turn.cont:hover .vp-gtime { display: block; }
 .vp-who { grid-area: who; display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; line-height: 1.4; cursor: default; }
-.vp-name { display: inline-flex; align-items: baseline; gap: 5px; font-weight: 700; color: var(--fg); }
+.vp-name { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; font-weight: 700; color: var(--fg); }
+.vp-nm { overflow: hidden; text-overflow: ellipsis; }
 .vp-badge { padding: 0 3px; border-radius: 3px; font-size: calc(var(--vp-small) - 2px); font-weight: 600; letter-spacing: .04em; color: var(--muted); background: color-mix(in srgb, var(--muted) 20%, transparent); }
 .vp-time { font-size: calc(var(--vp-small) - .5px); color: var(--muted); }
 .vp-src { font-size: .85em; opacity: .75; font-weight: 400; }
@@ -252,27 +256,40 @@ body.vscode-high-contrast-light .vp {
 .vp-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--warn); animation: vp-blink 1s infinite; }
 .vp-dots i:nth-child(2) { animation-delay: .15s; } .vp-dots i:nth-child(3) { animation-delay: .3s; }
 
-/* Tool and lookup chips */
-.vp-chips { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; align-items: flex-start; }
-.vp-chips:empty { display: none; }
-details.vp-chip { max-width: 100%; }
-details.vp-chip > summary { list-style: none; cursor: pointer; display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 6px; padding: 0 7px 0 6px; border-radius: 4px; font-size: var(--vp-small); line-height: 1.6; color: var(--muted); border: 1px solid var(--border); }
-details.vp-chip > summary::-webkit-details-marker { display: none; }
-details.vp-chip > summary:hover { color: var(--fg); background: var(--hover); }
-details.vp-chip > summary:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
-details.vp-chip > summary .vp-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-details.vp-chip > summary > span:not(.vp-t) { flex-shrink: 0; white-space: nowrap; }
-details.vp-chip > summary .vp-tn { font-weight: 500; color: var(--c, var(--muted)); }
-details.vp-chip > summary .vp-car { font-size: .7em; transition: transform .15s; opacity: .7; }
-details.vp-chip[open] > summary .vp-car { transform: rotate(90deg); }
-details.vp-chip.dispatch { --c: var(--voice); } details.vp-chip.confirm { --c: var(--ok); } details.vp-chip.answer { --c: var(--warn); }
-details.vp-chip.read, details.vp-chip.research { --c: var(--link); } details.vp-chip.status { --c: var(--muted); } details.vp-chip.proposal { --c: var(--warn); }
-details.vp-chip.stop, details.vp-chip.failed { --c: var(--error); }
-.vp-chip-body { margin: 4px 0 2px; padding: 5px 10px; border-left: 2px solid var(--c, var(--border)); background: var(--code-bg); border-radius: 0 4px 4px 0; font-family: var(--font-mono); font-size: var(--vp-small); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.vp-res { display: block; margin-top: 4px; padding-top: 4px; border-top: 1px dashed color-mix(in srgb, var(--muted) 35%, transparent); color: var(--muted); }
-.vp-res:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
-details.vp-chip.failed .vp-res { color: var(--error); }
-.vp-st-ok { color: var(--ok); } .vp-st-wait { color: var(--warn); } .vp-st-no { color: var(--error); }
+/*
+ * A reply's tool calls and lookups: the worker's tool cards (toolView.ts, toolCards.css), drawn as the
+ * Bot view's chips: a small outlined pill with a caret, the label coloured by `data-kind`, and an
+ * inset body with a coloured left rule when open.
+ */
+.vp-tools { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; align-items: flex-start; min-width: 0; }
+.vp-tools:empty { display: none; }
+.vp-tools .tv-card { margin: 0; max-width: 100%; min-width: 0; border: 0; border-radius: 0; overflow: visible; font-family: inherit; font-size: var(--vp-small); line-height: 1.6; color: var(--muted); --c: var(--muted); }
+.vp-tools .tv-card[data-kind="dispatch"] { --c: var(--voice); }
+.vp-tools .tv-card[data-kind="confirm"] { --c: var(--ok); }
+.vp-tools .tv-card:is([data-kind="answer"], [data-kind="proposal"]) { --c: var(--warn); }
+.vp-tools .tv-card:is([data-kind="read"], [data-kind="research"]) { --c: var(--link); }
+.vp-tools .tv-card:is([data-kind="stop"], .tv-card--error) { --c: var(--error); }
+.vp-tools .tv-head { width: fit-content; max-width: 100%; gap: 6px; padding: 0 7px 0 6px; border: 1px solid var(--border); border-radius: 4px; }
+.vp-tools .tv-head:hover { color: var(--fg); background: var(--hover); }
+.vp-tools .tv-head:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+.vp-tools .tv-chev { order: -1; width: auto; height: auto; margin: 0; border: 0; transform: none; font-size: .7em; opacity: .7; }
+.vp-tools .tv-chev::before { content: '▶'; }
+.vp-tools .tv-head[aria-expanded="true"] .tv-chev { transform: rotate(90deg); }
+.vp-tools .tv-name { font-size: inherit; font-weight: 500; letter-spacing: 0; color: var(--c); }
+.vp-tools .tv-sum { flex: 0 1 auto; font-size: inherit; color: inherit; }
+/* Status after the text, as the chips had it: ✓ for what the voice agent did to the worker, ✗ for a failure, a spinner while it runs. */
+.vp-tools .tv-status, .vp-tools .tv-spin { order: 1; }
+.vp-tools .tv-status { width: auto; height: auto; border-radius: 0; background: none; }
+.vp-tools .tv-status--pending, .vp-tools .tv-status--ok { display: none; }
+.vp-tools .tv-card:is([data-kind="dispatch"], [data-kind="confirm"], [data-kind="answer"], [data-kind="stop"]) .tv-status--ok { display: inline; }
+.vp-tools .tv-status--ok::before { content: '✓'; color: var(--ok); }
+.vp-tools .tv-status--err::before { content: '✗'; color: var(--error); }
+.vp-tools .tv-body { gap: 4px; margin: 4px 0 2px; padding: 5px 10px; border: 0; border-left: 2px solid var(--c); border-radius: 0 4px 4px 0; background: var(--code-bg); font-family: var(--font-mono); line-height: 1.5; }
+.vp-tools .tv-body > * + * { padding-top: 4px; border-top: 1px dashed color-mix(in srgb, var(--muted) 35%, transparent); }
+.vp-tools :is(.tv-pre, .tv-diff) { padding: 0; background: none; font-size: inherit; }
+.vp-tools .tv-diff-row { padding: 0 4px; }
+.vp-tools .tv-partial { margin-top: 2px; border-top: 0; font-size: inherit; }
+.vp-st-ok { color: var(--ok); } .vp-st-no { color: var(--error); }
 
 /* Debug transcript: what went to the voice model this turn. */
 .vp-attach { margin: 2px 0 4px; padding: 4px 8px; font-family: var(--font-mono); font-size: calc(var(--vp-small) - 1px); line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 4px; }
@@ -292,7 +309,7 @@ details.vp-chip.failed .vp-res { color: var(--error); }
 .vp-timing:hover { color: var(--fg); background: var(--hover); }
 .vp-timing.open { opacity: 1; color: var(--c); }
 .vp-timing:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
-.vp-timing-body { width: fit-content; max-width: 100%; color: var(--muted); }
+.vp-timing-body { width: fit-content; max-width: 100%; margin: 4px 0 2px; padding: 5px 10px; border-left: 2px solid var(--c, var(--border)); background: var(--code-bg); border-radius: 0 4px 4px 0; font-family: var(--font-mono); font-size: var(--vp-small); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
 .vp-timing-body[hidden] { display: none; }
 
 /* ── Narrow: fewer extras ── */

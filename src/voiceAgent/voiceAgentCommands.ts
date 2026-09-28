@@ -3,7 +3,19 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { readTtsSettings, readVoiceSettings } from '../voice/voiceSettings';
+import {
+    onVoiceReadinessChange,
+    probeStt,
+    probeTts,
+    readTtsSettings,
+    readVoiceSettings,
+    resolveSttConfig,
+    resolveTtsConfig,
+    voiceReadiness,
+} from '../voice/voiceSettings';
+import { STT_MODEL, TTS_MODEL_ID, TTS_VOICE } from '../voice/builtinEngine/models';
+import { explainVoiceError } from '../voice/voiceErrors';
+import { SettingsPanel } from '../providers/settings-panel';
 import { FileEditorTracker } from '../utils/fileEditor';
 import { AgentCursor } from './agentCursor';
 import { DebugDriver } from './debugDriver';
@@ -22,13 +34,18 @@ import {
     type VoiceObservationKind,
     type VoicePhase,
     type VoiceStatus,
+    type VoiceUnavailable,
 } from '../shared/voiceViewProtocol';
-import type { VoiceLevelSource } from '../shared/protocol';
+import type { SkillInfo, VoiceLevelSource, VoiceServiceCheck } from '../shared/protocol';
 import { ActiveVoiceWindow } from './activeWindow';
 import type { ArbiterSettings, Narration } from './floorArbiter';
 import { VoiceAgent, type VoiceTurnListener, type VoiceTurnResult } from './voiceAgent';
-import { TTS_LANGUAGE_HANDLING, TTS_PROVIDER_DEFAULTS } from './tts';
+import { TTS_LANGUAGE_HANDLING } from './tts';
+import { ReplayPlayer, type ReplayOutput } from './replay';
+import { DEFAULT_REPLAY_CACHE_SIZE, SpeechCache, ttsCacheKey } from './speechCache';
+import { speakerNames } from './speakers';
 import { VoiceMode } from './voiceMode';
+import { VoiceServiceSync, type VoiceService } from './serviceSync';
 import { SessionTitler, generateTitle } from './sessionTitle';
 import { VoiceTranscriptStore } from './transcriptStore';
 import { VoicePanel, type BotViewSurface } from './voicePanel';
@@ -52,6 +69,8 @@ const SESSION_ENTRIES = 300;
 /** The chat's voice controls (the robot status line over the composer, the composer mic) and the Bot view its tabs show. */
 export interface VoiceChatControls extends BotViewSurface {
     setVoiceStatus(status: VoiceStatus): void;
+    /** Dictation drops what the microphone hears while a Bot view message is replayed without voice mode. */
+    setDictationPaused(paused: boolean): void;
     /** Voice mode's level 0..1 and waveform, the microphone's or the bot's: the wave in the voice bar. */
     postVoiceLevel(level: number, source: VoiceLevelSource, wave?: number[]): void;
     readonly onVoiceAction: vscode.Event<VoiceAgentAction>;
@@ -62,20 +81,24 @@ export interface VoiceAgentWiring {
     chat: VoiceChatControls;
     /** The chat's resume list, which lists sessions the user only talked to the voice agent about. */
     resumeList: { setVoiceHistory(history: VoiceHistory): void };
+    /** The skills installed for the chat tab's CLI (with their files on pi), to find the chosen ones' files. */
+    installedSkills: () => Promise<SkillInfo[]>;
 }
 
 /**
  * The voice agent's commands, the chat's voice controls and the Bot view. The conversation shows in
  * the Bot view, which a chat tab shows in place of its conversation when its icon is clicked (design
- * §11), and, as a log, in the "Oh My Pi Chater: Voice Agent"
+ * §11), and, as a log, in the "PI Buddy: Voice Agent"
  * output channel.
  * - Chat: the robot above the composer starts voice mode and, while it is on, shows its phase and
  *   stops it; the follow button next to it sets whether the editor follows Pi's focus (remembered in
  *   the `followPi` setting); the composer mic shows the microphone level and mutes; in the Bot view the composer
  *   sends typed text to the voice agent (and is locked while it is offline), in the conversation to omp.
  * - `oh-my-pi-chater.voiceAgent.start` / `stop` (robot, palette): voice mode, i.e. microphone and
- *   speaker through a hidden Chrome (design §5.1); stop also ends the omp process. Voice contexts
- *   stay on disk with the workspace: the next start resumes each task's last one (§5.12).
+ *   speaker through a hidden Chrome (design §5.1); stop also ends the omp process. A speech service
+ *   that does not work is left out rather than failing the start: without STT the user types, without
+ *   TTS replies are shown as text (§5.13). Voice contexts stay on disk with the workspace: the next
+ *   start resumes each task's last one (§5.12).
  * - `oh-my-pi-chater.voiceAgent.toggleMute`, `hush` (palette, keys), `oh-my-pi-chater.voiceView.show`
  *   and `history` (Bot view's history button, palette).
  * - `oh-my-pi-chater.voiceAgent.clearHighlight` (palette): removes Pi's highlight.
@@ -87,8 +110,8 @@ export interface VoiceAgentWiring {
  *   `start` takes `{ chromeArgs }` for tests that feed the hidden Chrome a WAV file as microphone.
  */
 export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wiring: VoiceAgentWiring): vscode.Disposable[] {
-    const { worker, chat, resumeList } = wiring;
-    const channel = vscode.window.createOutputChannel('Oh My Pi Chater: Voice Agent');
+    const { worker, chat, resumeList, installedSkills } = wiring;
+    const channel = vscode.window.createOutputChannel('PI Buddy: Voice Agent');
     let captured = '';
     const output = {
         append(text: string): void {
@@ -102,6 +125,18 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     const log = (line: string) => output.appendLine(`· ${line}`);
     let agent: VoiceAgent | undefined;
     let voiceMode: VoiceMode | undefined;
+    /** Keeps the running voice mode's STT and TTS in step with readiness and settings (design §5.13). */
+    let serviceSync: VoiceServiceSync | undefined;
+    /** The voice the running voice mode speaks with: the replay cache's key for what it says out loud. */
+    let liveTtsKey = '';
+    /** A service's settings as they matter to a running voice mode, to tell when they change. */
+    const serviceSettings = (service: VoiceService): string => {
+        if (service === 'tts') {
+            return JSON.stringify(readTtsSettings());
+        }
+        const { sttEngine, sttUrl, sttModel, language } = readVoiceSettings();
+        return JSON.stringify({ sttEngine, sttUrl, sttModel, language });
+    };
     let starting = false;
     /** Bumped by every start and stop: a start that finishes after a stop must not turn voice mode on. */
     let startGeneration = 0;
@@ -170,7 +205,6 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         const voice = readVoiceSettings();
         const config = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent');
         const tts = readTtsSettings();
-        const defaults = TTS_PROVIDER_DEFAULTS[tts.provider] ?? TTS_PROVIDER_DEFAULTS.openai;
         return {
             running: voiceMode !== undefined,
             llm: {
@@ -178,23 +212,47 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 thinking: config.get<string>('thinking', 'off'),
             },
             stt: {
-                url: voice.sttUrl,
-                model: voiceMode?.sttModel || voice.sttModel || 'first model the server lists',
+                url: voice.sttEngine === 'builtin' ? 'built-in engine' : voice.sttUrl,
+                model: voiceMode?.sttModel || (voice.sttEngine === 'builtin' ? STT_MODEL.id : voice.sttModel) || 'first model the server lists',
                 language: voice.language || 'auto',
             },
-            tts: {
-                provider: tts.provider,
-                url: tts.url,
-                model: tts.model || defaults.model,
-                voice: tts.voice || defaults.voice,
-                speed: tts.speed,
-                language: TTS_LANGUAGE_HANDLING[tts.provider] ?? TTS_LANGUAGE_HANDLING.openai,
-            },
+            tts: tts.engine === 'builtin'
+                ? { engine: 'built-in', url: 'built-in engine', model: TTS_MODEL_ID, voice: TTS_VOICE.id, speed: tts.speed, language: 'not sent (English only)' }
+                : {
+                      engine: 'custom',
+                      url: tts.url,
+                      model: tts.model || 'server default',
+                      voice: tts.voice || 'server default',
+                      speed: tts.speed,
+                      language: TTS_LANGUAGE_HANDLING[tts.languageField],
+                  },
         };
     };
 
+    /** Audio of spoken messages and of sentences read aloud, for Alt+click. */
+    const speechCache = new SpeechCache(() =>
+        vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<number>('replayCacheSize', DEFAULT_REPLAY_CACHE_SIZE),
+    );
+
+    /**
+     * Alt+click on a sentence (Bot view or chat). In voice mode a replay plays on its audio page (echo
+     * cancelled, microphone input held); otherwise in the webview, with dictation paused meanwhile.
+     */
+    const replay = new ReplayPlayer({
+        cache: speechCache,
+        ttsKey: () => ttsCacheKey(readTtsSettings()),
+        tts: () => resolveTtsConfig(readTtsSettings()),
+        output: (text): ReplayOutput | string => voiceMode?.beginReplay(text) ?? view.audio.output(),
+        onChange: (current) => {
+            chat.setDictationPaused(current !== undefined);
+            view.refresh();
+        },
+        onError: (message) => chat.postVoice({ type: 'replayError', message }),
+        log,
+    });
+
     // The Bot view, drawn by a chat tab in place of its conversation.
-    const view = new VoicePanel(store, worker, { phase: viewPhase, mode: () => agent?.mode ?? 'pair', engines, agent: () => agent }, chat);
+    const view = new VoicePanel(store, worker, { phase: viewPhase, mode: () => agent?.mode ?? 'pair', engines, agent: () => agent, replay }, chat);
 
     /** The robot status line, follow button and composer mic follow voice mode and Pi's focus. */
     const publishStatus = () =>
@@ -204,11 +262,11 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             muted: voiceMode?.muted ?? false,
             mode: agent?.mode ?? 'pair',
             following: cursor.following,
+            ...(voiceMode ? { unavailable: voiceMode.unavailable } : {}),
         });
 
     const setPhase = (next: Phase | undefined) => {
         phase = next;
-        void vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.voiceMode', voiceMode !== undefined || next !== undefined);
         publishStatus();
         view.refresh();
     };
@@ -239,10 +297,11 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 output.append(toolLine(name, args, r));
                 reply.onToolCall?.(name, args, r);
             },
-            onLookup: (description) => {
-                output.append(`\n  · ${description}\nVoice: `);
-                reply.onLookup?.(description);
+            onLookup: (lookup) => {
+                output.append(`\n  · ${lookup.description}\nVoice: `);
+                reply.onLookup?.(lookup);
             },
+            onLookupEnd: reply.onLookupEnd,
             onUsage: reply.onUsage,
             onEnd: (result) => {
                 output.appendLine(result.interrupted ? ' [interrupted]' : result.error ? `\n  ✗ ${result.error}` : result.silent ? '(silent)' : '');
@@ -277,11 +336,12 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 output.append(toolLine(name, args, r));
                 reply.onToolCall?.(name, args, r);
             },
-            onLookup: (description) => {
+            onLookup: (lookup) => {
                 begin();
-                output.append(`\n  · ${description}\nVoice: `);
-                reply.onLookup?.(description);
+                output.append(`\n  · ${lookup.description}\nVoice: `);
+                reply.onLookup?.(lookup);
             },
+            onLookupEnd: reply.onLookupEnd,
             onUsage: reply.onUsage,
             onEnd: (result) => {
                 if (started) {
@@ -306,6 +366,27 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 contexts: store,
                 model: config.get<string>('model', '').trim(),
                 thinking: config.get<string>('thinking', 'off'),
+                // Read at every process start, so a change applies once voice starts again.
+                skills: async () => {
+                    const names = new Set(vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<string[]>('skills', []));
+                    if (names.size === 0) {
+                        return [];
+                    }
+                    const installed = await installedSkills().catch((err: unknown) => {
+                        log(`Could not list the installed skills: ${err instanceof Error ? err.message : String(err)}`);
+                        return undefined;
+                    });
+                    // Without the list omp still finds them by name; pi, which needs their files, loads none.
+                    if (!installed) {
+                        return [...names].map((name) => ({ name }));
+                    }
+                    const chosen = installed.filter((skill) => names.has(skill.name));
+                    const missing = [...names].filter((name) => !chosen.some((skill) => skill.name === name));
+                    if (missing.length > 0) {
+                        log(`Voice skills not installed, not loaded: ${missing.join(', ')}.`);
+                    }
+                    return chosen.map((skill) => ({ name: skill.name, filePath: skill.filePath || undefined }));
+                },
                 confirmBeforeDispatch: () =>
                     vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<boolean>('confirmBeforeDispatch', true),
                 arbiter: (): ArbiterSettings => {
@@ -316,6 +397,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                         narrationIntervalMs: live.get<number>('narrationIntervalSecs', 30) * 1000,
                     };
                 },
+                names: speakerNames,
                 onProactiveTurn: (kind, task) => {
                     const reply = store.beginReply({ proactive: kind });
                     const listener = proactiveListener(kind, task, reply.listener);
@@ -329,6 +411,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 floorBusy: () => voiceMode?.floorBusy ?? false,
                 hush: () => voiceMode?.hush(),
                 onChange: () => view.refresh(),
+                onResearchSettled: (job) => store.researchSettled(job),
                 editor: () => fileEditor.editor && editorSnapshot(fileEditor.editor),
                 onRead: (target) => cursor.activity('reading', target),
                 hands,
@@ -370,9 +453,12 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     };
 
     const stop = async (): Promise<void> => {
+        replay.stop();
         const stoppingMode = voiceMode;
         const stoppingAgent = agent;
         voiceMode = undefined;
+        serviceSync?.dispose();
+        serviceSync = undefined;
         agent = undefined;
         startGeneration++;
         activeWindow.leave();
@@ -397,6 +483,8 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             return;
         }
         starting = true;
+        // A replay playing in the Bot view has no echo cancellation: the microphone would hear it.
+        replay.stop();
         const generation = ++startGeneration;
         setPhase(undefined);
         try {
@@ -405,14 +493,46 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             activeWindow.join();
             const voice = readVoiceSettings();
             const config = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent');
+            const ttsSettings = readTtsSettings();
+            const startedSettings = { stt: serviceSettings('stt'), tts: serviceSettings('tts') };
+            // A service that failed its check may have been fixed since: check it again. Either one
+            // failing only leaves it out; voice mode runs without it (design §5.13).
+            let readiness = voiceReadiness();
+            await Promise.all([readiness.stt.ok ? undefined : probeStt(), readiness.tts.ok ? undefined : probeTts()]);
+            readiness = voiceReadiness();
+            const unavailable: VoiceUnavailable = {};
+            /** The service's config, or undefined with the reason in `unavailable`; the built-in engine may download its models and start here. */
+            const resolve = async <T>(service: 'stt' | 'tts', check: VoiceServiceCheck, load: () => Promise<T>): Promise<T | undefined> => {
+                if (!check.ok) {
+                    unavailable[service] = check.reason ?? `${service === 'stt' ? 'Speech-to-text' : 'Text-to-speech'} is unavailable.`;
+                    return undefined;
+                }
+                try {
+                    return await load();
+                } catch (err) {
+                    unavailable[service] = explainVoiceError(err, { service }).message;
+                    return undefined;
+                }
+            };
+            const [stt, tts] = await Promise.all([
+                resolve('stt', readiness.stt, () => resolveSttConfig(voice)),
+                resolve('tts', readiness.tts, () => resolveTtsConfig(ttsSettings)),
+            ]);
+            /** The voice this run speaks with, for the cache; follows TTS settings the running voice mode takes. */
+            liveTtsKey = ttsCacheKey(ttsSettings);
+            if (generation !== startGeneration) {
+                log('Voice mode was stopped while it started.');
+                return;
+            }
             const mode = await VoiceMode.start({
                 agent: voiceAgent,
                 vad: {
                     modelPath: vscode.Uri.joinPath(context.extensionUri, 'media', 'vad', 'silero_vad.onnx').fsPath,
                     runtimeDir: vscode.Uri.joinPath(context.extensionUri, 'out', 'vad').fsPath,
                 },
-                stt: { url: voice.sttUrl, model: voice.sttModel, language: voice.language },
-                tts: readTtsSettings(),
+                stt,
+                tts,
+                unavailable,
                 turnStopSecs: config.get<number>('turnStopSecs', 1.2),
                 vadConfidence: voice.vadConfidence,
                 chromeArgs: options.chromeArgs ?? [],
@@ -429,6 +549,26 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 onMetrics: (turnId, metrics) => store.metrics(turnId, metrics),
                 onAudio: (event) => store.audio(event),
                 onAnchors: (anchors) => cursor.point(anchors),
+                // What a reply said out loud is the audio Alt+click reads its sentences from.
+                onSpoken: (turnId, pieces) => {
+                    const entryId = store.entryIdOfTurn(turnId);
+                    const texts = JSON.stringify(pieces.map((p) => p.text));
+                    if (entryId) {
+                        speechCache.put(entryId, liveTtsKey, pieces);
+                        log(`Replay cache: reply ${turnId} spoken live, stored as ${entryId}: ${texts}`);
+                    } else {
+                        log(`Replay cache: reply ${turnId} spoken live but no transcript entry for it, not stored: ${texts}`);
+                    }
+                },
+                onServiceError: (service, message) =>
+                    store.addSystem(`${service === 'stt' ? 'Speech-to-text' : 'Text-to-speech'} failed: ${message} The conversation goes on in text.`),
+                // The robot's "Can't hear" tag follows the microphone too.
+                onMicStatus: (error) => {
+                    if (error && generation === startGeneration) {
+                        store.addSystem(`The microphone could not be opened (${error}). Type to the voice agent instead.`);
+                    }
+                    publishStatus();
+                },
                 log,
             });
             if (generation !== startGeneration) {
@@ -438,16 +578,63 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 return;
             }
             voiceMode = mode;
+            serviceSync = new VoiceServiceSync(mode, startedSettings, {
+                readiness: voiceReadiness,
+                settings: serviceSettings,
+                resolveStt: () => resolveSttConfig(readVoiceSettings()),
+                resolveTts: () => resolveTtsConfig(readTtsSettings()),
+                onChange: (service, how) => {
+                    if (service === 'tts') {
+                        liveTtsKey = ttsCacheKey(readTtsSettings());
+                    }
+                    if (how === 'attached') {
+                        store.addSystem(
+                            service === 'stt'
+                                ? 'Speech-to-text works now: the voice agent hears you again.'
+                                : 'Text-to-speech works now: the voice agent speaks its replies again, from the next one.',
+                        );
+                    }
+                    log(`Voice mode ${how === 'attached' ? 'picked up' : 'switched to the new settings of'} ${service === 'stt' ? 'speech-to-text' : 'text-to-speech'}.`);
+                    publishStatus();
+                    view.refresh();
+                },
+                log,
+            });
+            // Readiness may have changed while it started.
+            void serviceSync.sync();
             voiceAgent.open({ reason: 'connect', language: voice.language });
             // A tab the worker has not touched yet belongs to the voice agent: show its Bot view.
             void chat.showBotView(true, { onlyIfWorkerUnused: true });
             // Focus may have moved to another voice window while this one was starting.
             voiceMode.setActive(activeWindow.active);
-            log('Voice mode on: talk any time; speaking over a reply cuts it off.');
+            const { stt: deaf, tts: voiceless } = mode.unavailable;
+            if (deaf || voiceless) {
+                // Where the user types to it: say what it cannot do, and why.
+                store.addSystem(
+                    [
+                        deaf && `The voice agent can't hear you, type to it here instead. ${deaf}`,
+                        voiceless && `The voice agent has no voice, its replies are shown here as text. ${voiceless}`,
+                    ]
+                        .filter(Boolean)
+                        .join('\n'),
+                );
+            }
+            log(
+                deaf
+                    ? `Voice mode on without listening: type to the voice agent${voiceless ? '; replies are shown as text' : ''}.`
+                    : voiceless
+                      ? 'Voice mode on: talk any time; replies are shown as text, not spoken.'
+                      : 'Voice mode on: talk any time; speaking over a reply cuts it off.',
+            );
         } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            log(`Voice mode failed to start: ${message}`);
-            void vscode.window.showErrorMessage(`Voice mode: ${message}`);
+            const explained = explainVoiceError(err);
+            log(`Voice mode failed to start: ${explained.detail}`);
+            const action = explained.openSettings ? ['Open Voice Settings'] : [];
+            void vscode.window.showErrorMessage(`Voice mode: ${explained.message}`, ...action).then((pick) => {
+                if (pick) {
+                    SettingsPanel.showWithSection('voice');
+                }
+            });
         } finally {
             starting = false;
             if (!voiceMode) {
@@ -478,6 +665,13 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             }
         }),
         cursor.onDidChangeFollowing(publishStatus),
+        // A service the running voice mode lacks is picked up once it works; new settings are taken at once.
+        onVoiceReadinessChange(() => void serviceSync?.sync()),
+        vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('oh-my-pi-chater.voice') || e.affectsConfiguration('oh-my-pi-chater.voiceAgent.tts')) {
+                void serviceSync?.sync();
+            }
+        }),
         chat.onVoiceAction((action) => {
             switch (action.type) {
                 case 'start':

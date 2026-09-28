@@ -1,5 +1,4 @@
 import { escapeHtml } from '../../shared/html';
-import { getKemdiMcpHints } from '../../shared/kemdiMcpHints';
 import type { AgentBackend, McpServerSummary, McpSettingsSnapshot, PiAgentConfigData, SettingsData } from '../../shared/protocol';
 import { vscode } from './api';
 import { buildSection, el, showToast } from './dom';
@@ -38,16 +37,21 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
                 `<span class="mcp-path-badge ${p.exists ? 'exists' : 'missing'}">${p.exists ? 'exists' : 'missing'}</span></li>`,
         )
         .join('');
+    const precedence =
+        data.backend === 'omp'
+            ? 'Highest precedence first; the first file that defines a server wins.'
+            : 'Highest precedence first; pi-mcp-adapter merges a server’s fields across files, higher files winning.';
     pathsRow.innerHTML = `
         <div class="setting-label-row"><label>Config files</label></div>
+        <p class="setting-description">${precedence}</p>
         <ul class="mcp-path-list">${pathItems}</ul>
-        ${snap.importSources.length ? `<p class="setting-description">Imports: ${escapeHtml(snap.importSources.map(formatMcpImportLabel).join(', '))}</p>` : ''}
+        ${snap.importSources.length ? `<p class="setting-description">Imports: ${escapeHtml(snap.importSources.join(', '))}</p>` : ''}
     `;
     children.push(pathsRow);
 
     const actions = el('div', 'setting-row btn-row mcp-actions');
     actions.innerHTML = `
-        <button type="button" class="setting-btn secondary" id="btn-test-all-mcp">Test all connections</button>
+        <button type="button" class="setting-btn secondary" id="btn-test-all-mcp">Check all servers</button>
         <button type="button" class="setting-btn secondary" data-open-file="mcp">Edit mcp.json</button>
     `;
     children.push(actions);
@@ -71,31 +75,30 @@ function buildMcpHelpBlock(
     cfg: PiAgentConfigData,
     backend: AgentBackend = 'pi',
 ): HTMLElement {
-    const proxy = snap ? !snap.disableProxyTool : true;
-    const direct = snap?.globalDirectTools;
-    const isOmp = backend === 'omp';
     const row = el('div', 'setting-row mcp-help');
-    const setupSteps = isOmp
-        ? `<ol>
-               <li><strong>Native MCP:</strong> Oh My Pi has native built-in MCP client support (no external adapter package required).</li>
-               <li>Define servers in <code>mcp.json</code> or project <code>.mcp.json</code>.</li>
-               <li>After changes, use <strong>Reload active session</strong>.</li>
-           </ol>`
-        : `<ol>
-               <li>Install <code>npm:pi-mcp-adapter</code> in Packages (you have ${cfg.packages.some((p) => p.includes('pi-mcp-adapter')) ? 'it' : 'not yet'}).</li>
-               <li>Define servers in <code>mcp.json</code> — not as separate npm packages per server.</li>
-               <li>After changes, use <strong>Reload active session</strong>.</li>
-           </ol>`;
+    const body =
+        backend === 'omp'
+            ? `<ol>
+                   <li>Oh My Pi has a built-in MCP client; no adapter package is needed.</li>
+                   <li>Define servers in project <code>.omp/mcp.json</code> or user <code>~/.omp/agent/mcp.json</code>; root <code>mcp.json</code> / <code>.mcp.json</code> are read as a portable fallback. omp also picks up Claude Code, Cursor, Codex, Gemini and VS Code MCP configs, which are not listed here — <code>/mcp list</code> in chat shows every source.</li>
+                   <li>Disabling a server sets <code>"enabled": false</code> on its entry. <code>disabledServers</code> / <code>enabledServers</code> in the user mcp.json override any source.</li>
+                   <li>After changes, use <strong>Reload active session</strong> (or <code>/mcp reload</code> in chat).</li>
+               </ol>
+               <p>Each connected server’s tools are registered directly, as <code>mcp__&lt;server&gt;_&lt;tool&gt;</code> tools.</p>`
+            : `<ol>
+                   <li>Install <code>npm:pi-mcp-adapter</code> in Packages (you have ${cfg.packages.some((p) => p.includes('pi-mcp-adapter')) ? 'it' : 'not yet'}).</li>
+                   <li>Define servers in one of the mcp.json files below — not as separate npm packages per server.</li>
+                   <li>Disabling a server sets <code>"disabled": true</code> on its entry.</li>
+                   <li>After changes, use <strong>Reload active session</strong>.</li>
+               </ol>
+               <p><strong>Default (proxy):</strong> The model gets one compact <code>mcp</code> tool (~200 tokens). It calls <code>mcp({ search: "…" })</code> to find tools, then <code>mcp({ tool: "…", args: … })</code>. Servers connect lazily on first use.</p>
+               <p><strong>Direct tools:</strong> Set <code>"directTools": true</code> on a server (or globally in <code>mcp.json</code> settings). Tool names and schemas are injected into context — higher token cost, model sees them like built-in tools.</p>
+               <p class="setting-description">Current: proxy ${snap?.disableProxyTool ? 'off' : 'on'}, global directTools ${snap?.globalDirectTools ? 'on' : 'off or unset'}.</p>`;
 
     row.innerHTML = `
         <details class="mcp-help-details">
-            <summary>How the model discovers and uses MCP (${isOmp ? 'omp native' : 'pi-mcp-adapter'})</summary>
-            <div class="mcp-help-body">
-                ${setupSteps}
-                <p><strong>Default (proxy):</strong> The model gets one compact <code>mcp</code> tool (~200 tokens). It calls <code>mcp({ search: "…" })</code> to find tools, then <code>mcp({ tool: "…", args: … })</code>. Servers connect lazily on first use.</p>
-                <p><strong>Direct tools:</strong> Set <code>"directTools": true</code> on a server (or globally in <code>mcp.json</code> settings). Tool names and schemas are injected into context — higher token cost, model sees them like built-in tools.</p>
-                <p class="setting-description">Current: proxy ${proxy ? 'on' : 'off'}, global directTools ${direct ? 'on' : 'off or unset'}.</p>
-            </div>
+            <summary>How the model discovers and uses MCP (${backend === 'omp' ? 'omp native' : 'pi-mcp-adapter'})</summary>
+            <div class="mcp-help-body">${body}</div>
         </details>
     `;
     return row;
@@ -111,57 +114,56 @@ function buildMcpAdapterWarning(): HTMLElement {
 export function buildMcpServerCard(server: McpServerSummary): HTMLElement {
     const card = el('div', `mcp-server-card status-${server.status}`);
     const statusClass = mcpStatusDotClass(server.status);
-    const scopeLabel =
-        server.scope === 'import'
-            ? `import${server.importSource ? ` (${server.importSource})` : ''}`
-            : server.scope;
 
     const toggleHtml = server.canToggle
         ? `<label class="mcp-toggle"><input type="checkbox" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-scope="${server.scope}" ${server.enabled ? 'checked' : ''} /> Enabled</label>`
         : `<span class="setting-description">Imported — edit source file to disable</span>`;
 
     const toolsId = `mcp-tools-${server.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-    const toolsHtml =
-        server.toolCount > 0
-            ? `<details class="mcp-tools-details"><summary>${server.toolCount} tools (from cache)</summary><ul class="mcp-tool-list" id="${toolsId}">${server.tools
-                  .map(
-                      (t) =>
-                          `<li><span class="mcp-tool-name">${escapeHtml(t.name)}</span>` +
-                          (t.description
-                              ? `<span class="mcp-tool-desc">${escapeHtml(t.description.slice(0, 200))}${t.description.length > 200 ? '…' : ''}</span>`
-                              : ''),
-                  )
-                  .join('')}</ul></details>`
-            : '<span class="setting-description">No cached tools — use session or Test connection after first run</span>';
+    let toolsHtml: string;
+    if (server.toolCount > 0) {
+        toolsHtml = `<details class="mcp-tools-details"><summary>${server.toolCount} tools (pi-mcp-adapter cache)</summary><ul class="mcp-tool-list" id="${toolsId}">${server.tools
+            .map(
+                (t) =>
+                    `<li><span class="mcp-tool-name">${escapeHtml(t.name)}</span>` +
+                    (t.description
+                        ? `<span class="mcp-tool-desc">${escapeHtml(t.description.slice(0, 200))}${t.description.length > 200 ? '…' : ''}</span>`
+                        : ''),
+            )
+            .join('')}</ul></details>`;
+    } else if (server.cacheStatus === 'unavailable') {
+        toolsHtml = '<span class="setting-description">omp keeps tool lists internally — <code>/mcp list</code> in chat shows them</span>';
+    } else {
+        toolsHtml = '<span class="setting-description">No cached tool list — pi-mcp-adapter caches it once the server connects in a session</span>';
+    }
 
     const transport =
         server.transport === 'http'
             ? escapeHtml(server.url ?? 'HTTP')
             : escapeHtml(server.commandPreview ?? 'stdio');
 
-    const kemdiHints = getKemdiMcpHints(server);
-    const hintsHtml = kemdiHints.length
-        ? `<ul class="mcp-kemdi-hints">${kemdiHints.map((h) => `<li>${escapeHtml(h)}</li>`).join('')}</ul>`
+    const hintsHtml = server.hints.length
+        ? `<ul class="mcp-kemdi-hints">${server.hints.map((h) => `<li>${escapeHtml(h)}</li>`).join('')}</ul>`
         : '';
 
     card.innerHTML = `
         <div class="mcp-server-header">
             <span class="mcp-status-dot ${statusClass}" title="${escapeHtml(server.statusMessage ?? server.status)}"></span>
             <span class="mcp-server-name">${escapeHtml(server.name)}</span>
-            <span class="mcp-server-scope">${escapeHtml(scopeLabel)}</span>
+            <span class="mcp-server-scope" title="${escapeHtml(server.ownerPath)}">${escapeHtml(server.sourceLabel)}</span>
             ${toggleHtml}
         </div>
         <p class="mcp-server-meta">${transport} · ${escapeHtml(server.statusMessage ?? server.status)}</p>
         ${hintsHtml}
         <div class="mcp-server-tools">${toolsHtml}</div>
-        <button type="button" class="setting-btn secondary mcp-test-btn" data-mcp-test="${escapeHtml(server.name)}">Test connection</button>
+        <button type="button" class="setting-btn secondary mcp-test-btn" data-mcp-test="${escapeHtml(server.name)}" title="Finds the command on PATH or requests the URL; does not start the server or run the MCP handshake">Check reachability</button>
     `;
     return card;
 }
 
 function mcpStatusDotClass(status: string): string {
     switch (status) {
-        case 'connected':
+        case 'reachable':
             return 'dot-green';
         case 'cached':
             return 'dot-amber';
@@ -201,14 +203,4 @@ export function bindMcpServerCards(): void {
             });
         });
     });
-}
-
-function formatMcpImportLabel(source: string): string {
-    const labels: Record<string, string> = {
-        cursor: 'editor-mcp',
-        'claude-code': 'claude-mcp',
-        windsurf: 'windsurf-mcp',
-        codex: 'codex-mcp',
-    };
-    return labels[source] ?? source;
 }

@@ -1,5 +1,10 @@
 import * as vscode from 'vscode';
-import type { VoiceEngines, VoiceEntry, VoicePhase, VoiceViewClientMessage, VoiceViewHostMessage, VoiceViewState } from '../shared/voiceViewProtocol';
+import type { VoiceEngines, VoiceEntry, VoicePhase, VoiceTranslation, VoiceViewClientMessage, VoiceViewHostMessage, VoiceViewState } from '../shared/voiceViewProtocol';
+import { translationLanguage } from '../shared/translationLanguages';
+import { describeError } from '../voice/modelsProbe';
+import { Translator, TranslationError } from './googleTranslate';
+import { BotViewAudio, type ReplayPlayer } from './replay';
+import { affectsSpeakers, resolveSpeakers } from './speakers';
 import type { VoiceTranscriptStore, VoiceSessionRecord } from './transcriptStore';
 import type { VoiceAgent } from './voiceAgent';
 import type { WorkerController } from './workerController';
@@ -15,6 +20,8 @@ export interface VoiceViewController {
     engines(): VoiceEngines;
     /** The voice agent when it is running; cards and usage that need it are empty otherwise. */
     agent(): VoiceAgent | undefined;
+    /** Alt+click on a sentence: reads it aloud. */
+    readonly replay: ReplayPlayer;
 }
 
 /**
@@ -43,7 +50,19 @@ export class VoicePanel implements vscode.Disposable {
     private _refreshTimer: NodeJS.Timeout | undefined;
     /** The last snapshot posted, serialized; an identical one is not posted again. */
     private _posted: string | undefined;
+    /** Likewise the last `sentenceActions`, which goes to the whole webview (the chat has the gestures too). */
+    private _postedSentences: string | undefined;
+    /** The names and avatars, once resolved (image files read), and the last of them posted (by identity: a picture is large). */
+    private _speakers: VoiceViewHostMessage | undefined;
+    private _postedSpeakers: VoiceViewHostMessage | undefined;
+    /** Bumped per load, so a slower earlier load does not overwrite a newer one. */
+    private _speakersLoad = 0;
     private readonly _disposables: vscode.Disposable[] = [];
+    /** Replay without voice mode plays in the view itself. */
+    readonly audio: BotViewAudio;
+    private readonly _translator = new Translator();
+    /** Sentence translations being fetched, by the view's request id. */
+    private readonly _translating = new Map<number, AbortController>();
 
     constructor(
         private readonly _store: VoiceTranscriptStore,
@@ -51,11 +70,16 @@ export class VoicePanel implements vscode.Disposable {
         private readonly _controller: VoiceViewController,
         private readonly _view: BotViewSurface,
     ) {
+        this.audio = new BotViewAudio((message) => _view.postVoice(message));
         this._disposables.push(
             _view.onDidReceiveVoiceMessage((message) => this._onMessage(message)),
             // Hidden (retained) webviews drop messages: bring the view up to date when it shows.
             _view.onDidChangeBotViewVisibility(() => {
                 this._posted = undefined;
+                this._postedSentences = undefined;
+                this._postedSpeakers = undefined;
+                // Picks up an avatar picture edited on disk too.
+                this._loadSpeakers();
                 this.refresh();
             }),
             _store.onDidChange(() => this.refresh()),
@@ -66,11 +90,25 @@ export class VoicePanel implements vscode.Disposable {
             // Not the worker's tab events: the view does not draw the worker (the chat around it does).
             _worker.onRequestsChanged(() => this.refresh()),
             vscode.workspace.onDidChangeConfiguration((e) => {
+                if (affectsSpeakers(e)) {
+                    this._loadSpeakers();
+                }
                 if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent') || e.affectsConfiguration('oh-my-pi-chater.voice')) {
                     this.refresh();
                 }
             }),
         );
+        this._loadSpeakers();
+    }
+
+    private _loadSpeakers(): void {
+        const load = ++this._speakersLoad;
+        void resolveSpeakers().then(({ speakers }) => {
+            if (load === this._speakersLoad) {
+                this._speakers = { type: 'speakers', speakers };
+                this.refresh();
+            }
+        });
     }
 
     /** Reveals the Bot view. */
@@ -114,6 +152,22 @@ export class VoicePanel implements vscode.Disposable {
     refresh(): void {
         this._refreshTimer ??= setTimeout(() => {
             this._refreshTimer = undefined;
+            const config = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent');
+            const sentences: VoiceViewHostMessage = {
+                type: 'sentenceActions',
+                enabled: config.get<boolean>('messageButtons', false),
+                translateTo: translationLanguage(config.get<string>('translateTo')).code,
+                replay: this._controller.replay.current,
+            };
+            const postedSentences = JSON.stringify(sentences);
+            if (postedSentences !== this._postedSentences) {
+                this._postedSentences = postedSentences;
+                this._view.postVoice(sentences);
+            }
+            if (this._speakers && this._speakers !== this._postedSpeakers) {
+                this._postedSpeakers = this._speakers;
+                this._view.postVoice(this._speakers);
+            }
             // Off screen: nothing to draw; coming into view refreshes.
             if (!this._view.isBotViewVisible()) {
                 this._posted = undefined;
@@ -132,6 +186,9 @@ export class VoicePanel implements vscode.Disposable {
 
     dispose(): void {
         clearTimeout(this._refreshTimer);
+        for (const ctl of this._translating.values()) {
+            ctl.abort();
+        }
         for (const d of this._disposables) {
             d.dispose();
         }
@@ -140,7 +197,8 @@ export class VoicePanel implements vscode.Disposable {
     /** What the view shows now (also a scriptable command for tests). */
     snapshot(): VoiceViewState {
         const { live, session } = this._shownSession();
-        const debug = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<boolean>('debugTranscript', false);
+        const config = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent');
+        const debug = config.get<boolean>('debugTranscript', false);
         const agent = this._controller.agent();
         const state: VoiceViewState = {
             phase: this._controller.phase(),
@@ -212,15 +270,58 @@ export class VoicePanel implements vscode.Disposable {
         return latest ? { session: latest, live: this._store.isLive(latest) } : { session: undefined, live: true };
     }
 
+    /** Whether the view shows `entryId` as a user turn or reply (not a setting line). */
+    private _showsEntry(entryId: string): boolean {
+        const entry = this._shownSession().session?.entries.find((e) => e.id === entryId);
+        return entry !== undefined && entry.kind !== 'system';
+    }
+
+    /** Alt+right-click: a sentence into `to`, posted back for `requestId`; nothing once the panel is disposed. */
+    private async _translate(requestId: number, text: string, to: string): Promise<void> {
+        const ctl = new AbortController();
+        this._translating.set(requestId, ctl);
+        let result: VoiceTranslation;
+        try {
+            result = await this._translator.translate(text, translationLanguage(to).code, ctl.signal);
+        } catch (err) {
+            result = { error: err instanceof TranslationError ? err.message : `Translation failed: ${describeError(err)}` };
+        } finally {
+            this._translating.delete(requestId);
+        }
+        if (!ctl.signal.aborted) {
+            this._view.postVoice({ type: 'translation', requestId, result });
+        }
+    }
+
     private _onMessage(message: VoiceViewClientMessage): void {
         switch (message.type) {
             case 'ready':
                 // A fresh webview has nothing drawn yet.
                 this._posted = undefined;
+                this._postedSentences = undefined;
+                this._postedSpeakers = undefined;
                 this.refresh();
                 return;
             case 'history':
                 void this.pickSession();
+                return;
+            case 'replay': {
+                const { entryId, piece } = message;
+                if (message.surface === 'bot' && !this._showsEntry(entryId)) {
+                    this._view.postVoice({ type: 'replayError', message: 'This message is no longer shown.' });
+                    return;
+                }
+                void this._controller.replay.toggle(entryId, piece);
+                return;
+            }
+            case 'replayClipStarted':
+                this.audio.clipStarted(message.clipId);
+                return;
+            case 'replayClipEnded':
+                this.audio.clipEnded(message.clipId);
+                return;
+            case 'translate':
+                void this._translate(message.requestId, message.text, message.to);
                 return;
             case 'proposal': {
                 const agent = this._controller.agent();

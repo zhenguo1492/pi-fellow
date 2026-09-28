@@ -7,12 +7,7 @@ import { getAgentLayout, getPiAgentDir } from './piCliPaths';
 import type { AgentBackend } from './agentBackend';
 import { normalizePiPackageSource } from './piPackageCatalog';
 import { installPiPackage, removePiPackageBySource } from './piPackageInstall';
-import {
-    getPiPackagesFromSettings,
-    readPiSettingsJson,
-    writePiSettingsJson,
-    type PiSettingsJson,
-} from './piSettingsJson';
+import { getPiPackagesFromSettings, readPiSettingsJson, writePiSettingsJson } from './piSettingsJson';
 import {
     addOmpSkillPath,
     readOmpAgentConfigData,
@@ -21,6 +16,7 @@ import {
     setOmpFollowUpMode,
     setOmpSteeringMode,
     updateOmpDefaults,
+    writeOmpConfig,
 } from './ompAgentConfig';
 
 export interface PiAuthProviderInfo {
@@ -64,10 +60,6 @@ async function createSettingsManager() {
     const agentDir = getPiAgentDir();
     const cwd = getCwd();
     return { agentDir, cwd, settings: readPiSettingsJson() };
-}
-
-async function persistSettings(settings: PiSettingsJson): Promise<void> {
-    writePiSettingsJson(() => settings);
 }
 
 export function emptyPiAgentConfig(): PiAgentConfigData {
@@ -226,10 +218,10 @@ async function listPiCommands(sessionManager?: PiChatSession): Promise<PiCommand
     return [];
 }
 
-async function persistSettingsManager(_sm: unknown): Promise<void> {
-    /* settings persisted via writePiSettingsJson */
-}
-
+/**
+ * Default model and thinking level of new sessions: `''` clears a field (auto), `undefined` leaves it.
+ * The live session takes only what was given, so a thinking-only change keeps its current model.
+ */
 export async function updatePiDefaults(
     fields: { provider?: string; model?: string; thinkingLevel?: string },
     sessionManager?: PiChatSession,
@@ -237,28 +229,31 @@ export async function updatePiDefaults(
 ): Promise<void> {
     const layout = getAgentLayout(preferredBackend);
     if (layout.backend === 'omp') {
-        await updateOmpDefaults(fields, sessionManager, layout.agentDir);
-        return;
+        updateOmpDefaults(fields, layout.agentDir);
+    } else {
+        writePiSettingsJson((current) => {
+            const next = { ...current };
+            const updates = [
+                ['defaultProvider', fields.provider],
+                ['defaultModel', fields.model],
+                ['defaultThinkingLevel', fields.thinkingLevel],
+            ] as const;
+            for (const [key, value] of updates) {
+                if (value === '') {
+                    delete next[key];
+                } else if (value !== undefined) {
+                    next[key] = value;
+                }
+            }
+            return next;
+        });
     }
-    writePiSettingsJson((current) => {
-        const next = { ...current };
-        if (fields.provider !== undefined) {
-            next.defaultProvider = fields.provider;
-        }
-        if (fields.model !== undefined) {
-            next.defaultModel = fields.model;
-        }
-        if (fields.thinkingLevel !== undefined) {
-            next.defaultThinkingLevel = fields.thinkingLevel;
-        }
-        return next;
-    });
-    await applyDefaultsToActiveSession(sessionManager, layout.backend);
-}
-
-export async function setPiPackages(packages: string[], sessionManager?: PiChatSession): Promise<void> {
-    writePiSettingsJson((current) => ({ ...current, packages }));
-    schedulePiSessionReload(sessionManager);
+    if (fields.provider && fields.model) {
+        await sessionManager?.setModel(fields.provider, fields.model).catch(() => {});
+    }
+    if (fields.thinkingLevel) {
+        sessionManager?.setThinkingLevel(fields.thinkingLevel);
+    }
 }
 
 export async function addPiPackage(
@@ -287,41 +282,38 @@ export async function removePiPackageAt(
     await removePiPackageBySource(source, sessionManager, outputChannel);
 }
 
-export async function setPiExtensionPaths(paths: string[], sessionManager?: PiChatSession): Promise<void> {
-    writePiSettingsJson((current) => ({ ...current, extensions: paths }));
-    void sessionManager;
-}
-
-export async function addPiExtensionPath(filePath: string, sessionManager?: PiChatSession): Promise<void> {
+/** Extension files the CLI loads: omp `config.yml#extensions`, pi `settings.json#extensions`. */
+export async function addPiExtensionPath(filePath: string, preferredBackend?: AgentBackend): Promise<void> {
     const trimmed = filePath.trim();
     if (!trimmed) {
         throw new Error('Extension path is empty');
     }
-    writePiSettingsJson((current) => {
-        const paths = [...(current.extensions ?? [])];
-        if (!paths.includes(trimmed)) {
-            paths.push(trimmed);
-        }
-        return { ...current, extensions: paths };
-    });
-    void sessionManager;
+    const add = (paths: unknown): string[] => {
+        const list = Array.isArray(paths) ? paths : [];
+        return list.includes(trimmed) ? list : [...list, trimmed];
+    };
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        writeOmpConfig((current) => ({ ...current, extensions: add(current.extensions) }), layout.agentDir);
+    } else {
+        writePiSettingsJson((current) => ({ ...current, extensions: add(current.extensions) }));
+    }
 }
 
-export async function removePiExtensionPathAt(index: number, sessionManager?: PiChatSession): Promise<void> {
-    writePiSettingsJson((current) => {
-        const paths = [...(current.extensions ?? [])];
-        if (index < 0 || index >= paths.length) {
+export async function removePiExtensionPathAt(index: number, preferredBackend?: AgentBackend): Promise<void> {
+    const remove = (paths: unknown): string[] => {
+        const list = Array.isArray(paths) ? paths : [];
+        if (index < 0 || index >= list.length) {
             throw new Error('Invalid extension path index');
         }
-        paths.splice(index, 1);
-        return { ...current, extensions: paths };
-    });
-    void sessionManager;
-}
-
-export async function setPiSkillPaths(paths: string[], sessionManager?: PiChatSession): Promise<void> {
-    writePiSettingsJson((current) => ({ ...current, skills: paths }));
-    void sessionManager;
+        return list.filter((_, i) => i !== index);
+    };
+    const layout = getAgentLayout(preferredBackend);
+    if (layout.backend === 'omp') {
+        writeOmpConfig((current) => ({ ...current, extensions: remove(current.extensions) }), layout.agentDir);
+    } else {
+        writePiSettingsJson((current) => ({ ...current, extensions: remove(current.extensions) }));
+    }
 }
 
 export async function addPiSkillPath(
@@ -383,6 +375,7 @@ export async function setPiEnableSkillCommands(
     schedulePiSessionReload(sessionManager);
 }
 
+/** Saved for new sessions and applied to the live one. */
 export async function setPiSteeringMode(
     mode: 'all' | 'one-at-a-time',
     sessionManager?: PiChatSession,
@@ -391,12 +384,13 @@ export async function setPiSteeringMode(
     const layout = getAgentLayout(preferredBackend);
     if (layout.backend === 'omp') {
         await setOmpSteeringMode(mode, layout.agentDir);
-        return;
+    } else {
+        writePiSettingsJson((current) => ({ ...current, steeringMode: mode }));
     }
-    writePiSettingsJson((current) => ({ ...current, steeringMode: mode }));
-    await applyDefaultsToActiveSession(sessionManager, layout.backend);
+    await sessionManager?.applySteeringMode(mode);
 }
 
+/** Saved for new sessions and applied to the live one. */
 export async function setPiFollowUpMode(
     mode: 'all' | 'one-at-a-time',
     sessionManager?: PiChatSession,
@@ -405,10 +399,10 @@ export async function setPiFollowUpMode(
     const layout = getAgentLayout(preferredBackend);
     if (layout.backend === 'omp') {
         await setOmpFollowUpMode(mode, layout.agentDir);
-        return;
+    } else {
+        writePiSettingsJson((current) => ({ ...current, followUpMode: mode }));
     }
-    writePiSettingsJson((current) => ({ ...current, followUpMode: mode }));
-    await applyDefaultsToActiveSession(sessionManager, layout.backend);
+    await sessionManager?.applyFollowUpMode(mode);
 }
 
 export async function openPiAgentFile(
@@ -448,23 +442,6 @@ export async function openPiAgentFile(
     }
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     await vscode.window.showTextDocument(doc, { preview: false });
-}
-
-async function applyDefaultsToActiveSession(
-    sessionManager?: PiChatSession,
-    backend?: AgentBackend,
-): Promise<void> {
-    if (!sessionManager) {
-        return;
-    }
-    const { readAgentSettingsSummary } = await import('./piCliSync');
-    const summary = readAgentSettingsSummary(backend);
-    if (summary.defaultProvider && summary.defaultModel) {
-        await sessionManager.setModel(summary.defaultProvider, summary.defaultModel).catch(() => {});
-    }
-    if (summary.defaultThinkingLevel) {
-        sessionManager.setThinkingLevel(summary.defaultThinkingLevel);
-    }
 }
 
 /** Apply ~/.pi/agent changes to the live session without blocking the settings UI. */

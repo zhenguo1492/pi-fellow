@@ -9,7 +9,7 @@ import type { TtsConfig } from '../voiceAgent/tts';
 type Post = (message: SettingsClientMessage) => void;
 type TtsResult = Extract<SettingsServerMessage, { type: 'ttsDryRunResult' }>;
 
-const DEFAULT_TTS_TEXT = '你好，这是一段语音合成测试。Hello, this is a text-to-speech test.';
+const DEFAULT_TTS_TEXT = 'Hello, this is a text-to-speech test.';
 
 let closeCurrent: (() => void) | undefined;
 /** Tags each STT recording; events of an earlier one (closed or restarted) are ignored. */
@@ -94,8 +94,12 @@ function setStatus(el: HTMLElement, state: 'busy' | 'ok' | 'error' | 'idle', tex
 
 // ── Speech-to-text ─────────────────────────────────────────────────────────
 
-export function openSttDryRun(settings: VoiceSettings, post: Post): void {
-    const meta = [settings.sttUrl || '(no URL)', settings.sttModel || 'first model at /models', `language ${settings.language || 'auto'}`].join(' · ');
+/** `apiKey`: one typed in the settings but not stored, used instead of the stored key. */
+export function openSttDryRun(settings: VoiceSettings, apiKey: string | undefined, post: Post): void {
+    const meta = (settings.sttEngine === 'builtin'
+        ? ['built-in engine (Moonshine, English)']
+        : [settings.sttUrl || '(no URL)', settings.sttModel || 'first model at /models']
+    ).concat(`language ${settings.language || 'auto'}`).join(' · ');
     const { body, footer } = openDialog('Speech-to-text dry run', meta, () => {
         if (stt?.running) {
             post({ type: 'stopSttDryRun' });
@@ -129,7 +133,7 @@ export function openSttDryRun(settings: VoiceSettings, post: Post): void {
         stt.transcript.dataset.empty = 'true';
         setStatus(stt.status, 'busy', 'Starting the microphone…');
         renderSttButtons();
-        post({ type: 'startSttDryRun', run: ++sttRun, settings });
+        post({ type: 'startSttDryRun', run: ++sttRun, settings, apiKey });
     };
     stop.addEventListener('click', () => post({ type: 'stopSttDryRun' }));
     again.addEventListener('click', start);
@@ -191,14 +195,11 @@ export function applySttDryRun(run: number, event: SttDryRunEvent): void {
 
 // ── Text-to-speech ─────────────────────────────────────────────────────────
 
-export function openTtsDryRun(settings: TtsConfig, post: Post): void {
-    const meta = [
-        settings.provider,
-        settings.url || '(no URL)',
-        settings.model || 'provider model',
-        `voice ${settings.voice || 'provider default'}`,
-        `speed ${settings.speed}`,
-    ].join(' · ');
+export function openTtsDryRun(settings: TtsConfig, apiKey: string | undefined, post: Post): void {
+    const meta = (settings.engine === 'builtin'
+        ? ['built-in engine (Piper, English)']
+        : [settings.url || '(no URL)', settings.model || 'server model', `voice ${settings.voice || 'server default'}`, `language ${settings.languageField}`]
+    ).concat(`speed ${settings.speed}`).join(' · ');
     const { body, footer } = openDialog('Text-to-speech dry run', meta, () => {
         tts = undefined;
     });
@@ -221,7 +222,7 @@ export function openTtsDryRun(settings: TtsConfig, post: Post): void {
         synthesize.disabled = true;
         tts.player.textContent = '';
         setStatus(tts.status, 'busy', 'Synthesizing…');
-        post({ type: 'ttsDryRun', settings, text: text.value });
+        post({ type: 'ttsDryRun', settings, text: text.value, apiKey });
     };
     synthesize.addEventListener('click', run);
     text.addEventListener('keydown', (e) => {

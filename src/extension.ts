@@ -1,6 +1,6 @@
 /**
  * @license MIT
- * Oh My Pi Chater — Copyright (c) 2026 guo.zheng
+ * PI Buddy — Copyright (c) 2026 guo.zheng
  *
  * Derived from vscode-pi-agent (https://github.com/FChatin/vs-pi-agent),
  * Copyright (c) 2026 FChatin, released under the MIT License.
@@ -18,7 +18,8 @@ import { SettingsPanel } from './providers/settings-panel';
 import { clearExtensionApiKeySecrets, getPiAgentDir, isSyncWithPiCli } from './pi/piCliSync';
 import { verifyPiCliAvailable, resolvePiCliInvocation, initWindowBackend, getAvailableBackends } from './pi/piCliPaths';
 import { canLoadPiNativeModules } from './pi/piExtensionCompat';
-import { probeStt, probeTts } from './voice/voiceSettings';
+import { initVoiceApiKeys, initVoiceMemory, migrateTtsSettings, probeStt, probeTts } from './voice/voiceSettings';
+import { activateBuiltinVoiceEngine } from './voice/builtinEngine/engine';
 import { maybePromptForRecommendedPackages } from './pi/recommendedPackagesPrompt';
 import { setPiExtensionPath } from './pi/extensionPath';
 
@@ -53,7 +54,7 @@ async function promptInstallCli(): Promise<void> {
     const installPi = 'Install pi';
     const reload = 'Reload Window';
     const pick = await vscode.window.showWarningMessage(
-        'Oh My Pi Chater needs the omp or pi CLI. Install one, then reload the window.',
+        'PI Buddy needs the omp or pi CLI. Install one, then reload the window.',
         installOmp,
         installPi,
         reload,
@@ -74,10 +75,10 @@ async function checkPiNativeModules(outputChannel: vscode.OutputChannel): Promis
         const npmDir = path.join(getPiAgentDir(), 'npm');
         if (invocation.backend === 'pi' && !(await canLoadPiNativeModules(invocation, npmDir))) {
             outputChannel.appendLine(
-                'WARNING: better-sqlite3 failed to load under pi Node. Memory/search tools may fail. Run "Oh My Pi Chater: Rebuild Pi native modules".',
+                'WARNING: better-sqlite3 failed to load under pi Node. Memory/search tools may fail. Run "PI Buddy: Rebuild Pi native modules".',
             );
             void vscode.window.showWarningMessage(
-                'Pi memory/search native modules are not loading under your global pi Node. Run "Oh My Pi Chater: Rebuild Pi native modules" or reload after fixing pi Node.',
+                'Pi memory/search native modules are not loading under your global pi Node. Run "PI Buddy: Rebuild Pi native modules" or reload after fixing pi Node.',
             );
         }
     } catch (err: unknown) {
@@ -103,8 +104,8 @@ async function clearExtensionOnlyKeys(context: vscode.ExtensionContext, outputCh
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-    const outputChannel = vscode.window.createOutputChannel('Oh My Pi Chater');
-    outputChannel.appendLine('Oh My Pi Chater extension activating...');
+    const outputChannel = vscode.window.createOutputChannel('PI Buddy');
+    outputChannel.appendLine('PI Buddy extension activating...');
     setPiExtensionPath(context.extensionPath);
     context.subscriptions.push(initWindowBackend(context.workspaceState));
 
@@ -159,11 +160,18 @@ export function activate(context: vscode.ExtensionContext): void {
             modelStatus.setSession(sidebarProvider.activeSession);
         }
         sidebarProviderForShutdown = sidebarProvider;
+        // Commands act on the chat tab shown in the sidebar; `session` is only the first tab.
+        const activeSession = () => sidebarProvider.activeSession ?? session;
 
         registerAttachFromExplorer(context, () => sidebarProvider);
         context.subscriptions.push(
             ...registerWorkerControlCommands(sidebarProvider, outputChannel),
-            ...registerVoiceAgentCommands(context, { worker: sidebarProvider, chat: sidebarProvider, resumeList: sidebarProvider }),
+            ...registerVoiceAgentCommands(context, {
+                worker: sidebarProvider,
+                chat: sidebarProvider,
+                resumeList: sidebarProvider,
+                installedSkills: () => activeSession().getSkillsAsync(),
+            }),
         );
         // After the voice agent's history is in: a tab the user only talked to it about comes back under its voice name.
         // Not awaited: the tabs appear at once and load side by side; prompts wait for their tab (tabReady).
@@ -183,7 +191,7 @@ export function activate(context: vscode.ExtensionContext): void {
             outputChannel,
 
             vscode.commands.registerCommand('oh-my-pi-chater.newChat', async () => {
-                const session = sidebarProvider.activeSession ?? piSession;
+                const session = activeSession();
                 await session?.newSession();
                 await sidebarProvider.pushStateSync();
                 sidebarProvider.postModelFooter();
@@ -195,14 +203,14 @@ export function activate(context: vscode.ExtensionContext): void {
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.selectModel', async () => {
-                const session = sidebarProvider.activeSession ?? piSession;
+                const session = activeSession();
                 await session?.showModelPicker();
                 sidebarProvider.sendStateSync();
                 modelStatus.refresh();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.toggleThinking', async () => {
-                const session = sidebarProvider.activeSession ?? piSession;
+                const session = activeSession();
                 const level = session?.cycleThinkingLevel();
                 if (level) {
                     vscode.window.showInformationMessage(`Thinking level: ${level}`);
@@ -235,8 +243,7 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand('oh-my-pi-chater.openSettings', () => {
                 SettingsPanel.show(
                     context.extensionUri,
-                    context.secrets,
-                    piSession,
+                    activeSession,
                     context.extension.packageJSON.version,
                     outputChannel,
                 );
@@ -248,51 +255,82 @@ export function activate(context: vscode.ExtensionContext): void {
 
             vscode.commands.registerCommand('oh-my-pi-chater.browsePackages', async () => {
                 const { showPiPackageCatalogPicker } = await import('./pi/piPackageCatalogPicker');
-                await showPiPackageCatalogPicker(piSession, outputChannel);
+                await showPiPackageCatalogPicker(activeSession(), outputChannel);
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.login', async () => {
-                if (!piSession) return;
                 const { runPiLoginFlow } = await import('./pi/slashCommands');
-                await runPiLoginFlow(piSession);
+                await runPiLoginFlow();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.logout', async () => {
-                if (!piSession) return;
                 const { runPiLogoutFlow } = await import('./pi/slashCommands');
-                await runPiLogoutFlow(piSession);
+                await runPiLogoutFlow();
             }),
 
-            // Internal: omp /login and /logout finish in the chat's TUI mode (see piAuthFlow).
+            // Internal: /login and /logout finish in the chat's TUI mode (see runPiLoginFlow).
             vscode.commands.registerCommand('oh-my-pi-chater.promptTuiAuth', (command: TuiAuthCommand) =>
                 sidebarProvider.promptTuiAuth(command),
             ),
 
             vscode.commands.registerCommand('oh-my-pi-chater.reloadSession', async () => {
-                if (!piSession) return;
-                await piSession.reloadPiAgentResources();
+                await activeSession().reloadPiAgentResources();
                 sidebarProvider.sendStateSync();
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.installRecommendedPackages', async () => {
-                if (!piSession) return;
                 const { runRecommendedPackagesSetup } = await import('./pi/recommendedPackagesPrompt');
-                await runRecommendedPackagesSetup(piSession, outputChannel);
+                await runRecommendedPackagesSetup(activeSession(), outputChannel);
             }),
 
             vscode.commands.registerCommand('oh-my-pi-chater.rebuildNativeModules', async () => {
                 await rebuildAgentNativeModules(outputChannel);
-                if (piSession) {
-                    await piSession.reloadPiAgentResources();
-                }
+                await activeSession().reloadPiAgentResources();
                 sidebarProvider.sendStateSync();
+            }),
+        );
+
+        // Built-in STT/TTS: starts on first use (dictation, voice mode, a settings Test), not here.
+        context.subscriptions.push(
+            activateBuiltinVoiceEngine({
+                serverPath: path.join(context.extensionPath, 'out', 'voice-engine', 'server.js'),
+                modelRoot: path.join(context.globalStorageUri.fsPath, 'voice-models'),
+                log: (line) => outputChannel.appendLine(`[voice engine] ${line}`),
+                withDownloadProgress: (totalBytes, download) =>
+                    vscode.window.withProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: `Downloading voice models (~${Math.max(1, Math.round(totalBytes / 1e6))} MB, first use only)…`,
+                            cancellable: true,
+                        },
+                        async (progress, token) => {
+                            const abort = new AbortController();
+                            const cancel = token.onCancellationRequested(() => abort.abort());
+                            let shown = 0;
+                            try {
+                                await download((done, total) => {
+                                    const percent = total > 0 ? (done / total) * 100 : 100;
+                                    if (percent - shown >= 1 || done === total) {
+                                        progress.report({ increment: percent - shown, message: `${Math.round(done / 1e6)} / ${Math.round(total / 1e6)} MB` });
+                                        shown = percent;
+                                    }
+                                }, abort.signal);
+                            } catch (err) {
+                                // An AbortError: the user's choice, not the engine failing (voice readiness ignores it).
+                                throw abort.signal.aborted ? new DOMException('The download of the built-in voice models was cancelled', 'AbortError') : err;
+                            } finally {
+                                cancel.dispose();
+                            }
+                        },
+                    ),
             }),
         );
 
         context.subscriptions.push(
             vscode.workspace.onDidChangeConfiguration((e) => {
-                if (e.affectsConfiguration('oh-my-pi-chater.voice.sttUrl')) {
-                    // A changed URL invalidates its previous verification; re-check the new one.
+                const stt = ['sttUrl', 'sttEngine', 'sttModel'].some((key) => e.affectsConfiguration(`oh-my-pi-chater.voice.${key}`));
+                if (stt) {
+                    // Changed settings invalidate their previous verification; re-check the new ones.
                     void probeStt();
                 }
                 if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent.tts')) {
@@ -300,15 +338,23 @@ export function activate(context: vscode.ExtensionContext): void {
                 }
             }),
         );
+        // The custom engines' API keys (SecretStorage); a changed key re-checks its service.
+        context.subscriptions.push(initVoiceApiKeys(context.secrets));
+        // Your own voice servers' settings, kept when a Cloud or Built-in save overwrites them.
+        initVoiceMemory(context.globalState);
         // The mic needs a verified STT server, the voice agent STT and TTS; check the configured ones at startup.
         void probeStt();
         void probeTts();
+        // The old tts.provider (before tts.engine; some values named a kind of server) reads the same until moved here.
+        migrateTtsSettings().catch((err: unknown) =>
+            outputChannel.appendLine(`Could not migrate the text-to-speech settings: ${err instanceof Error ? err.message : String(err)}`),
+        );
 
-        outputChannel.appendLine('Oh My Pi Chater extension activated.');
+        outputChannel.appendLine('PI Buddy extension activated.');
     } catch (err: any) {
         const msg = err?.message ?? String(err);
         outputChannel.appendLine(`Failed to activate: ${msg}`);
-        vscode.window.showErrorMessage(`Oh My Pi Chater failed to activate: ${msg}`);
+        vscode.window.showErrorMessage(`PI Buddy failed to activate: ${msg}`);
         registerBootErrorSidebar(context, msg);
     }
 }

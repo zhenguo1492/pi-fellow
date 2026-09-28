@@ -1,12 +1,19 @@
 .vscode/**
 .vscode-test/**
+.pi/**
 # Styles ship as out/webview/styles/ after npm run compile (see esbuild.js copyStyles).
 src/**
 .github/**
+docs/**
+docker/**
+AGENT.md
+AGENTS.md
 .gitignore
 vitest.config.ts
 tsconfig.json
 esbuild.js
-*.map
+package-lock.json
+**/*.map
 *.vsix
+out/welcome-harness.html
 .kemdicode-mcp.json

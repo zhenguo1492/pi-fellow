@@ -33,7 +33,7 @@ export function getSidebarHtml(webview: vscode.Webview, extensionUri: vscode.Uri
     <link rel="stylesheet" href="${toolCardsStyleUri}">
     <link rel="stylesheet" href="${xtermStyleUri}">
     <link rel="stylesheet" href="${voiceStyleUri}">
-    <title>Oh My Pi Chater</title>
+    <title>PI Buddy</title>
 </head>
 <body>
     <div id="app" data-icons-uri="${iconsUri}"></div>

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { VoiceEntry } from '../../../shared/voiceViewProtocol';
+import type { ResearchJob } from '../../../voiceAgent/research';
 import { VoiceTranscriptStore, type VoiceSessionRecord } from '../../../voiceAgent/transcriptStore';
 import type { VoiceTurnResult } from '../../../voiceAgent/voiceAgent';
 
@@ -215,5 +216,55 @@ describe('VoiceTranscriptStore: voice sessions for the resume list', () => {
         expect(store.nameTask('/s/a.jsonl', 'Something else', 'auto')).toBe(false);
         expect(store.voiceSessions()[0].title).toBe('Average bug');
         expect(store.nameTask('/s/none.jsonl', 'Nobody', 'user')).toBe(false);
+    });
+});
+
+describe('VoiceTranscriptStore: tool cards', () => {
+    it("fills a research call's entry with the findings once its job settles", () => {
+        const { store, m } = setup();
+        const { listener } = store.beginReply();
+        const job: ResearchJob = { id: 'r1', question: 'How does replay work?', startedAt: 1000, status: 'running' };
+        listener.onToolCall?.('research', { question: job.question }, { text: 'Started research r1', isError: false, research: job });
+        listener.onEnd?.(result());
+        expect(assistant(store.current()!.entries).tools[0].research).toEqual({ status: 'running', startedAt: 1000 });
+
+        Object.assign(job, { status: 'done', finishedAt: 5000, result: 'ReplayPlayer reads it aloud.' });
+        store.researchSettled(job);
+        expect(assistant(store.current()!.entries).tools[0].research).toEqual({
+            status: 'done',
+            startedAt: 1000,
+            finishedAt: 5000,
+            result: 'ReplayPlayer reads it aloud.',
+        });
+
+        // A job still running when the window closed shows as stopped after a reload, not running forever.
+        store.beginReply().listener.onToolCall?.('research', { question: 'q2' }, { text: 'Started research r2', isError: false, research: { id: 'r2', question: 'q2', startedAt: 2000, status: 'running' } });
+        store.flush();
+        const reloaded = setup({ initial: m.saved() }).store;
+        const tools = reloaded.sessions()[0].entries.flatMap((e) => (e.kind === 'assistant' ? e.tools : []));
+        expect(tools.map((t) => t.research?.status)).toEqual(['done', 'failed']);
+    });
+
+    it('records a lookup as it starts and its result when it ends; a cut-off one stops running', () => {
+        const { store } = setup();
+        const { listener } = store.beginReply();
+        listener.onLookup?.({ id: 'c1', name: 'read', args: { path: 'a.ts' }, description: 'read a.ts' });
+        listener.onLookup?.({ id: 'c2', name: 'grep', args: { pattern: 'x' }, description: 'grep x' });
+        listener.onLookupEnd?.('c1', { text: 'x'.repeat(9000), isError: false });
+        const [read, grep] = assistant(store.current()!.entries).tools;
+        expect(read.running).toBeUndefined();
+        expect(read.result.startsWith('x'.repeat(8000))).toBe(true);
+        expect(read.result.length).toBeLessThan(8100);
+        expect(grep.running).toBe(true);
+        listener.onEnd?.(result({ interrupted: true }));
+        expect(grep.running).toBeUndefined();
+    });
+
+    it('turns lookups saved as descriptions into tool entries', () => {
+        const saved = { kind: 'assistant', id: 'e1', at: 1, text: 'Hi', tools: [], lookups: ['Reading a.ts'], done: true };
+        const { store } = setup({ initial: [{ id: 's1', taskKey: 'tab:t1', title: 'T', startedAt: 1, updatedAt: 1, entries: [saved as VoiceEntry] }] });
+        const entry = assistant(store.sessions()[0].entries);
+        expect(entry.tools).toEqual([{ name: 'lookup', args: { description: 'Reading a.ts' }, result: '', isError: false }]);
+        expect('lookups' in entry).toBe(false);
     });
 });

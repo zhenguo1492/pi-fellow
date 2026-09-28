@@ -1,7 +1,7 @@
 {
   "name": "oh-my-pi-chater",
-  "displayName": "Oh My Pi Chater",
-  "description": "Sidebar GUI for the omp (Oh My Pi) and pi coding agents over `--mode rpc` (full CLI parity, no bundled SDK). Derived from vscode-pi-agent (MIT).",
+  "displayName": "PI Buddy — omp & pi Agent with Voice Pair Programmer",
+  "description": "Unofficial VS Code GUI for the omp (Oh My Pi) and pi coding agents, plus a voice AI pair-programming partner that talks with you, points at code, edits and debugs alongside you, or hands work to the agent.",
   "version": "0.1.0",
   "publisher": "zhenguo",
   "license": "MIT",
@@ -11,8 +11,30 @@
   },
   "categories": [
     "AI",
-    "Chat"
+    "Chat",
+    "Machine Learning"
   ],
+  "keywords": [
+    "pi",
+    "omp",
+    "oh-my-pi",
+    "coding agent",
+    "ai agent",
+    "pair programming",
+    "voice",
+    "voice assistant",
+    "speech to text",
+    "text to speech",
+    "whisper",
+    "mcp",
+    "chat"
+  ],
+  "preview": true,
+  "pricing": "Free",
+  "galleryBanner": {
+    "color": "#1e1b2e",
+    "theme": "dark"
+  },
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
@@ -20,7 +42,7 @@
       "activitybar": [
         {
           "id": "oh-my-pi-chater",
-          "title": "Oh My Pi Chater",
+          "title": "PI Buddy",
           "icon": "media/oh-my-pi-chater.svg"
         }
       ]
@@ -30,11 +52,17 @@
         {
           "type": "webview",
           "id": "oh-my-pi-chater.chat",
-          "name": "Oh My Pi Chater"
+          "name": "PI Buddy"
         }
       ]
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "oh-my-pi-chater.voiceAgent.debugWorkerControl",
+          "when": "false"
+        }
+      ],
       "explorer/context": [
         {
           "command": "oh-my-pi-chater.attachFilesFromExplorer",
@@ -53,141 +81,112 @@
     "commands": [
       {
         "command": "oh-my-pi-chater.newChat",
-        "title": "Oh My Pi Chater: New Chat"
+        "title": "PI Buddy: New Chat"
       },
       {
         "command": "oh-my-pi-chater.abort",
-        "title": "Oh My Pi Chater: Stop Generation"
+        "title": "PI Buddy: Stop Generation"
       },
       {
         "command": "oh-my-pi-chater.selectModel",
-        "title": "Oh My Pi Chater: Select Model"
+        "title": "PI Buddy: Select Model"
       },
       {
         "command": "oh-my-pi-chater.toggleThinking",
-        "title": "Oh My Pi Chater: Toggle Thinking Level"
+        "title": "PI Buddy: Toggle Thinking Level"
       },
       {
         "command": "oh-my-pi-chater.openSessionTree",
-        "title": "Oh My Pi Chater: Session Branch Tree (/tree)"
+        "title": "PI Buddy: Session Branch Tree (/tree)"
       },
       {
         "command": "oh-my-pi-chater.focusChat",
-        "title": "Oh My Pi Chater: Focus Chat"
+        "title": "PI Buddy: Focus Chat"
       },
       {
         "command": "oh-my-pi-chater.toggleDictation",
-        "title": "Oh My Pi Chater: Toggle Voice Input"
+        "title": "PI Buddy: Toggle Voice Input"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.debugWorkerControl",
-        "title": "Oh My Pi Chater: Voice Agent — Debug Worker Control"
+        "title": "PI Buddy: Voice Agent — Debug Worker Control"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.typeMessage",
-        "title": "Oh My Pi Chater: Voice Agent — Type a Message"
+        "title": "PI Buddy: Voice Agent — Type a Message"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.start",
-        "title": "Oh My Pi Chater: Voice Agent — Start Voice Mode"
+        "title": "PI Buddy: Voice Agent — Start Voice Mode"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.stop",
-        "title": "Oh My Pi Chater: Voice Agent — Stop"
+        "title": "PI Buddy: Voice Agent — Stop"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.toggleMute",
-        "title": "Oh My Pi Chater: Voice Agent — Mute / Unmute Microphone"
+        "title": "PI Buddy: Voice Agent — Mute / Unmute Microphone"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.hush",
-        "title": "Oh My Pi Chater: Voice Agent — Stop Speaking"
+        "title": "PI Buddy: Voice Agent — Stop Speaking"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.clearHighlight",
-        "title": "Oh My Pi Chater: Voice Agent — Clear Pi Highlight"
+        "title": "PI Buddy: Voice Agent — Clear Pi Highlight"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.toggleMode",
-        "title": "Oh My Pi Chater: Voice Agent — Switch Delegate / Pair Mode"
+        "title": "PI Buddy: Voice Agent — Switch Delegate / Pair Mode"
       },
       {
         "command": "oh-my-pi-chater.voiceView.show",
-        "title": "Oh My Pi Chater: Voice Agent — Show Bot View"
+        "title": "PI Buddy: Voice Agent — Show Bot View"
       },
       {
         "command": "oh-my-pi-chater.voiceView.history",
-        "title": "Oh My Pi Chater: Voice Agent — Past Conversations",
+        "title": "PI Buddy: Voice Agent — Past Conversations",
         "icon": "$(history)"
       },
       {
         "command": "oh-my-pi-chater.attachFilesFromExplorer",
-        "title": "Oh My Pi Chater: Add to Chat"
+        "title": "PI Buddy: Add to Chat"
       },
       {
         "command": "oh-my-pi-chater.openSettings",
-        "title": "Oh My Pi Chater: Open Settings"
+        "title": "PI Buddy: Open Settings"
       },
       {
         "command": "oh-my-pi-chater.openMcpSettings",
-        "title": "Oh My Pi Chater: MCP Settings (/mcp)"
+        "title": "PI Buddy: MCP Settings (/mcp)"
       },
       {
         "command": "oh-my-pi-chater.login",
-        "title": "Oh My Pi Chater: Login (/login)"
+        "title": "PI Buddy: Login (/login)"
       },
       {
         "command": "oh-my-pi-chater.logout",
-        "title": "Oh My Pi Chater: Logout (/logout)"
+        "title": "PI Buddy: Logout (/logout)"
       },
       {
         "command": "oh-my-pi-chater.reloadSession",
-        "title": "Oh My Pi Chater: Reload Session (/reload)"
+        "title": "PI Buddy: Reload Session (/reload)"
       },
       {
         "command": "oh-my-pi-chater.installRecommendedPackages",
-        "title": "Oh My Pi Chater: Install Recommended Packages"
+        "title": "PI Buddy: Install Recommended Packages"
       },
       {
         "command": "oh-my-pi-chater.browsePackages",
-        "title": "Oh My Pi Chater: Browse Package Catalog"
+        "title": "PI Buddy: Browse Package Catalog"
       },
       {
         "command": "oh-my-pi-chater.rebuildNativeModules",
-        "title": "Oh My Pi Chater: Rebuild Pi Native Modules"
-      }
-    ],
-    "keybindings": [
-      {
-        "command": "oh-my-pi-chater.focusChat",
-        "key": "ctrl+shift+l",
-        "mac": "cmd+shift+l"
-      },
-      {
-        "command": "oh-my-pi-chater.newChat",
-        "key": "ctrl+shift+n",
-        "mac": "cmd+shift+n"
-      },
-      {
-        "command": "oh-my-pi-chater.toggleDictation",
-        "key": "ctrl+alt+m",
-        "mac": "cmd+alt+m",
-        "when": "!oh-my-pi-chater.voiceMode"
-      },
-      {
-        "command": "oh-my-pi-chater.voiceAgent.toggleMute",
-        "key": "ctrl+alt+m",
-        "mac": "cmd+alt+m",
-        "when": "oh-my-pi-chater.voiceMode"
-      },
-      {
-        "command": "oh-my-pi-chater.abort",
-        "key": "escape",
-        "when": "oh-my-pi-chater.isStreaming && !oh-my-pi-chater.tuiMode"
+        "title": "PI Buddy: Rebuild Pi Native Modules"
       }
     ],
     "configuration": {
-      "title": "Oh My Pi Chater",
+      "title": "PI Buddy",
       "properties": {
         "oh-my-pi-chater.backend": {
           "type": "string",
@@ -293,15 +292,28 @@
           "default": false,
           "description": "Install recommended Pi packages automatically on startup without asking (requires network/npm)."
         },
+        "oh-my-pi-chater.voice.sttEngine": {
+          "type": "string",
+          "default": "builtin",
+          "enum": [
+            "builtin",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Built-in: Moonshine (English) running locally in a separate process. Nothing to install; its models (about 350 MB with the built-in voice) download on first use.",
+            "Custom: the OpenAI-compatible server at voice.sttUrl."
+          ],
+          "markdownDescription": "Voice input and voice mode: speech-to-text engine. Unset, it is `custom` when `#oh-my-pi-chater.voice.sttUrl#` is set, else `builtin`."
+        },
         "oh-my-pi-chater.voice.sttUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Voice input: OpenAI-compatible speech-to-text endpoint, e.g. `http://127.0.0.1:8010/v1` (speaches / faster-whisper-server) or `https://api.openai.com/v1`. A bare host gets `/v1`; `/audio/transcriptions` is appended. Empty disables recording."
+          "markdownDescription": "Voice input with the custom engine: OpenAI-compatible speech-to-text endpoint, e.g. `http://127.0.0.1:8010/v1` (speaches / faster-whisper-server) or `https://api.openai.com/v1`. A bare host gets `/v1`; `/audio/transcriptions` is appended. Empty disables recording."
         },
         "oh-my-pi-chater.voice.sttModel": {
           "type": "string",
           "default": "",
-          "description": "Voice input: transcription model id. Empty uses the first model the server lists at /models."
+          "description": "Voice input with the custom engine: transcription model id. Empty uses the first model the server lists at /models."
         },
         "oh-my-pi-chater.voice.language": {
           "type": "string",
@@ -338,6 +350,15 @@
             "high"
           ],
           "description": "Voice agent: thinking level. Off keeps spoken replies fast. Takes effect after Voice Agent — Stop."
+        },
+        "oh-my-pi-chater.voiceAgent.skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "uniqueItems": true,
+          "description": "Voice agent: names of the installed skills it loads (Settings → Voice). Empty loads none. omp loads them by name, pi by their SKILL.md files. Takes effect after Voice Agent — Stop."
         },
         "oh-my-pi-chater.voiceAgent.confirmBeforeDispatch": {
           "type": "boolean",
@@ -388,35 +409,53 @@
           "maximum": 3,
           "description": "Voice mode: seconds of silence that end your turn. Takes effect when voice mode starts."
         },
-        "oh-my-pi-chater.voiceAgent.tts.provider": {
+        "oh-my-pi-chater.voiceAgent.tts.engine": {
           "type": "string",
-          "default": "openai",
+          "default": "builtin",
           "enum": [
-            "chatterbox",
-            "kokoro",
-            "openai"
+            "builtin",
+            "custom"
           ],
           "enumDescriptions": [
-            "chatterbox-tts (multilingual): sends language zh for sentences with Chinese, en otherwise; reads mixed Chinese and English.",
-            "Kokoro-FastAPI: speaks Chinese runs with lang_code z and the rest in the voice's own language.",
-            "Any other OpenAI-compatible service: no language field."
+            "Built-in: Piper (en_US lessac) running locally in a separate process, English only; tts.url, tts.model, tts.voice and tts.languageField are not used. Its model downloads on first use.",
+            "Custom: the OpenAI-compatible server at tts.url."
           ],
-          "description": "Voice mode: which kind of text-to-speech service tts.url is; decides how the language is sent."
+          "markdownDescription": "Voice mode: text-to-speech engine. Unset, it is `custom` when `#oh-my-pi-chater.voiceAgent.tts.url#` is set, else `builtin`."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.provider": {
+          "type": "string",
+          "markdownDeprecationMessage": "Replaced by `#oh-my-pi-chater.voiceAgent.tts.engine#` and `#oh-my-pi-chater.voiceAgent.tts.languageField#`; moved there automatically when the extension starts.",
+          "description": "Voice mode: the text-to-speech setting before tts.engine. Still read (and moved to tts.engine) while tts.engine is unset."
+        },
+        "oh-my-pi-chater.voiceAgent.tts.languageField": {
+          "type": "string",
+          "default": "none",
+          "enum": [
+            "none",
+            "perSentence",
+            "chineseLangCode"
+          ],
+          "enumDescriptions": [
+            "Send no language: the server detects it, or the voice speaks one language.",
+            "Send language zh for sentences with Chinese, en otherwise (e.g. chatterbox-tts, which then reads mixed Chinese and English).",
+            "Speak Chinese runs with lang_code z and the rest in the voice's own language, each run its own request (e.g. Kokoro-FastAPI)."
+          ],
+          "description": "Voice mode, custom engine: how the server is told the language of what it reads."
         },
         "oh-my-pi-chater.voiceAgent.tts.url": {
           "type": "string",
           "default": "",
-          "description": "Voice mode: OpenAI-compatible text-to-speech base URL, e.g. http://127.0.0.1:8881/v1. Takes effect when voice mode starts."
+          "description": "Voice mode, custom engine: OpenAI-compatible text-to-speech base URL, e.g. http://127.0.0.1:8881/v1. Takes effect when voice mode starts."
         },
         "oh-my-pi-chater.voiceAgent.tts.model": {
           "type": "string",
           "default": "",
-          "description": "Voice mode: text-to-speech model. Empty uses the provider's: chatterbox-multilingual, kokoro, or tts-1."
+          "description": "Voice mode, custom engine: text-to-speech model. Empty sends none and the server picks; Test in Settings → Voice lists the server's models to choose from."
         },
         "oh-my-pi-chater.voiceAgent.tts.voice": {
           "type": "string",
           "default": "",
-          "description": "Voice mode: text-to-speech voice. Empty uses the provider's: default (chatterbox), af_sarah (Kokoro), or alloy."
+          "description": "Voice mode, custom engine: text-to-speech voice. Empty sends none and the server picks."
         },
         "oh-my-pi-chater.voiceAgent.tts.speed": {
           "type": "number",
@@ -436,6 +475,68 @@
           "type": "boolean",
           "default": false,
           "description": "Voice view: also show what each turn sent to the voice model and the updates it chose not to speak about (<silent/>). For troubleshooting."
+        },
+        "oh-my-pi-chater.voiceAgent.messageButtons": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Voice view: read aloud and translate sentences in the Bot view and the chat (prompts, replies, Thought blocks, tool card text). Hold Alt to highlight the sentence under the pointer; Alt+click reads it aloud with the configured text-to-speech, Alt+right-click shows its translation into `#oh-my-pi-chater.voiceAgent.translateTo#` in a floating panel (the sentence is sent to Google Translate)."
+        },
+        "oh-my-pi-chater.voiceAgent.translateTo": {
+          "type": "string",
+          "default": "zh-CN",
+          "enum": ["zh-CN", "zh-TW", "en", "es", "hi", "ar", "bn", "pt", "ru", "ja", "de", "fr", "ko", "it", "tr", "vi", "id", "ur", "th", "pl"],
+          "enumDescriptions": [
+            "Chinese (Simplified) · 简体中文",
+            "Chinese (Traditional) · 繁體中文",
+            "English",
+            "Spanish · Español",
+            "Hindi · हिन्दी",
+            "Arabic · العربية",
+            "Bengali · বাংলা",
+            "Portuguese · Português",
+            "Russian · Русский",
+            "Japanese · 日本語",
+            "German · Deutsch",
+            "French · Français",
+            "Korean · 한국어",
+            "Italian · Italiano",
+            "Turkish · Türkçe",
+            "Vietnamese · Tiếng Việt",
+            "Indonesian · Bahasa Indonesia",
+            "Urdu · اردو",
+            "Thai · ไทย",
+            "Polish · Polski"
+          ],
+          "markdownDescription": "Voice view: the language Alt+right-click translates a sentence into (with `#oh-my-pi-chater.voiceAgent.messageButtons#` on)."
+        },
+        "oh-my-pi-chater.voiceAgent.replayCacheSize": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 500,
+          "description": "Voice view: how many messages' synthesized audio is kept in memory for reading sentences aloud (what voice mode spoke, and each sentence Alt+click synthesized); the oldest goes first. 0 keeps none."
+        },
+        "oh-my-pi-chater.voiceAgent.userName": {
+          "type": "string",
+          "default": "User",
+          "maxLength": 40,
+          "description": "Voice view: your name, shown on your turns in the Bot view. The voice agent is told it when it is not the default."
+        },
+        "oh-my-pi-chater.voiceAgent.userAvatar": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Voice view: your avatar in the Bot view. A pixel-art preset (`preset:uncle`, `preset:boy`, `preset:cat`, `preset:otaku`, `preset:woman`, `preset:gentleman`; also clickable in Settings → Voice), an emoji or up to two characters (e.g. `🦊`, `ZG`), or the path of a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB; `~` is your home folder, a relative path starts at the workspace folder). Empty: the default icon."
+        },
+        "oh-my-pi-chater.voiceAgent.botName": {
+          "type": "string",
+          "default": "Bot",
+          "maxLength": 40,
+          "description": "Voice view: the voice agent's name, shown on its replies in the Bot view. It is told this name and answers to it when it is not the default."
+        },
+        "oh-my-pi-chater.voiceAgent.botAvatar": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Voice view: the voice agent's avatar in the Bot view, like `#oh-my-pi-chater.voiceAgent.userAvatar#`. Empty: the robot."
         }
       }
     }
@@ -445,7 +546,8 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit -p . && tsc -p src/webview",
     "vscode:prepublish": "npm run compile",
-    "package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links --allow-missing-repository",
+    "package": "npm run compile && npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository",
+    "publish": "npx @vscode/vsce publish --no-dependencies --allow-missing-repository",
     "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons'",
     "test": "vitest",
     "test:unit": "vitest run",
@@ -455,6 +557,7 @@
   "dependencies": {
     "marked": "^18.0.2",
     "proper-lockfile": "^4.1.2",
+    "sherpa-onnx-node": "^1.13.8",
     "ws": "^8.21.3"
   },
   "devDependencies": {
@@ -469,6 +572,7 @@
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
     "mocha": "^11.0.0",
     "onnxruntime-web": "^1.30.0",
     "typescript": "^5.8.0",

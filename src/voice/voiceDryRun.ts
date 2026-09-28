@@ -9,6 +9,7 @@ import { DictationSession, dictationSegmenterParams } from './dictation';
 import { SileroVad } from './sileroVad';
 import { describeError } from './modelsProbe';
 import { SttClient, encodeWav } from './stt';
+import { resolveSttConfig, resolveTtsConfig } from './voiceSettings';
 
 const TTS_TIMEOUT_MS = 60_000;
 
@@ -23,14 +24,14 @@ export class VoiceDryRun implements vscode.Disposable {
         private readonly _post: (message: SettingsServerMessage) => void,
     ) {}
 
-    /** Records until the first sentence is transcribed (or `stopStt`); events carry `run`. */
-    async startStt(run: number, s: VoiceSettings): Promise<void> {
+    /** Records until the first sentence is transcribed (or `stopStt`); events carry `run`. `apiKey`: typed, not stored. */
+    async startStt(run: number, s: VoiceSettings, apiKey?: string): Promise<void> {
         // Messages are not serialized: a stop may arrive while this still waits on the VAD model.
         const generation = ++this._generation;
         await this._session?.stop();
         const emit = (event: SttDryRunEvent) => this._post({ type: 'sttDryRun', run, event });
         try {
-            if (!s.sttUrl.trim()) {
+            if (s.sttEngine === 'custom' && !s.sttUrl.trim()) {
                 throw new Error('Enter a speech-to-text URL first.');
             }
             this._vad ??= SileroVad.load(
@@ -41,6 +42,8 @@ export class VoiceDryRun implements vscode.Disposable {
                 throw err;
             });
             const vad = await this._vad;
+            // The built-in engine may download its models and start here.
+            const stt = await resolveSttConfig({ ...s, sttUrl: s.sttUrl.trim(), sttModel: s.sttModel.trim(), language: s.language.trim() }, apiKey);
             if (generation !== this._generation) {
                 // Stopped, closed or started again while the model loaded: this run never records.
                 emit({ kind: 'ended' });
@@ -48,7 +51,7 @@ export class VoiceDryRun implements vscode.Disposable {
             }
             const session: DictationSession = new DictationSession(
                 vad,
-                new SttClient({ url: s.sttUrl.trim(), model: s.sttModel.trim(), language: s.language.trim() }),
+                new SttClient(stt),
                 dictationSegmenterParams(s),
                 {
                     status: (status) => {
@@ -82,19 +85,17 @@ export class VoiceDryRun implements vscode.Disposable {
         await this._session?.stop();
     }
 
-    async synthesize(t: TtsConfig, text: string): Promise<void> {
+    async synthesize(t: TtsConfig, text: string, apiKey?: string): Promise<void> {
         try {
-            if (!t.url.trim()) {
+            if (t.engine !== 'builtin' && !t.url.trim()) {
                 throw new Error('Enter a text-to-speech URL first.');
             }
             if (!text.trim()) {
                 throw new Error('Enter some text to synthesize.');
             }
+            const config = await resolveTtsConfig({ ...t, url: t.url.trim(), model: t.model.trim(), voice: t.voice.trim() }, apiKey);
             const started = Date.now();
-            const pcm = await new TtsClient({ ...t, url: t.url.trim(), model: t.model.trim(), voice: t.voice.trim() }).synthesize(
-                text.trim(),
-                AbortSignal.timeout(TTS_TIMEOUT_MS),
-            );
+            const pcm = await new TtsClient(config).synthesize(text.trim(), AbortSignal.timeout(TTS_TIMEOUT_MS));
             // Copy into a fresh buffer: an Int16Array view needs an even byte offset.
             const wav = encodeWav(new Int16Array(new Uint8Array(pcm.data).buffer), pcm.rate);
             this._post({

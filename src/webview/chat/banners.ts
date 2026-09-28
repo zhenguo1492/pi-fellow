@@ -100,7 +100,7 @@ export function appendDismissButton(
 }
 
 /**
- * omp /login|/logout banner at the transcript end: omp only signs in from its own TUI picker, so
+ * /login|/logout banner at the transcript end: the CLIs only sign in from their own TUI picker, so
  * the button switches to TUI mode and the extension types the command there.
  */
 export function updateTuiAuthBanner(): void {
@@ -128,8 +128,8 @@ export function updateTuiAuthBanner(): void {
     const text = el('span', 'tui-auth-banner-text');
     text.textContent =
         command === 'login'
-            ? 'omp signs in from its terminal UI: pick a subscription or API-key provider there (logged-in ones are marked).'
-            : 'omp removes stored credentials from its terminal UI.';
+            ? 'Sign-in runs in the terminal UI: pick a subscription or API-key provider there (configured ones are marked).'
+            : 'Stored credentials are removed from the terminal UI.';
     const button = el('button', 'tui-auth-banner-btn');
     button.type = 'button';
     button.textContent = command === 'login' ? 'Log in via terminal' : 'Log out via terminal';

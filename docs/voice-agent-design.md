@@ -71,7 +71,7 @@ omp --mode rpc --no-tools --no-skills --no-rules --no-extensions --no-lsp \
   - 工具调用 = 标题为 `vscode-host-tool-call` 的 `input` 对话框，参数在 `placeholder` 里；bridge 把它翻译成 `host_tool_call`，`host_tool_result` 则翻译成 `extension_ui_response`。取消 = 键为 `vscode-host-tool-cancel` 的 `setStatus`，翻译成 `host_tool_cancel`。这些帧不会到达 `RpcExtensionUiHandler`。
   - pi 的 `--tools` 白名单同时过滤扩展工具，所以语音进程的白名单要带上宿主工具名；只读内置工具是 `read,grep,find`（pi 没有 `glob`，`--append-system-prompt` 告诉模型 find 就是 glob）。pi 的 `agent_end` 之后还可能重试，一轮以 `agent_settled` 结束。
   - pi 的语音进程和 research **不加 `--no-extensions`**（omp 照旧加）：pi 的模型 provider 可以来自 pi 包（如 `pi-provider-antigravity`），不加载扩展时 `--model antigravity/…` 直接以 "Model not found" 退出，语音一句话都答不了（2026-09-26 实测）。用户扩展的工具仍被 `--tools` 白名单挡在外面，它们弹出的阻塞对话框由 VoiceLlm 自动取消。
-  - pi 上另加 `--no-context-files`，相当于 omp 的 `--no-rules`：`AGENTS.md` / `CLAUDE.md` 是给写代码的智能体的指令，语音智能体读到会照做并念出来（2026-09-26 实测：用户 `~/AGENTS.md` 的英文纠错规则让每句英文回复都以 `[英文没问题]` 开头）。
+  - 规则文件（`AGENTS.md` / `CLAUDE.md`）：起初 pi 加 `--no-context-files`、omp 加 `--no-rules` 不读，因为其中给写代码的智能体的回复格式规则会被语音智能体照做并念出来（2026-09-26 实测：一条用户级规则让每句回复都带上固定前缀）。2026-09-27 改为语音进程和 research 都加载，以便知道项目结构；语音提示词说明其中的回复格式规则不适用于朗读。
   - 一轮跑不起来时（语音进程启动失败、没有会话 tab 等），`VoiceAgent.say` 不抛错，而是用带 `error` 的结果走 `onEnd`：Bot 视图里这条回复显示 ⚠ 错误，不会一直停在“…”。
   - 实测（2026-09-26，pi 0.87.1，`openai-codex/gpt-5.5`）：宿主工具调用、错误结果、`new_session` 与 `switch_session` 之后再调用、打断时 `host_tool_cancel` 都正常；普通会话（不带 hostTools 选项）不加载该扩展。
 
@@ -461,7 +461,7 @@ interface WorkerController {
 
 实现：`src/voiceAgent/workerController.ts`（接口），`SidebarProvider`（实现）。调试入口：命令面板 "Voice Agent — Debug Worker Control"；内部命令 `oh-my-pi-chater.voiceAgent.workerControl` 接收 `{ action, ... }` 并返回结果，供脚本测试使用。
 
-第 2 步实现（2026-09-25）：`voiceLlm.ts`（语音 omp 进程，复用 `PiRpcBridge`，新增 `setHostTools`、`onExit`）、`hostTools.ts`（HostToolRouter 与工具定义）、`voicePrompt.ts`（系统提示词与每轮消息）、`voiceAgent.ts`（编排：串行轮次、新消息打断、按任务切换语音上下文）、`voiceAgentCommands.ts`（命令面板 "Voice Agent — Type a Message" / "Voice Agent — Stop"，内部命令 `oh-my-pi-chater.voiceAgent.say`）。还没有音频，用打字代替说话，对话记录写在输出面板 "Oh My Pi Chater: Voice Agent"。
+第 2 步实现（2026-09-25）：`voiceLlm.ts`（语音 omp 进程，复用 `PiRpcBridge`，新增 `setHostTools`、`onExit`）、`hostTools.ts`（HostToolRouter 与工具定义）、`voicePrompt.ts`（系统提示词与每轮消息）、`voiceAgent.ts`（编排：串行轮次、新消息打断、按任务切换语音上下文）、`voiceAgentCommands.ts`（命令面板 "Voice Agent — Type a Message" / "Voice Agent — Stop"，内部命令 `oh-my-pi-chater.voiceAgent.say`）。还没有音频，用打字代替说话，对话记录写在输出面板 "PI Buddy: Voice Agent"。
 
 - `send` 复用面板打字的发送路径：空闲时走 `_beginPrompt`（`_startTurn`、`_dispatchPrompt`），与面板发送共用；`after` 进 `queuedMessages`，与面板的"排队"是同一个队列，用户能看到、能编辑；`now` 发 `prompt` + `streamingBehavior: 'steer'`，并在面板上显示为插话。
 - 拒绝 `/` 开头的斜杠命令和 `!` 开头的 shell 快捷方式：语音只做任务控制（§6）。
@@ -499,6 +499,27 @@ interface WorkerController {
    - 关闭 tab：丢弃它的观察和语音会话映射；针对它的在途工具调用返回"会话已关闭"。
    - TUI 模式（按 tab）：TUI 与 RPC worker 不能同时写同一个会话文件，所以该任务的语音只保留讨论（状态条在 TUI 下方仍可用，pair 工具照常），派活/叫停工具由 `SidebarWorker` 抛错（`TUI_TAB_REFUSAL`：这个 tab 在 TUI 模式，无法语音控制，请用户切回聊天视图）。TUI tab 没有 Bot 视图。
 8. **语音模型**：§5.4 的"跟随 worker 模型"指开启语音模式时当前 tab 的模型；之后切换任务不改变语音模型。
+
+### 5.13 语音服务不可用时退回文字（2026-09-28）
+
+STT、TTS 任一或两者不能用（没配置、检查失败、内置引擎下载失败）时，语音智能体照样上线，缺的方向改用文字：
+
+- **启动**：`voiceAgentCommands.ts` 的 `start` 先对没通过的服务重新检查一次（`probeStt` / `probeTts`，用户可能刚把服务开起来），仍不通过的不传给 `VoiceMode.start`，原因放进 `unavailable`。`VoiceMode.start` 不再因为缺 STT/TTS 抛错；STT 的 `/models` 检查失败也只是去掉 STT。两者都通过时行为不变。
+- **没有 STT**：不加载 VAD，音频页以 `capture=0` 打开，只播放、不调 `getUserMedia`，麦克风始终关着，波形不会随用户说话变化；静音无意义（`setMuted` 不生效），输入框麦克风置灰并说明原因。用户在 Bot 视图里打字（`VoiceMode.type`）。
+- **没有 TTS**：状态机 `ConvState.voiced = false`，回复不切句、不送 TTS，不进入 synthesizing / speaking，生成完即结束这一轮（`lastMetrics`、`floorReleased` 照常）；代码锚点立即指向；被打断时给模型的说明改为“用户看到了已写出的部分”。
+- **两者都没有**：不开音频页和隐藏 Chrome，语音模式就是 Bot 视图里的打字对话；Bot 视图的朗读按钮改在 Bot 视图里播放（`beginReplay` 返回 `undefined`）。
+- **提示**：机器人状态条上的 “Can't hear” / “No voice” 标签（§11.1），以及启动时 Bot 视图里的一条系统消息，说明它缺什么、为什么。
+- **中途失败**：语音模式运行中 STT 或 TTS 请求失败，只记日志并在 Bot 视图里记一条系统消息（每次连续失败只记一次，恢复后再失败再记），不停止对话：打字照样发给语音智能体，TTS 失败的句子不播放，状态不会卡在合成中。
+- **就绪状态跟随真实请求**（2026-09-28）：`voiceReadiness()` 起初只来自 `/models` 探测（启动、改设置、设置页 Test），服务能连上但模型、声音配错时也算通过。现在每次真实请求都记结果：`resolveSttConfig` / `resolveTtsConfig` 给配置挂上 `onOutcome`，`SttClient.transcribe`（语音模式、听写、设置页 Dry run）HTTP 成功就记可用（转写为空也算，可能只是安静），连不上、401/403、404、其他 4xx/5xx、超时记不可用；`TtsClient.synthesize`（语音模式、朗读按钮、Dry run）解析出 WAV 记可用，连不上、HTTP 错误、超时、返回的不是 16 位单声道 WAV 记不可用。调用方主动取消（打断、停止朗读）不记；调用方自己的期限到了（`TimeoutError`）算超时。结果按实际用的设置记（STT 键是 URL + 模型，TTS 键是 URL + 模型 + 声音 + languageField），设置已经换了的结果丢弃；用了设置页里临时输入、没保存的 key 时也不记。状态没变不通知，变了经 `onVoiceReadinessChange` → stateSync 更新标签，之后一次成功自动清掉。
+  - **探测不能推翻的失败**：真实请求的 404、返回不是语音服务的格式、其他错误（如 400 “unknown voice”）是 `/models` 看不出来的，记为 sticky：之后探测成功不清除它，只有一次成功的真实请求（如 Dry run、朗读按钮）或换了设置（键变了）才清除。连不上、超时、401/403、5xx、429 不是 sticky，服务重启后下一次探测就恢复（语音模式启动和听写开始前都会对不可用的服务重新探测一次）。
+  - **内置引擎**：没有结果时算可用；模型下载失败、引擎起不来（`builtinVoiceEngineUrl` 抛错，用户取消下载除外）或请求失败都记不可用，提示 “The built-in … engine failed: …”；探测不检查内置引擎，但会忘掉它的失败，所以下次使用时再试，成功即恢复。
+  - **麦克风**：音频页 `getUserMedia` 失败时发 `micError`（成功发 `micOk`，重连时重发），`VoiceMode.unavailable.stt` 变成 “Can't open the microphone (…)”，经 `onMicStatus` 更新状态条的 “Can't hear” 标签并在 Bot 视图记一条系统消息；这不算 STT 服务的失败，不写进就绪状态。听写的录音程序打不开时仍按原样报错。
+  - 在线时标签 = 当前缺的服务（或打不开的麦克风）∪ 就绪状态当前不可用的服务。
+- **运行中恢复与换设置，不用重启**（2026-09-28）：`src/voiceAgent/serviceSync.ts` 的 `VoiceServiceSync` 在语音模式开着时监听 `onVoiceReadinessChange` 和语音设置变化（`oh-my-pi-chater.voice.*`、`voiceAgent.tts.*`；改 STT 模型现在也会重新探测）。
+  - 缺的服务一旦就绪（改对了设置、服务起来了、内置引擎重试成功），就 `resolveSttConfig` / `resolveTtsConfig` 并接到正在运行的 `VoiceMode`：TTS 用 `useTts`，没有音频页就先开一个只播放的页面，状态机收到 `voiced` 事件，**从下一条回复起**朗读（正在以文字显示的回复不会从中间开始念，`ConvState.nextVoiced` 等这条结束再生效）；STT 用 `useStt`，先查 `/models`，再加载 Silero VAD，已有只播放的页面时发 `{"type":"capture"}` 让它打开麦克风（重连时服务端重发），没有页面就开一个采音的页面，麦克风开关照旧跟随静音和待命（`ActiveVoiceWindow`）。成功后 `unavailable` 里对应的原因去掉，重新推送 `VoiceStatus`（标签消失），Bot 视图记一条系统消息。
+  - 正在用的服务变不可用：不拆，照旧退回文字（逐句失败、标签显示）；服务恢复后下一次请求就成功。
+  - 正在用的服务设置变了（换声音、模型、URL、引擎、语速、语言）：配置是在解析时定下的（`TtsClient` / `SttClient` 持有它），所以同步会重新解析并换上新配置（`Speaker.setClient`、新的 `SttClient`），不论新设置的就绪状态如何，之后的请求按新设置发出，结果再更新就绪状态；已经送去合成的句子用原来的。朗读缓存的键（`liveTtsKey`）跟着更新。
+  - 接不上（`/models` 失败、VAD 加载失败、音频页连不上）时保持原样，`unavailable` 换成这次的原因；失败已记入就绪状态，下次状态或设置变化时再试。同步串行执行，期间再有变化就在结束后再跑一轮。
 
 ## 6. 语音智能体工具（host tools）
 
@@ -736,7 +757,7 @@ stateDiagram-v2
 
 | 位置 | 内容 |
 |---|---|
-| 输入框顶部的机器人工具条（`src/webview/voiceBar.ts`） | 输入框卡片的头部：在最上面，横跨整个卡片，带浅底色和分隔线，文件上下文、附件、编辑横幅都排在它下面；在线时底色和分隔线带状态色。语音智能体离线时只有机器人按钮和 “Voice agent” 字样，机器人和旁边的状态文字是同一个按钮：离线时点它上线，在线时点它下线（启动中不响应）；工具条其余空白处不响应点击。离线且 STT 或 TTS 没通过检查（`GET {base}/models` 返回 200；TTS 还要求列表里有请求会用的模型）时机器人是红底，悬停显示每个服务不能用的原因，点击打开 Settings → Voice。在线时机器人和状态文字按状态着色：Listening / Hearing you / Transcribing（蓝）、Thinking（黄）、Synthesizing（语音橙）、Speaking（绿）、Standby（灰），启动中显示 “Starting…”。静音不算一种状态：机器人保持在线的颜色，旁边多一个灰色的 “Muted” 标签；静音且空闲时状态文字是 “Online”，静音时机器人照样会显示 Thinking、Speaking。点机器人下线。右边依次是模式按钮（委派模式显示委派图标：人把活交给 worker；结对模式显示握手图标，两个图标同色同大小；点击切换）、停止发言按钮（只在合成中和说话时出现）、日志按钮（把当前 tab 的正文在 worker 会话和语音智能体的对话之间切换，和 tab 图标同一个开关；显示 Bot 视图时变成橙色的聊天气泡，点它回到 worker 会话） |
+| 输入框顶部的机器人工具条（`src/webview/voiceBar.ts`） | 输入框卡片的头部：在最上面，横跨整个卡片，带浅底色和分隔线，文件上下文、附件、编辑横幅都排在它下面；在线时底色和分隔线带状态色。语音智能体离线时只有机器人按钮和 “Voice agent” 字样，机器人和旁边的状态文字是同一个按钮：离线时点它上线，在线时点它下线（启动中不响应）；工具条其余空白处不响应点击。STT 或 TTS 没通过检查（`GET {base}/models` 返回 200；TTS 还要求列表里有请求会用的模型）不妨碍上线（§5.13）：机器人照常可点，状态文字旁边多一个和 “Muted” 一样的灰色标签，STT 不能用是 “Can't hear”，TTS 不能用是 “No voice”，都不能用就两个都显示；悬停显示原因（`explainVoiceError` 的说法），点标签打开 Settings → Voice。离线时标签跟随检查结果（检查中不显示），在线时显示语音模式启动时缺的服务（`VoiceStatus.unavailable`）。听不见时空闲状态显示 “Online” 而不是 “Listening”，也不会出现 Hearing you / Transcribing；没有声音时不会出现 Synthesizing / Speaking，Thinking 之后回复以文字出现在 Bot 视图，状态回到空闲。在线时机器人和状态文字按状态着色：Listening / Hearing you / Transcribing（蓝）、Thinking（黄）、Synthesizing（语音橙）、Speaking（绿）、Standby（灰），启动中显示 “Starting…”。静音不算一种状态：机器人保持在线的颜色，旁边多一个灰色的 “Muted” 标签；静音且空闲时状态文字是 “Online”，静音时机器人照样会显示 Thinking、Speaking。点机器人下线。右边依次是模式按钮（委派模式显示委派图标：人把活交给 worker；结对模式显示握手图标，两个图标同色同大小；点击切换）、停止发言按钮（只在合成中和说话时出现）、日志按钮（把当前 tab 的正文在 worker 会话和语音智能体的对话之间切换，和 tab 图标同一个开关；显示 Bot 视图时变成橙色的聊天气泡，点它回到 worker 会话） |
 | 输入框里的麦克风（`src/webview/dictation.ts`） | 离线时是听写：说话转成文字插入输入框，和以前一样；STT 没通过检查时是红底，悬停显示原因，点击提示原因并打开 Settings → Voice。在线时语音智能体占着麦克风，按钮显示麦克风的输入电平（5 根条，规则同听写），点击静音或取消静音（Ctrl+Alt+M 同样）；静音时显示带斜线的麦克风、不显示电平条；启动中和待命时置灰。Bot 视图且语音智能体离线时（输入框锁定）麦克风也禁用，Ctrl+Alt+M 不开始听写；正在听写时切过去会自动停止 |
 | 输入框 | 发给哪边由当前 tab 显示的视图决定：显示会话时发给 omp worker；显示 Bot 视图时发给语音智能体，占位文字是 “Talk to the voice agent…”，效果和说话一样（会打断正在播的回复），记录只进 Bot 视图，不进会话。Bot 视图里只发文字：附件按钮置灰、不粘贴图片、不弹斜杠菜单，Ctrl+Enter 插队按钮隐藏，发送按钮不会打断 omp（输入框为空且 worker 在跑时仍是停止按钮）。语音智能体不在线时 Bot 视图的输入框置灰禁用，占位文字 “The voice agent must be online to send messages”；上线或切回会话后自动恢复。扩展端同样按 `TabState.botView` 路由（`SidebarProvider._routeComposerSend`），离线时拒收 |
 | 会话 tab 的 **Bot** 视图（前端 `src/webview/voicePanel.ts`，挂在 `main.ts` 的 `.bot-host` 里） | tab 标题左边的图标是按钮：聊天气泡 = 显示会话，点一下变成（语音橙的）机器人，tab 正文从会话记录换成 Bot 视图，再点换回来。每个 tab 各自记住（`TabState.botView`，经 `TabInfo.botView` 同步），点没激活 tab 的图标会同时切过去；机器人工具条上的日志按钮切换当前 tab。`botView` 不存盘：重启后恢复的 tab 若只有语音对话、没有 worker 消息就打开 Bot 视图，否则显示会话。只显示：上面是引擎和 token 用量，摘要行右边是历史按钮，下面是卡片和对话记录（§11.2） |
@@ -844,6 +865,7 @@ stateDiagram-v2
 | 3b.1 | 多窗口：只有最后获得焦点的语音窗口在听、在说（§13 R9） | 完成。单元测试 6 个（多个实例共用一个目录模拟多个窗口：焦点顺序、非语音窗口不抢、退出后回落、崩溃窗口不占用；状态机的待命行为）。VS Code 实测 6 项检查全部通过：另一个语音窗口获得焦点时，正在讲的故事立即被打断、音频页麦克风关闭；这期间假麦克风里说的第二个问题没有被听到；那个窗口退出语音模式后，语音和麦克风回到本窗口；Stop 后注册条目删除 |
 | 3c | 语音视图（§11） | 完成。`VoiceTranscriptStore`（按任务分组的对话记录，逐句朗读状态，存 `workspaceState`）、`VoiceViewProvider`（单独的 `WebviewView`，`voiceViewVisible` 上下文键，历史 QuickPick）、`src/webview/voiceView.ts`（2026-09-25 之后改为会话视图里盖住输入框的面板：`VoicePanel`、`src/webview/voicePanel.ts`，见 §11.1）；状态栏电平条 + ▴；静音（`VoiceMode.setMuted`）和闭嘴（状态机新增 `hush` 事件）；视图里确认提案、回答 worker 请求；会话里语音派发的消息标"From voice"；麦克风电平抽成 `MicLevelMeter`，听写共用。VS Code 实测两组脚本 15 项检查全部通过：语音问题录成 stt 条目；故事朗读时句子依次 pending → playing → played；插嘴后故事显示已念的和没念的（played ×3、cut ×3），下一句标"插嘴"；静音显示 muted、取消后回到 listening；语音模式下打字、再按闭嘴，回答被切断；停止后最近的对话保留为只读；不开语音模式时打字对话进视图（只有文字、带派活标签），派给 worker 的消息在会话里带"From voice"标记；worker 做完后的主动播报进视图；隐藏和再显示视图正常。截图确认视图在会话下方渲染正常。单元测试新增 8 个（对话记录 7 个、状态机 hush 1 个） |
 | 3d | 控制挪进输入框、Bot 视图、页面回报播放、合成中状态（§5.7、§11） | 完成（2026-09-26）。状态栏项和图标字体删除；输入框上方机器人状态条、麦克风两种状态、输入框默认发给语音智能体（“To worker” 勾选框）；底部面板 Bot 视图显示引擎、上下文占比、token 明细和每轮 Timing。单元测试：`conversation.test.ts` 新增“bot status”一组（首句出声前是合成中；句间空隙保持说话；3 s 兜底后回到思考；打断清空两个标志；`lastMetrics` 带新时间点）。VS Code 实测（假麦克风、chatterbox、真实 omp）：状态依次为 listening → userSpeaking → transcribing → thinking → synthesizing（约 0.6 s）→ speaking，长回复的句子之间一直是 speaking；插嘴后同样的顺序再走一遍；在输入框打字发出的消息进了 Bot 视图（`source: text`），会话里没有；Bot 视图显示实际 STT 模型、上下文 1%（12.3k / 1.0M）、token 汇总和每轮 Timing（STT 0.19 s、首字 0.86 s、TTS 首音 0.52 s、合计 2.77 s）；静音后麦克风变成斜线图标；勾选 “To worker” 或输入斜杠命令时发送按钮恢复为发给 omp |
+| 3e | 语音服务不可用时退回文字（§5.13） | 完成（2026-09-28）。单元测试：`conversation.test.ts` “without text-to-speech”一组（不送 TTS、thinking 后回到 listening、打断说明）；`voiceModeTextOnly.test.ts`（两者都缺时不开音频页、打字得到文字回复；STT 检查失败不抛错；只有 TTS 时音频页 `capture=0`、麦克风始终关）；`webview/voiceBar.test.ts`（检查失败时机器人仍可启动、两个标签及原因、点标签开设置、在线时的 Online 与 Thinking 提示）。实测：`capture=0` 的音频页在 Chromium 里只播放，片段 started/ended 照常回报，没有麦克风数据 |
 
 ## 15. 现有代码的复用与改动面（预估）
 

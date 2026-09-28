@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
-import { runPiAuthLogin, runPiAuthLogout } from './piAuthFlow';
 import type { PiChatSession } from './slashCommands';
-import { tryHandleBuiltinSlashCommand } from './slashCommands';
+import { runPiLoginFlow, runPiLogoutFlow, tryHandleBuiltinSlashCommand } from './slashCommands';
 import type { PiRpcSessionManager } from './rpcSession';
 
 /** Handled in VS Code only — must never be sent to Pi RPC as a prompt. */
@@ -75,9 +74,9 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
 
     if (VSCODE_ONLY_SLASH.has(command)) {
         if (command === 'login') {
-            await runPiAuthLogin(manager);
+            await runPiLoginFlow();
         } else if (command === 'logout') {
-            await runPiAuthLogout(manager);
+            await runPiLogoutFlow();
         } else if (command === 'test-error') {
             runTestError(manager, args);
         }
@@ -95,7 +94,7 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
             return true;
         }
         await openSettingsSection(gui);
-        vscode.window.setStatusBarMessage(`Oh My Pi Chater: /${command} → settings`, 3000);
+        vscode.window.setStatusBarMessage(`PI Buddy: /${command} → settings`, 3000);
         return true;
     }
 

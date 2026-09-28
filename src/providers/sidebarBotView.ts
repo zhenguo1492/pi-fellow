@@ -35,7 +35,7 @@ export class SidebarBotView {
         return this.showsBotView() && !voiceIsOn(this._voiceStatus);
     }
 
-    /** The mic button and Ctrl+Alt+M: no new dictation while the composer is locked; stopping always works. */
+    /** The mic button and the Toggle Voice Input command: no new dictation while the composer is locked; stopping always works. */
     async toggleDictation(): Promise<void> {
         if (!this._voiceInput.isRecording && this.composerLocked()) {
             this._host.post({ type: 'toast', message: VOICE_OFFLINE_SEND_HINT, variant: 'error' });

@@ -49,10 +49,6 @@ export function buildPackagesTab(data: SettingsData): HTMLElement {
     if (recBanner) {
         packagesSection.push(recBanner);
     }
-    const extIssues = buildExtensionLoadIssuesBanner(data);
-    if (extIssues) {
-        packagesSection.push(extIssues);
-    }
     packagesSection.push(
         buildPackageCatalogRow(),
         buildListEditor('packages', cfg.packages, 'npm:package-name or git URL'),
@@ -71,43 +67,6 @@ export function buildPackagesTab(data: SettingsData): HTMLElement {
     ]);
 }
 
-function buildExtensionLoadIssuesBanner(data: SettingsData): HTMLElement | null {
-    const issues = data.extensionLoadIssues ?? [];
-    if (issues.length === 0) {
-        return null;
-    }
-    const loaded = data.loadedExtensionCount ?? '?';
-    const native = issues.filter((i) => i.category === 'native').length;
-    const rows = issues
-        .slice(0, 6)
-        .map(
-            (i) =>
-                `<li><strong>${escapeHtml(shortPath(i.path))}</strong> <span class="ext-issue-cat">[${escapeHtml(i.category)}]</span><br>${escapeHtml(i.message)}<br><span class="ext-issue-hint">${escapeHtml(i.hint)}</span></li>`,
-        )
-        .join('');
-    const more =
-        issues.length > 6
-            ? `<p class="setting-description">…and ${issues.length - 6} more (Output → Oh My Pi Chater)</p>`
-            : '';
-    const rebuildBtn =
-        native > 0
-            ? '<button type="button" class="setting-btn" id="btn-rebuild-native">Rebuild native modules</button>'
-            : '';
-    const row = el('div', 'setting-row pi-config-error');
-    row.innerHTML = `
-        <p class="setting-description"><strong>${issues.length} Pi package(s) failed in this editor</strong> (${loaded} loaded). CLI and VS Code share ~/.pi/agent, but native addons (e.g. <code>pi-hermes-memory</code> / SQLite) must match the editor’s Node/Electron ABI.</p>
-        <ul class="ext-load-issues">${rows}</ul>
-        ${more}
-        <div class="setting-actions-row">${rebuildBtn}</div>
-    `;
-    return row;
-}
-
-function shortPath(p: string): string {
-    const parts = p.split(/[/\\]/);
-    return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : p;
-}
-
 function buildRecommendedPackagesBanner(missing?: string[]): HTMLElement | null {
     if (!missing?.length) {
         return null;
@@ -115,10 +74,10 @@ function buildRecommendedPackagesBanner(missing?: string[]): HTMLElement | null 
     const row = el('div', 'setting-row pi-config-error');
     row.innerHTML = `
         <p class="setting-description">
-            <strong>Recommended for Oh My Pi Chater:</strong>
+            <strong>Recommended for PI Buddy:</strong>
             ${missing.map((s) => `<code>${escapeHtml(s)}</code>`).join(', ')} —
             not in your Pi packages yet. Use command palette
-            <strong>Oh My Pi Chater: Install Recommended Packages</strong> or add manually below.
+            <strong>PI Buddy: Install Recommended Packages</strong> or add manually below.
         </p>
     `;
     return row;

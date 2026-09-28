@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import type { ImageContent } from '../shared/piTypes';
 import type {
+    ContextBreakdownInfo,
     ContextUsageInfo,
     ModelInfo,
     PlanModeInfo,
@@ -12,10 +13,11 @@ import type {
 } from '../shared/protocol';
 import { EventRouter } from './events';
 import type { AgentBackend } from './agentBackend';
-import { getAgentLayout, describeCliInvocation, resolvePiCliInvocation } from './piCliPaths';
+import { getAgentLayout, getPiAgentDir, describeCliInvocation, resolvePiCliInvocation } from './piCliPaths';
 import { readLoggedInProviders } from './loggedInProviders';
 import { applyPiCliDefaultModel } from './piCliSync';
 import { PiRpcBridge } from './piRpcBridge';
+import { parseContextReport } from './contextReport';
 import { PiExtensionChrome } from './piExtensionChrome';
 import { RpcExtensionUiHandler } from './rpcExtensionUi';
 import type { PiAgentEvent, RpcExtensionUIRequest, RpcSessionStats } from './rpcTypes';
@@ -32,6 +34,7 @@ import {
 } from './messageForkIds';
 import { readSessionDisplayName, readSessionJsonlEntries } from './sessionJsonl';
 import { readPiSettingsJson } from './piSettingsJson';
+import { readOmpConfig } from './ompAgentConfig';
 import { readFavoriteModels, toggleFavoriteModel } from './favoriteModels';
 
 /** Plan mode drives the pi-plan-mode extension; omp's RPC mode exposes no plan-mode control. */
@@ -125,6 +128,11 @@ export class PiRpcSessionManager {
         return this._sessionStats;
     }
 
+    /** omp's `/context` breakdown of the context window (rejects on pi). */
+    async getContextBreakdown(): Promise<ContextBreakdownInfo> {
+        return parseContextReport(await this._bridge.contextReport());
+    }
+
     get isReady(): boolean {
         return this._isInitialized && this._bridge.isStarted;
     }
@@ -161,14 +169,6 @@ export class PiRpcSessionManager {
 
     postChatError(message: string): void {
         this._postChatError?.(message);
-    }
-
-    getExtensionLoadIssues() {
-        return [];
-    }
-
-    getLoadedExtensionCount(): number {
-        return 0;
     }
 
     get backend(): AgentBackend {
@@ -231,8 +231,10 @@ export class PiRpcSessionManager {
         );
     }
 
+    /** Push the steering/follow-up modes of this backend's config (omp: config.yml, pi: settings.json). */
     private async _applyRpcModesFromSettings(): Promise<void> {
-        const settings = readPiSettingsJson();
+        const backend = this.backend;
+        const settings = backend === 'omp' ? readOmpConfig(getPiAgentDir('omp')) : readPiSettingsJson(backend);
         try {
             const steering = settings.steeringMode === 'all' ? 'all' : 'one-at-a-time';
             const followUp = settings.followUpMode === 'all' ? 'all' : 'one-at-a-time';
@@ -521,14 +523,18 @@ export class PiRpcSessionManager {
         await this._refreshSessionStats();
     }
 
+    /** Restart the CLI so it re-reads packages, skills and extensions; the tab stays on its backend and conversation. */
     async reloadPiAgentResources(): Promise<void> {
         const cwd = this._shim?.cwd ?? process.cwd();
+        const backend = this.backend;
+        const file = this._shim?.sessionFile;
         await this._bridge.stop();
-        await this._bridge.start(cwd, [], undefined, { permission: this._permission });
+        await this._bridge.start(cwd, [], backend, { permission: this._permission });
+        if (file && fs.existsSync(file)) {
+            await this._bridge.switchSession(file);
+        }
         await this._applyRpcModesFromSettings();
-        await this._refreshState();
-        await this._refreshMessages();
-        await this._refreshModelsAndSkills();
+        await this.syncFromRpc();
         this._outputChannel.appendLine('Pi RPC process restarted (reload)');
     }
 
@@ -825,7 +831,7 @@ export class PiRpcSessionManager {
             .map((c) => ({
                 name: c.name.replace(/^skill:/, ''),
                 description: c.description ?? '',
-                filePath: '',
+                filePath: c.path ?? '',
                 source: c.source,
                 disableModelInvocation: false,
             }));

@@ -226,20 +226,14 @@ function failedStatusFromAssistant(msg: AssistantOutcome | undefined): Connectio
     return { phase: 'failed', message };
 }
 
-/**
- * The tab's bookkeeping for one agent event (run/stream/retry status, queues, message metadata).
- * Returns the tab's new streaming state when the event started or ended a run, `undefined` otherwise.
- */
-export function applyAgentEvent(tab: TabState, event: TabAgentEvent, isActive: boolean): boolean | undefined {
-    let streaming: boolean | undefined;
-
+/** The tab's bookkeeping for one agent event (run/stream/retry status, queues, message metadata). */
+export function applyAgentEvent(tab: TabState, event: TabAgentEvent, isActive: boolean): void {
     if (event.type === 'agent_start') {
         tab.abortInFlight = false;
         tab.connectionStatus = idleConnection();
         tab.isStreaming = true;
         resetStreamingMessage(tab);
         tab.agentStartTime = Date.now();
-        streaming = true;
     }
 
     if (event.type === 'agent_end') {
@@ -255,7 +249,6 @@ export function applyAgentEvent(tab: TabState, event: TabAgentEvent, isActive: b
             maxAttempts: event.maxAttempts,
         };
         tab.isStreaming = true;
-        streaming = true;
     }
 
     if (event.type === 'auto_retry_end') {
@@ -365,7 +358,6 @@ export function applyAgentEvent(tab: TabState, event: TabAgentEvent, isActive: b
             if (!isActive) {
                 tab.hasNotification = true;
             }
-            streaming = false;
         }
     }
 
@@ -398,8 +390,6 @@ export function applyAgentEvent(tab: TabState, event: TabAgentEvent, isActive: b
                 break;
         }
     }
-
-    return streaming;
 }
 
 /** Plan panel state: Pi's plan mode with the extension chrome, the user's pending mode switch, and todo-tool progress. */

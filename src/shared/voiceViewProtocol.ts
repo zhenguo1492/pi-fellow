@@ -6,6 +6,7 @@
  */
 
 import type { ImageContent } from './piTypes';
+import type { VoiceSpeakers } from './voiceSpeakers';
 
 /**
  * Voice mode phase as shown; `off` when voice mode is not running, `muted` when the mic is muted
@@ -22,6 +23,15 @@ export type VoicePhase =
     | 'speaking'
     | 'muted';
 
+/**
+ * Why voice mode runs without a speech service, in plain words: no `stt`, it cannot hear (the
+ * microphone stays closed, the user types); no `tts`, it cannot speak (replies are only shown).
+ */
+export interface VoiceUnavailable {
+    stt?: string;
+    tts?: string;
+}
+
 /** What the chat's robot status line and composer mic show (src/webview/voiceBar.ts, dictation.ts). */
 export interface VoiceStatus {
     phase: VoicePhase;
@@ -32,6 +42,8 @@ export interface VoiceStatus {
     mode: 'omp' | 'pair';
     /** The editor follows Pi's focus (AgentCursor): opens and scrolls to what Pi points at, reads or writes. */
     following: boolean;
+    /** While voice mode is on: the speech services it runs without; absent while off or starting. */
+    unavailable?: VoiceUnavailable;
 }
 
 /** What the UI calls each mode. The values stay `omp` / `pair`: the voice model's set_mode tool and saved state use them. */
@@ -120,11 +132,26 @@ export interface VoiceSentence {
     state: 'pending' | 'playing' | 'played' | 'cut';
 }
 
+/** A host tool call of a reply, or one of the voice agent's own lookups (read, grep, glob, web_search), in call order. */
 export interface VoiceToolEntry {
     name: string;
     args: Record<string, unknown>;
     result: string;
     isError: boolean;
+    /** A lookup's tool call id, which its end is matched by. */
+    id?: string;
+    /** A lookup still waiting for its result. */
+    running?: boolean;
+    /** research: the background job the call started, which outlives the reply. */
+    research?: VoiceToolResearch;
+}
+
+export interface VoiceToolResearch {
+    status: 'running' | 'done' | 'failed';
+    startedAt: number;
+    finishedAt?: number;
+    /** The findings when done; the error when failed. */
+    result?: string;
 }
 
 export type VoiceEntry =
@@ -152,9 +179,8 @@ export type VoiceEntry =
           text: string;
           /** Voice mode only: the reply as it went to TTS, with playback state. Absent for typed-only turns. */
           sentences?: VoiceSentence[];
+          /** Host tool calls and the agent's own lookups, in call order. */
           tools: VoiceToolEntry[];
-          /** The agent's own lookups (read, grep, glob, web_search), described. */
-          lookups: string[];
           done: boolean;
           interrupted?: boolean;
           error?: string;
@@ -207,7 +233,7 @@ export interface VoiceEngines {
     running: boolean;
     llm: { model?: string; thinking: string };
     stt: { url: string; model: string; language: string };
-    tts: { provider: string; url: string; model: string; voice: string; speed: number; language: string };
+    tts: { engine: 'built-in' | 'custom'; url: string; model: string; voice: string; speed: number; language: string };
 }
 
 /** The voice context's token totals and context window use (omp `get_session_stats`). */
@@ -244,11 +270,65 @@ export interface VoiceViewState {
     debug: boolean;
 }
 
-export type VoiceViewHostMessage = { type: 'state'; state: VoiceViewState };
+/**
+ * A sentence, as TTS reads it, and where it is: `range` in the text it is in as shown (start
+ * inclusive, end exclusive), or `sentence`, which of a Bot view reply's spoken sentences
+ * (`VoiceEntry.sentences`) it is when the view shows those one by one. Exactly one of them is set.
+ */
+export interface VoiceReplayPiece {
+    text: string;
+    range?: [start: number, end: number];
+    sentence?: number;
+}
+
+/**
+ * A sentence being read aloud: `loading` while it is with TTS, `queued` until its audio starts,
+ * `playing` while the speakers play it, as the audio reports.
+ */
+export interface VoiceReplay {
+    entryId: string;
+    piece: VoiceReplayPiece;
+    phase: 'loading' | 'queued' | 'playing';
+}
+
+/** A sentence's translation into the `translateTo` language. */
+export type VoiceTranslation = { text: string } | { alreadyInTarget: true } | { error: string };
+
+export type VoiceViewHostMessage =
+    | { type: 'state'; state: VoiceViewState }
+    /**
+     * Alt over sentences (`voiceAgent.messageButtons`, `voiceAgent.translateTo`) and the sentence
+     * being read aloud. Sent whether or not the Bot view shows: the chat's messages have the
+     * gestures too.
+     */
+    | { type: 'sentenceActions'; enabled: boolean; translateTo: string; replay?: VoiceReplay }
+    /** The names and avatars of the user and the voice agent; sent when they change and when the view shows. */
+    | { type: 'speakers'; speakers: VoiceSpeakers }
+    /** The answer to `translate`. */
+    | { type: 'translation'; requestId: number; result: VoiceTranslation }
+    /** A sentence could not be read aloud, in plain words. */
+    | { type: 'replayError'; message: string }
+    /**
+     * Replay without voice mode plays in the webview: one sentence, 16-bit mono PCM (base64) at
+     * `rate`; the webview answers `replayClipStarted` as it starts playing and `replayClipEnded`
+     * once it has played.
+     */
+    | { type: 'replayAudio'; clipId: number; rate: number; pcm: string }
+    /** Stop the replay audio playing and queued in the webview. */
+    | { type: 'replayHalt' };
 
 export type VoiceViewClientMessage =
     | { type: 'ready' }
     | { type: 'proposal'; id: string; action: 'confirm' | 'cancel' }
     /** The history button: pick a past voice session to read. */
-    | { type: 'history' };
-
+    | { type: 'history' }
+    /**
+     * Alt+click on a sentence: read it aloud, or stop if it is the one playing. `surface: 'bot'`:
+     * `entryId` is the Bot view entry it is in; `chat`: a key for the chat text it is in (its
+     * audio is cached under it).
+     */
+    | { type: 'replay'; entryId: string; piece: VoiceReplayPiece; surface: 'bot' | 'chat' }
+    | { type: 'replayClipStarted'; clipId: number }
+    | { type: 'replayClipEnded'; clipId: number }
+    /** Alt+right-click on a sentence: translate this text into `to` (the `translateTo` language as shown), answered by `translation`. */
+    | { type: 'translate'; requestId: number; text: string; to: string };

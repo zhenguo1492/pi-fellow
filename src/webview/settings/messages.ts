@@ -6,7 +6,8 @@ import { render, renderMcpSection } from './render';
 import { renderSkillsSection } from './skills';
 import { settingsState } from './state';
 import { scrollToSettingsSection } from './tabs';
-import { readSttForm, readTtsForm, renderVoiceStatus, syncVoiceFields } from './voice';
+import { renderVoiceSkills } from './voice';
+import { applyBuiltinVoiceStatus, applyVoiceSaved, applyVoiceTestResult, renderVoiceTab, syncVoiceFields } from './voiceSetup';
 
 /** Handles every message the extension host sends to the settings page. */
 export function registerMessageListener(): void {
@@ -25,8 +26,7 @@ export function registerMessageListener(): void {
                     syncVoiceFields();
                 } else if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
                     // Keep the current draft when settings arrive during editing.
-                    renderVoiceStatus('stt');
-                    renderVoiceStatus('tts');
+                    renderVoiceTab();
                 } else {
                     render(msg.data);
                 }
@@ -36,15 +36,10 @@ export function registerMessageListener(): void {
                 settingsState.mcpSnapshot = msg.snapshot;
                 renderMcpSection();
                 break;
-            case 'settingChanged':
-                if (settingsState.currentSettings) {
-                    (settingsState.currentSettings as any)[msg.key] = msg.value;
-                    render(settingsState.currentSettings);
-                }
-                break;
             case 'skills':
                 settingsState.loadedSkills = msg.skills;
                 renderSkillsSection();
+                renderVoiceSkills();
                 break;
             case 'piConfigUpdated':
                 vscode.postMessage({ type: 'getSettings' });
@@ -60,19 +55,13 @@ export function registerMessageListener(): void {
                 scrollToSettingsSection(msg.section);
                 break;
             case 'voiceTestResult':
-                settingsState.voiceTesting[msg.service] = false;
-                if (settingsState.currentSettings) {
-                    // Saved as sent: the form's values are the settings now, whatever the check said.
-                    if (msg.service === 'stt') {
-                        settingsState.currentSettings.voice = readSttForm();
-                    } else {
-                        settingsState.currentSettings.tts = readTtsForm();
-                    }
-                    settingsState.currentSettings.voiceReadiness[msg.service] = msg.check;
-                }
-                document.querySelectorAll(`[data-draft="${msg.service}"] [data-key]`).forEach((field) => settingsState.voiceDrafts.delete(field.id));
-                renderVoiceStatus(msg.service);
-                showToast(msg.message, msg.ok ? 'info' : 'error');
+                applyVoiceTestResult(msg);
+                break;
+            case 'voiceSaved':
+                applyVoiceSaved(msg);
+                break;
+            case 'builtinVoiceStatus':
+                applyBuiltinVoiceStatus(msg);
                 break;
             case 'sttDryRun':
                 applySttDryRun(msg.run, msg.event);
@@ -86,5 +75,5 @@ export function registerMessageListener(): void {
 
 /** The settings minus the Voice tab's, to tell a voice-only change from one that needs a full render. */
 function withoutVoice(data: SettingsData): string {
-    return JSON.stringify({ ...data, voice: undefined, tts: undefined, voiceReadiness: undefined });
+    return JSON.stringify({ ...data, voice: undefined, tts: undefined, voiceReadiness: undefined, voiceApiKeys: undefined, voiceOwnServers: undefined, voiceSkills: undefined });
 }

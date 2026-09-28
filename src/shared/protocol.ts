@@ -1,5 +1,6 @@
 import type { EditorContextInfo } from './editorContext';
 import type { VoiceAgentAction, VoiceStatus, VoiceViewClientMessage, VoiceViewHostMessage } from './voiceViewProtocol';
+import type { VoiceAvatar, VoiceSpeakerId } from './voiceSpeakers';
 import type { TtsConfig } from '../voiceAgent/tts';
 import type { StatusBarLimit, UsageAccountDetail } from '../pi/providerUsage';
 
@@ -7,6 +8,26 @@ export interface ContextUsageInfo {
     tokens: number | null;
     contextWindow: number;
     percent: number | null;
+}
+
+/** One slice of the context window, as omp's `/context` reports it. */
+export interface ContextBreakdownCategory {
+    id: 'systemPrompt' | 'systemTools' | 'systemContext' | 'skills' | 'messages' | 'other';
+    label: string;
+    tokens: number;
+}
+
+/** omp's `/context` report: what fills the context window, like the TUI's Context Usage grid. */
+export interface ContextBreakdownInfo {
+    contextWindow: number;
+    usedTokens: number;
+    /** Non-empty categories, in report order. */
+    categories: ContextBreakdownCategory[];
+    /** Reserved for auto-compaction: compaction runs before usage reaches it. */
+    autoCompactBufferTokens: number;
+    freeTokens: number;
+    /** Report lines past the categories (snapcompact savings), verbatim. */
+    notes: string[];
 }
 
 export type AgentBackend = 'pi' | 'omp';
@@ -28,6 +49,8 @@ export interface ModelStatusInfo {
     /** Reconnect attempt while retrying, else 0. */
     retryAttempt: number;
     context?: ContextUsageInfo;
+    /** Context use (percent) from which the ctx figure warns: setting `contextUsageWarningThreshold`. */
+    contextWarnPercent: number;
     tokens?: SessionTokenStats;
     thinking?: string;
     /** Limits that gate the model, shortest window first: the summary line. */
@@ -35,6 +58,8 @@ export interface ModelStatusInfo {
     /** Every window per account: the details. */
     usage: UsageAccountDetail[];
     usageError?: string;
+    /** The Context row expands into a per-category breakdown (`getContextBreakdown`): omp only. */
+    contextBreakdown: boolean;
 }
 
 export interface PiAuthProviderInfo {
@@ -49,25 +74,27 @@ export interface PiCommandInfo {
     source?: string;
 }
 
-export interface PiExtensionLoadIssue {
-    path: string;
-    message: string;
-    category: 'native' | 'tui' | 'sdk' | 'other';
-    hint: string;
-}
-
 import type { ExtensionUiRequestPayload } from './extensionUi';
 
-export type McpScopeId = 'global' | 'project' | 'projectPi';
+/**
+ * An mcp.json the backend reads. Both: `global` (agent dir mcp.json), `project` (workspace .mcp.json),
+ * `projectAgent` (.pi/mcp.json or .omp/mcp.json). pi only: the shared user files `sharedGlobal`
+ * (~/.config/mcp/mcp.json), `agentsGlobal` (~/.agents/mcp.json), `agentsNestedGlobal` (~/.agents/mcp/mcp.json).
+ * omp only: `globalCompat` (agent dir .mcp.json), `projectAgentCompat` (.omp/.mcp.json), `projectRoot` (mcp.json).
+ */
+export type McpScopeId =
+    | 'global'
+    | 'globalCompat'
+    | 'sharedGlobal'
+    | 'agentsGlobal'
+    | 'agentsNestedGlobal'
+    | 'project'
+    | 'projectRoot'
+    | 'projectAgent'
+    | 'projectAgentCompat';
 
-export type McpConnectionStatus =
-    | 'disabled'
-    | 'unknown'
-    | 'idle'
-    | 'cached'
-    | 'connected'
-    | 'failed'
-    | 'testing';
+/** `reachable`: the last Check found the command or URL; the MCP handshake itself is not tested. */
+export type McpConnectionStatus = 'disabled' | 'idle' | 'cached' | 'reachable' | 'failed';
 
 export interface McpToolSummary {
     name: string;
@@ -76,18 +103,22 @@ export interface McpToolSummary {
 
 export interface McpServerSummary {
     name: string;
+    /** Config file owning the entry (a toggle writes there), or `import` for pi `imports`. */
     scope: McpScopeId | 'import';
-    importSource?: string;
+    /** e.g. `Project (.omp/mcp.json)` or `cursor import`. */
+    sourceLabel: string;
     enabled: boolean;
     canToggle: boolean;
     ownerPath: string;
     transport: 'stdio' | 'http' | 'unknown';
     commandPreview?: string;
     url?: string;
-    directTools?: boolean | string[];
+    /** Setup advice for this server on the current backend. */
+    hints: string[];
     tools: McpToolSummary[];
     toolCount: number;
-    cacheStatus: 'fresh' | 'stale' | 'none';
+    /** `unavailable`: the backend keeps no tool cache this extension can read (omp). */
+    cacheStatus: 'fresh' | 'stale' | 'none' | 'unavailable';
     status: McpConnectionStatus;
     statusMessage?: string;
 }
@@ -133,31 +164,43 @@ export interface SettingsData {
     piDefaultProvider?: string;
     piDefaultModel?: string;
     piDefaultThinkingLevel?: string;
-    piPackageCount: number;
     piConfig?: PiAgentConfigData;
     mcpSnapshot?: McpSettingsSnapshot;
-    apiProvider: string;
-    apiBaseUrl: string;
-    apiKeySet: boolean;
-    authMethod: 'env' | 'pi-login' | 'manual' | 'none';
-    defaultModel: string;
-    thinkingLevel: string;
+    /** Where the backend's credentials were found: its login store, a provider env var, or none. */
+    authMethod: 'login' | 'env' | 'none';
     defaultPermissionLevel: PermissionLevel;
     allowedTools: string[];
-    autoSaveSessions: boolean;
-    sessionStoragePath: string;
     contextUsageWarningThreshold: number;
     /** npm: sources for recommended Pi packages not yet in settings.json */
     recommendedPackagesMissing?: string[];
-    /** Live session: Pi packages/extensions that failed to load in this editor */
-    extensionLoadIssues?: PiExtensionLoadIssue[];
-    loadedExtensionCount?: number;
     voice: VoiceSettings;
     tts: TtsConfig;
     voiceReadiness: VoiceReadiness;
+    /** Which cloud providers (voicePresets.ts `CLOUD_PROVIDERS`) have an API key stored; the keys never reach the webview. */
+    voiceApiKeys: Record<string, boolean>;
+    /** Your own servers' settings as last configured, kept when a Cloud or Built-in save overwrites them. */
+    voiceOwnServers: OwnVoiceServers;
+    /** `voiceAgent.skills`: names of the skills the voice agent loads. */
+    voiceSkills: string[];
+    /** `voiceAgent.messageButtons`: Alt over a sentence (Bot view and chat) reads it aloud and translates it. */
+    voiceMessageButtons: boolean;
+    /** `voiceAgent.translateTo`: the language those translations are in. */
+    voiceTranslateTo: string;
+    /**
+     * `voiceAgent.userName` / `userAvatar` and `botName` / `botAvatar` as set, with the avatar as the
+     * Bot view shows it (`resolved`; a picture read into a data URI) or why it shows the default (`error`).
+     */
+    voiceSpeakers: Record<VoiceSpeakerId, { name: string; avatar: string; resolved?: VoiceAvatar; error?: string }>;
 }
 
+/** Your own servers' fields (settings field key → value) by part, remembered in globalState. */
+export type OwnVoiceServers = Partial<Record<keyof VoiceReadiness, Record<string, string>>>;
+
+/** `builtin`: Moonshine in the built-in voice engine (src/voice/builtinEngine); `custom`: the server at `sttUrl`. */
+export type SttEngine = 'builtin' | 'custom';
+
 export interface VoiceSettings {
+    sttEngine: SttEngine;
     sttUrl: string;
     sttModel: string;
     language: string;
@@ -176,6 +219,21 @@ export interface VoiceServiceCheck {
 export interface VoiceReadiness {
     stt: VoiceServiceCheck;
     tts: VoiceServiceCheck;
+}
+
+/** The built-in engine's models (Settings → Voice, Built-in). */
+export interface BuiltinVoiceStatus {
+    downloaded: boolean;
+    /** On disk when downloaded, else what the download fetches; undefined when unknown (offline). */
+    bytes?: number;
+    /** The engine process is up (or starting). */
+    running: boolean;
+}
+
+/** One service's check after "Save & test": `message` is plain language (see explainVoiceError). */
+export interface VoiceCheckResult {
+    ok: boolean;
+    message: string;
 }
 
 /** Voice dictation state shown on the composer's mic button. */
@@ -301,7 +359,7 @@ export interface SerializedAgentState {
     pendingToolApprovals?: ToolCallPendingInfo[];
     /** Active backend ('omp' or 'pi') of the current tab or workspace preference. */
     activeBackend?: AgentBackend;
-    /** omp /login or /logout was requested: chat shows a banner that finishes it in the TUI. */
+    /** /login or /logout was requested: chat shows a banner that finishes it in the TUI. */
     tuiAuthPrompt?: TuiAuthCommand;
     /** Whether the speech services answered their checks: gates the composer mic (STT) and the voice agent (both). */
     voiceReadiness?: VoiceReadiness;
@@ -417,6 +475,8 @@ export type ClientMessage =
     | { type: 'voiceAgent'; action: VoiceAgentAction }
     /** The model status line's switch button: the model QuickPick (favorites are starred there). */
     | { type: 'selectModel' }
+    /** The model status line's expanded Context row: answered with `contextBreakdown`. */
+    | { type: 'getContextBreakdown' }
     | { type: 'pickAttachments' }
     | { type: 'addPastedImages'; items: { mimeType: string; dataBase64: string; name?: string }[] }
     | { type: 'addDroppedTextFiles'; files: { name: string; text: string }[] }
@@ -501,8 +561,6 @@ export type SettingsClientMessage =
     | { type: 'setBackend'; backend: AgentBackend }
     | { type: 'getSettings' }
     | { type: 'updateSetting'; key: string; value: any }
-    | { type: 'setApiKey'; provider: string; key: string }
-    | { type: 'clearApiKey'; provider: string }
     | { type: 'getSkills' }
     | { type: 'updatePiDefaults'; provider?: string; model?: string; thinkingLevel?: string }
     | { type: 'addPiPackage'; source: string }
@@ -524,14 +582,32 @@ export type SettingsClientMessage =
     | { type: 'testAllMcpServers' }
     | { type: 'runPiLogin' }
     | { type: 'runPiLogout' }
-    | { type: 'rebuildNativeModules' }
-    /** Saves the section as given (even if the check fails), then checks the service. */
+    /**
+     * Checks your own server's section as given, without saving anything; an empty or unknown model
+     * is detected from the server (`voiceTestResult.detectedModel`).
+     */
     | { type: 'testStt'; settings: VoiceSettings }
     | { type: 'testTts'; settings: TtsConfig }
-    /** Dry runs use the form's values, saved or not. `run` tags the events of one recording. */
-    | { type: 'startSttDryRun'; run: number; settings: VoiceSettings }
+    /**
+     * Saves both voice sections and the typed API keys (stored in SecretStorage, never sent back);
+     * with `test`, then checks every custom service and answers `voiceSaved` with the results.
+     */
+    | { type: 'saveVoice'; stt: VoiceSettings; tts: TtsConfig; apiKeys: Record<string, string>; test: boolean }
+    /** Removes a cloud provider's stored API key. */
+    | { type: 'removeVoiceApiKey'; provider: string }
+    /** "Choose picture…": picks an image file and saves it as the speaker's avatar. */
+    | { type: 'pickAvatar'; speaker: VoiceSpeakerId }
+    /** Dry runs use the form's values (and typed key), saved or not. `run` tags the events of one recording. */
+    | { type: 'startSttDryRun'; run: number; settings: VoiceSettings; apiKey?: string }
     | { type: 'stopSttDryRun' }
-    | { type: 'ttsDryRun'; settings: TtsConfig; text: string };
+    | { type: 'ttsDryRun'; settings: TtsConfig; text: string; apiKey?: string }
+    /** Opens the cloud provider's API key page (voicePresets.ts `CLOUD_PROVIDERS`) in the browser. */
+    | { type: 'openVoiceKeyPage'; provider: string }
+    /** Asks for `builtinVoiceStatus`; `prepareBuiltinVoice` downloads the models and starts the engine first. */
+    | { type: 'getBuiltinVoiceStatus' }
+    | { type: 'prepareBuiltinVoice' }
+    /** The Voice tab has unsaved changes (or not): closing the panel then warns. */
+    | { type: 'voiceDirty'; dirty: boolean };
 
 // Extension -> Webview messages
 export type ServerMessage =
@@ -539,6 +615,7 @@ export type ServerMessage =
     | { type: 'stateSync'; state: SerializedAgentState }
     | { type: 'agentEvent'; event: any }
     | { type: 'modelStatus'; status: ModelStatusInfo }
+    | { type: 'contextBreakdown'; breakdown?: ContextBreakdownInfo; error?: string }
     | {
           type: 'models';
           models: ModelInfo[];
@@ -604,14 +681,24 @@ export type VoiceLevelSource = 'user' | 'bot';
 // Extension -> Settings webview messages
 export type SettingsServerMessage =
     | { type: 'settings'; data: SettingsData }
-    | { type: 'settingChanged'; key: string; value: any }
     | { type: 'skills'; skills: SkillInfo[] }
     | { type: 'piConfigUpdated' }
     | { type: 'success'; message: string }
     | { type: 'error'; message: string }
     | { type: 'mcpSnapshot'; snapshot: McpSettingsSnapshot }
     | { type: 'scrollToSection'; section: string }
-    | { type: 'voiceTestResult'; service: 'stt' | 'tts'; ok: boolean; message: string; check: VoiceServiceCheck }
+    /**
+     * `models`: what the server lists at /models for this task (the TTS Model field offers them);
+     * `detectedModel`: the model the Test took, as the one shown was empty or unknown to the server.
+     */
+    | { type: 'voiceTestResult'; service: 'stt' | 'tts'; ok: boolean; message: string; check: VoiceServiceCheck; models?: string[]; detectedModel?: string }
     | { type: 'sttDryRun'; run: number; event: SttDryRunEvent }
     | { type: 'ttsDryRunResult'; ok: true; audio: string; seconds: number; elapsedMs: number }
-    | { type: 'ttsDryRunResult'; ok: false; message: string };
+    | { type: 'ttsDryRunResult'; ok: false; message: string }
+    /**
+     * Answer to `saveVoice`. `saved`: the settings and keys were written; `ok`: saved and every check
+     * passed; `tests`: each checked service's result (built-in ones are not checked).
+     */
+    | { type: 'voiceSaved'; saved: boolean; ok: boolean; message: string; tests: Partial<Record<keyof VoiceReadiness, VoiceCheckResult>> }
+    /** `busy`: downloading or starting; `error`: the last attempt failed (plain language). */
+    | { type: 'builtinVoiceStatus'; status?: BuiltinVoiceStatus; busy: boolean; error?: string };

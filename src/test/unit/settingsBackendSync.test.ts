@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PiChatSession } from '../../pi/slashCommands';
 
@@ -71,6 +71,8 @@ vi.mock('../../voice/voiceSettings', () => ({
     readTtsSettings: () => ({}),
     onVoiceReadinessChange: () => ({ dispose: () => {} }),
     voiceReadiness: () => ({ stt: { ok: true }, tts: { ok: true } }),
+    voiceApiKeysSet: () => ({ openai: false, groq: false }),
+    ownVoiceServers: () => ({}),
 }));
 
 import { setWindowBackend } from '../../pi/piCliPaths';
@@ -90,24 +92,24 @@ describe('settings backend selection', () => {
         const staleSession = {
             backend: 'pi',
             getSkillsAsync: async () => [],
-            getExtensionLoadIssues: () => [],
-            getLoadedExtensionCount: () => 0,
         } as unknown as PiChatSession;
-        SettingsPanel.show({} as vscode.Uri, {} as vscode.SecretStorage, staleSession);
+        SettingsPanel.show({} as vscode.Uri, () => staleSession);
         const shownBackend = () => state.messages.filter((msg) => msg.type === 'settings').at(-1)?.data?.backend;
-        expect(shownBackend()).toBe('pi');
+        // Settings are posted once the avatars are read (asynchronously).
+        const expectShown = (backend: 'pi' | 'omp') => vi.waitFor(() => expect(shownBackend()).toBe(backend));
+        await expectShown('pi');
 
         setWindowBackend('omp');
-        expect(shownBackend()).toBe('omp');
+        await expectShown('omp');
 
-        SettingsPanel.show({} as vscode.Uri, {} as vscode.SecretStorage, staleSession);
-        expect(shownBackend()).toBe('omp');
+        SettingsPanel.show({} as vscode.Uri, () => staleSession);
+        await expectShown('omp');
 
         state.dispose?.();
-        SettingsPanel.show({} as vscode.Uri, {} as vscode.SecretStorage, staleSession);
-        expect(shownBackend()).toBe('omp');
+        SettingsPanel.show({} as vscode.Uri, () => staleSession);
+        await expectShown('omp');
 
         setWindowBackend('pi');
-        expect(shownBackend()).toBe('pi');
+        await expectShown('pi');
     });
 });

@@ -49,44 +49,56 @@ describe('tts', () => {
         return bodies;
     }
 
-    it('splits mixed text by script for Kokoro only, keeping punctuation and digits in their run', () => {
-        expect(speechRuns('我让 worker 跑了 npm test，4 个都过了。', 'kokoro')).toEqual([
+    it('splits mixed text by script only for chineseLangCode, keeping punctuation and digits in their run', () => {
+        expect(speechRuns('我让 worker 跑了 npm test，4 个都过了。', 'chineseLangCode')).toEqual([
             { text: '我让', chinese: true },
             { text: 'worker', chinese: false },
             { text: '跑了', chinese: true },
             { text: 'npm test，4', chinese: false },
             { text: '个都过了。', chinese: true },
         ]);
-        expect(speechRuns('跑一下 npm test', 'chatterbox')).toEqual([{ text: '跑一下 npm test', chinese: true }]);
-        expect(speechRuns('The tests passed.', 'openai')).toEqual([{ text: 'The tests passed.', chinese: false }]);
+        expect(speechRuns('跑一下 npm test', 'perSentence')).toEqual([{ text: '跑一下 npm test', chinese: true }]);
+        expect(speechRuns('The tests passed.', 'none')).toEqual([{ text: 'The tests passed.', chinese: false }]);
     });
 
-    it('asks chatterbox for zh or en per sentence, with its own model and voice unless configured', async () => {
+    it('sends zh or en per sentence for perSentence, and omits model and voice unless configured', async () => {
         const bodies = stubServer();
-        const tts = new TtsClient({ provider: 'chatterbox', url: 'http://tts.local', model: '', voice: '', speed: 1 });
+        const tts = new TtsClient({ engine: 'custom', languageField: 'perSentence', url: 'http://tts.local', model: '', voice: '', speed: 1 });
         const signal = new AbortController().signal;
         await tts.synthesize('跑一下 npm test', signal);
         await tts.synthesize('The tests passed.', signal);
-        expect(bodies.map((b) => [b.input, b.language, b.model, b.voice])).toEqual([
-            ['跑一下 npm test', 'zh', 'chatterbox-multilingual', 'default'],
-            ['The tests passed.', 'en', 'chatterbox-multilingual', 'default'],
+        expect(bodies.slice(0, 2)).toEqual([
+            { input: '跑一下 npm test', response_format: 'wav', speed: 1, language: 'zh' },
+            { input: 'The tests passed.', response_format: 'wav', speed: 1, language: 'en' },
         ]);
-        const other = new TtsClient({ provider: 'openai', url: 'http://tts.local', model: 'm', voice: 'v', speed: 1 });
+        const other = new TtsClient({ engine: 'custom', languageField: 'none', url: 'http://tts.local', model: 'm', voice: 'v', speed: 1 });
         await other.synthesize('你好', signal);
         expect(bodies[2]).toEqual({ model: 'm', input: '你好', voice: 'v', response_format: 'wav', speed: 1 });
     });
 
-    it('synthesizes each Kokoro run with its language and joins them without the padding', async () => {
+    it('synthesizes each chineseLangCode run with its language and joins them without the padding', async () => {
         const bodies = stubServer();
-        const tts = new TtsClient({ provider: 'kokoro', url: 'http://tts.local', model: '', voice: '', speed: 1 });
+        const tts = new TtsClient({ engine: 'custom', languageField: 'chineseLangCode', url: 'http://tts.local', model: 'm', voice: '', speed: 1 });
         const pcm = await tts.synthesize('跑一下 npm test', new AbortController().signal);
-        expect(bodies.map((b) => [b.input, b.lang_code])).toEqual([
-            ['跑一下', 'z'],
-            ['npm test', undefined],
+        expect(bodies).toEqual([
+            { model: 'm', input: '跑一下', response_format: 'wav', speed: 1, lang_code: 'z' },
+            { model: 'm', input: 'npm test', response_format: 'wav', speed: 1 },
         ]);
-        expect(bodies[0]).toMatchObject({ model: 'kokoro', voice: 'af_sarah', response_format: 'wav' });
         // Each run: 100 speech samples + 20 ms margin each side; plus a 50 ms gap after each.
         expect(pcm.data.length / 2).toBe(2 * (100 + 20 + 20 + 50));
+    });
+
+    it("sends a sentence longer than the service takes in pieces, cut at punctuation, else at a space", async () => {
+        const bodies = stubServer();
+        const tts = new TtsClient({ engine: 'custom', languageField: 'none', url: 'http://tts.local', model: 'm', voice: 'v', speed: 1, maxInputChars: 30 });
+        await tts.synthesize('First part is here, then the second part follows it closely and ends', new AbortController().signal);
+        const inputs = bodies.map((b) => String(b.input));
+        expect(inputs).toEqual(['First part is here,', 'then the second part follows', 'it closely and ends']);
+        expect(inputs.every((text) => text.length <= 30)).toBe(true);
+
+        bodies.length = 0;
+        await new TtsClient({ engine: 'custom', languageField: 'none', url: 'http://tts.local', model: 'm', voice: 'v', speed: 1 }).synthesize('No limit, one request.', new AbortController().signal);
+        expect(bodies.map((b) => b.input)).toEqual(['No limit, one request.']);
     });
 
     it('rejects audio it cannot play', () => {

@@ -1,11 +1,10 @@
-import type { AgentBackend, SettingsClientMessage } from '../../shared/protocol';
-import { openSttDryRun, openTtsDryRun } from '../voiceDryRun';
+import type { AgentBackend } from '../../shared/protocol';
 import { vscode } from './api';
+import { modelOptionsHtml } from './auth';
 import { showToast } from './dom';
 import { bindMcpServerCards } from './mcp';
-import { render } from './render';
 import { settingsState } from './state';
-import { readSttForm, readTtsForm, renderVoiceStatus, voiceServiceOf } from './voice';
+import { bindVoiceSetup } from './voiceSetup';
 
 export function bindEvents(): void {
     document.querySelectorAll('.backend-segment-btn').forEach((btn) => {
@@ -45,40 +44,8 @@ export function bindEvents(): void {
         });
     });
 
-    // Voice sections: edits stay drafts (kept across re-renders) until the section's Test saves them.
-    document.querySelectorAll<HTMLElement>('[data-draft] [data-key]').forEach((field) => {
-        const service = voiceServiceOf(field.closest<HTMLElement>('[data-draft]')?.dataset.draft);
-        if (!service || !(field instanceof HTMLInputElement || field instanceof HTMLSelectElement)) return;
-        const keep = () => {
-            settingsState.voiceDrafts.set(field.id, field.value);
-            renderVoiceStatus(service);
-        };
-        field.addEventListener('input', keep);
-        field.addEventListener('change', keep);
-    });
-
-    document.querySelectorAll<HTMLButtonElement>('[data-voice-test]').forEach((btn) => {
-        // Keep focus (and the caret) in the field being edited: Ctrl+Z right after a Test still undoes it.
-        btn.addEventListener('mousedown', (e) => e.preventDefault());
-        btn.addEventListener('click', () => {
-            const service = voiceServiceOf(btn.dataset.voiceTest);
-            if (!service || settingsState.voiceTesting[service]) return;
-            settingsState.voiceTesting[service] = true;
-            renderVoiceStatus(service);
-            vscode.postMessage(service === 'stt' ? { type: 'testStt', settings: readSttForm() } : { type: 'testTts', settings: readTtsForm() });
-        });
-    });
-
-    document.querySelectorAll<HTMLButtonElement>('[data-voice-dry-run]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            const post = (message: SettingsClientMessage) => vscode.postMessage(message);
-            if (btn.dataset.voiceDryRun === 'stt') {
-                openSttDryRun(readSttForm(), post);
-            } else {
-                openTtsDryRun(readTtsForm(), post);
-            }
-        });
-    });
+    // Voice tab: drafts until its Save (see voiceSetup.ts).
+    bindVoiceSetup();
 
     document.querySelectorAll('input[type="checkbox"][data-key]').forEach((cb) => {
         cb.addEventListener('change', () => {
@@ -106,16 +73,24 @@ export function bindEvents(): void {
         });
     });
 
+    // Save writes both fields as shown ('' is auto); a model picked under (auto) brings its provider.
     document.getElementById('btn-save-pi-defaults')?.addEventListener('click', () => {
-        const provider = (document.getElementById('pi-default-provider') as HTMLSelectElement)?.value;
-        const model = (document.getElementById('pi-default-model') as HTMLSelectElement)?.value;
-        const thinkingLevel = (document.getElementById('pi-thinking') as HTMLSelectElement)?.value;
+        const model = (document.getElementById('pi-default-model') as HTMLSelectElement).value;
+        const provider = (document.getElementById('pi-default-provider') as HTMLSelectElement).value
+            || (settingsState.currentSettings?.piConfig?.availableModels.find((m) => m.id === model)?.provider ?? '');
         vscode.postMessage({
             type: 'updatePiDefaults',
-            provider: provider || undefined,
-            model: model || undefined,
-            thinkingLevel,
+            provider,
+            model,
+            thinkingLevel: (document.getElementById('pi-thinking') as HTMLSelectElement).value,
         });
+    });
+
+    // The model list follows the provider, so Save can never pair a model with another provider.
+    document.getElementById('pi-default-provider')?.addEventListener('change', (e) => {
+        const models = settingsState.currentSettings?.piConfig?.availableModels ?? [];
+        const modelSelect = document.getElementById('pi-default-model') as HTMLSelectElement;
+        modelSelect.innerHTML = modelOptionsHtml(models, (e.target as HTMLSelectElement).value, modelSelect.value);
     });
 
     document.getElementById('pi-thinking')?.addEventListener('change', (e) => {
@@ -171,12 +146,8 @@ export function bindEvents(): void {
         });
     });
 
-    document.getElementById('btn-reload-pi-session')?.addEventListener('click', () => {
-        vscode.postMessage({ type: 'reloadPiSession' });
-    });
-
-    document.getElementById('btn-rebuild-native')?.addEventListener('click', () => {
-        vscode.postMessage({ type: 'rebuildNativeModules' });
+    document.querySelectorAll('[data-reload-session]').forEach((btn) => {
+        btn.addEventListener('click', () => vscode.postMessage({ type: 'reloadPiSession' }));
     });
 
     document.getElementById('btn-pi-login')?.addEventListener('click', () => {
@@ -199,39 +170,6 @@ export function bindEvents(): void {
         vscode.postMessage({ type: 'testAllMcpServers' });
     });
     bindMcpServerCards();
-    bindApiKeyHandlers();
-}
-
-function bindApiKeyHandlers(): void {
-    const saveKeyBtn = document.getElementById('btn-save-key');
-    saveKeyBtn?.addEventListener('click', () => {
-        const input = document.getElementById('api-key-input') as HTMLInputElement;
-        const key = input?.value?.trim();
-        const provider = settingsState.currentSettings?.apiProvider || '';
-        if (!provider) {
-            showToast('Select a provider first', 'error');
-            return;
-        }
-        if (!key) {
-            showToast('Enter an API key', 'error');
-            return;
-        }
-        vscode.postMessage({ type: 'setApiKey', provider, key });
-    });
-
-    document.getElementById('btn-change-key')?.addEventListener('click', () => {
-        if (settingsState.currentSettings) {
-            settingsState.currentSettings.apiKeySet = false;
-            render(settingsState.currentSettings);
-        }
-    });
-
-    document.getElementById('btn-clear-key')?.addEventListener('click', () => {
-        const provider = settingsState.currentSettings?.apiProvider || '';
-        if (provider) {
-            vscode.postMessage({ type: 'clearApiKey', provider });
-        }
-    });
 }
 
 function postAdd(kind: string, value: string): void {

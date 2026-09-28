@@ -1,6 +1,25 @@
 /**
- * Reachability check shared by the OpenAI-compatible speech services: `GET {base}/models`.
+ * Reachability check shared by the OpenAI-compatible speech services: `GET {base}/models`; and the
+ * API key those services may need.
  */
+
+/**
+ * The service's API key, asked for at each request so a changed key applies at once; resolves to
+ * undefined when none is set.
+ */
+export type ApiKeySource = () => Promise<string | undefined>;
+
+/**
+ * Told how each real request to a speech service went, for its readiness (voiceSettings.ts):
+ * no argument when it worked, the error when it failed. Not called for requests the caller aborted.
+ */
+export type ServiceOutcome = (error?: unknown) => void;
+
+/** `Authorization: Bearer <key>` when `apiKey` gives one, else no header. */
+export async function authHeaders(apiKey: ApiKeySource | undefined): Promise<Record<string, string>> {
+    const key = (await apiKey?.())?.trim();
+    return key ? { authorization: `Bearer ${key}` } : {};
+}
 
 export interface ModelsProbeResult {
     ok: boolean;
@@ -21,12 +40,33 @@ export function openAiBaseUrl(url: string, endpointPath: string): string {
     return new URL(base).pathname === '/' ? `${base}/v1` : base;
 }
 
+/** The `task` servers such as speaches give each model, by the endpoint that uses it. */
+const ENDPOINT_TASKS: Record<string, string> = {
+    '/audio/transcriptions': 'automatic-speech-recognition',
+    '/audio/speech': 'text-to-speech',
+};
+
+/**
+ * The model ids of a `/models` body that `endpointPath` can use, in the server's order: a server
+ * serving both speech-to-text and text-to-speech models (speaches) marks each with its `task`, and
+ * those of the other task are left out. Models without a task are kept. Undefined: not a model list.
+ */
+export function modelIdsFor(body: unknown, endpointPath: string): string[] | undefined {
+    if (!body || typeof body !== 'object' || !('data' in body) || !Array.isArray(body.data)) {
+        return undefined;
+    }
+    const task = ENDPOINT_TASKS[endpointPath];
+    return body.data.flatMap((m: unknown) =>
+        m && typeof m === 'object' && 'id' in m && typeof m.id === 'string' && !('task' in m && typeof m.task === 'string' && task && m.task !== task) ? [m.id] : [],
+    );
+}
+
 /** Valid only on HTTP 200 with a JSON model list; `label` names the service in messages. */
-export async function probeModels(url: string, endpointPath: string, label: string): Promise<ModelsProbeResult> {
+export async function probeModels(url: string, endpointPath: string, label: string, apiKey?: ApiKeySource): Promise<ModelsProbeResult> {
     let modelsUrl = url;
     try {
         modelsUrl = `${openAiBaseUrl(url, endpointPath)}/models`;
-        const res = await fetch(modelsUrl, { signal: AbortSignal.timeout(8_000) });
+        const res = await fetch(modelsUrl, { headers: await authHeaders(apiKey), signal: AbortSignal.timeout(8_000) });
         if (res.status !== 200) {
             return { ok: false, status: res.status, message: `GET ${modelsUrl} returned HTTP ${res.status}`, models: [] };
         }
@@ -36,12 +76,10 @@ export async function probeModels(url: string, endpointPath: string, label: stri
         } catch {
             return { ok: false, status: 200, message: `The ${label} /models endpoint did not return JSON`, models: [] };
         }
-        if (!body || typeof body !== 'object' || !('data' in body) || !Array.isArray(body.data)) {
+        const models = modelIdsFor(body, endpointPath);
+        if (!models) {
             return { ok: false, status: 200, message: `The ${label} /models endpoint did not return a model list`, models: [] };
         }
-        const models = body.data.flatMap((m: unknown) =>
-            m && typeof m === 'object' && 'id' in m && typeof m.id === 'string' ? [m.id] : [],
-        );
         return {
             ok: true,
             status: 200,

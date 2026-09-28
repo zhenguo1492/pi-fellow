@@ -107,8 +107,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private readonly _tabs: SidebarTabs;
     private readonly _sessionPanel: SidebarSessionPanel;
     private readonly _botView: SidebarBotView;
-    /** Last `oh-my-pi-chater.tuiMode` context value (the active tab's TUI mode). */
-    private _tuiContext: boolean | undefined;
     /** Every module's webview message handlers, by message type. */
     private readonly _handlers: MessageHandlers;
 
@@ -470,10 +468,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         state.rollbackPoint = tab.checkpointManager.rollbackPoint;
         state.tabs = this._tabs.getTabInfos();
         state.activeTabId = this._backends.activeTabId;
-        if (tab.tuiMode !== this._tuiContext) {
-            this._tuiContext = tab.tuiMode;
-            void vscode.commands.executeCommand('setContext', 'oh-my-pi-chater.tuiMode', tab.tuiMode);
-        }
         state.tuiAuthPrompt = this._tui.authPrompt;
         state.streamingText = tab.streamingText;
         state.streamingThinking = tab.streamingThinking;
@@ -556,6 +550,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._botView.setVoiceStatus(status);
     }
 
+    setDictationPaused(paused: boolean): void {
+        this.voiceInput.setPaused(paused);
+    }
+
     postVoiceLevel(level: number, source: VoiceLevelSource, wave?: number[]): void {
         this._post({ type: 'voiceLevel', level, source, wave });
     }
@@ -618,7 +616,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         }
     }
 
-    /** omp only logs in from its TUI: show a chat banner that switches there and runs the command. */
+    /** Neither CLI logs in over RPC: show a chat banner that switches to the TUI and runs the command. */
     promptTuiAuth(command: TuiAuthCommand): Promise<void> {
         return this._tui.promptAuth(command);
     }

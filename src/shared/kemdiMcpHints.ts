@@ -1,22 +1,22 @@
-import type { McpServerSummary } from './protocol';
+import type { AgentBackend } from './protocol';
 
-/** UX hints for kemdicode-mcp in Pi settings (directTools, drop --model). */
-export function getKemdiMcpHints(server: McpServerSummary): string[] {
+/** Setup advice for kemdicode-mcp servers; empty for every other server. */
+export function getKemdiMcpHints(
+    server: { name: string; args: string[]; directTools?: unknown },
+    backend: AgentBackend,
+): string[] {
     if (!/kemdi/i.test(server.name)) {
         return [];
     }
     const hints: string[] = [];
-    const preview = server.commandPreview ?? '';
-    if (/--model\b|-m\b/.test(preview)) {
-        hints.push(
-            'Remove --model from mcp.json args — it overrides Pi and runs a separate LLM. Oh My Pi Chater can sync model into workspace .kemdicode-mcp.json (gitignored).',
-        );
+    if (server.args.some((a) => a === '--model' || a === '-m' || a.startsWith('--model='))) {
+        hints.push('Remove --model from the server args — it overrides the agent model and runs a separate LLM.');
     }
-    if (server.directTools !== true) {
+    // directTools is a pi-mcp-adapter setting; omp registers every MCP tool directly.
+    if (backend === 'pi' && server.directTools !== true) {
         hints.push(
             'Set "directTools": true on kemdicode-mcp so the model sees tool names directly, not only the generic mcp proxy.',
         );
     }
-    hints.push('After changing Pi model, reload the session to refresh Kemdi alignment.');
     return hints;
 }

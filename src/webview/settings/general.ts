@@ -36,7 +36,6 @@ export function buildGeneralTab(data: SettingsData): HTMLElement {
             buildRange('contextUsageWarningThreshold', 'Context usage warning', data.contextUsageWarningThreshold, 0, 100,
                 `Warn in the chat footer above ${data.contextUsageWarningThreshold}% context.`),
         ], 'chat-ui'),
-        buildSection('Keyboard Shortcuts', [buildShortcutsInfo()]),
     );
     return buildTabPanel('general', children);
 }
@@ -50,24 +49,8 @@ function buildPiConfigErrorBanner(message: string): HTMLElement {
 function buildPiCliSyncInfo(data: SettingsData): HTMLElement {
     const row = el('div', 'setting-row');
     row.innerHTML = `<p class="setting-description">
-        Chat uses <code>pi --mode rpc</code>. Edit <code>${escapeHtml(data.piAgentDir)}</code> here or in the terminal — same files.
+        Chat uses <code>${data.backend} --mode rpc</code>. Edit <code>${escapeHtml(data.piAgentDir)}</code> here or in the terminal — same files.
         Slash commands like <code>/mcp</code> and <code>/packages</code> jump to the matching tab above.
     </p>`;
-    return row;
-}
-
-function buildShortcutsInfo(): HTMLElement {
-    const row = el('div', 'setting-row shortcuts-info');
-    row.innerHTML = `
-        <div class="shortcuts-list">
-            <div class="shortcut-item"><kbd>Ctrl+Shift+L</kbd><span>Focus chat</span></div>
-            <div class="shortcut-item"><kbd>Ctrl+Shift+N</kbd><span>New session</span></div>
-            <div class="shortcut-item"><kbd>Ctrl+Alt+M</kbd><span>Voice input</span></div>
-            <div class="shortcut-item"><kbd>Escape</kbd><span>Stop generation</span></div>
-        </div>
-        <p class="setting-description">
-            <a href="#" id="btn-open-keybindings">Open Keyboard Shortcuts editor</a>
-        </p>
-    `;
     return row;
 }

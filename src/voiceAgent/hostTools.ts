@@ -57,6 +57,8 @@ export interface ToolTurn {
 export interface ToolResult {
     text: string;
     isError: boolean;
+    /** research: the background job this call started; its findings arrive when it settles. */
+    research?: ResearchJob;
 }
 
 const OBJECT = { type: 'object', additionalProperties: false } as const;
@@ -215,7 +217,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'edit_file',
         label: 'Edit file',
         description:
-            "Pair mode only. Replace oldText with newText in an existing file, typed out line by line in the user's editor so they watch you write; one Ctrl+Z undoes it. oldText must match the file exactly (read it first). An empty oldText fills an empty file. New files are made with create_file. Keep each edit small: one function or block.",
+            "Pair mode only. Replace oldText with newText in an existing file, typed out character by character in the user's editor while they follow you, so they watch you write (at once when they do not); one Ctrl+Z undoes it. oldText must match the file exactly (read it first). An empty oldText fills an empty file. New files are made with create_file. Keep each edit small: one function or block.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -298,7 +300,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'run_in_terminal',
         label: 'Run in terminal',
         description:
-            "Pair mode only. Type a command into the Pi terminal in the user's VS Code and run it; returns the exit code and the last lines of output. After timeoutSecs it returns what it has so far and the command keeps running (servers, watchers).",
+            "Pair mode only. Type a command into the Pi terminal in the user's VS Code and run it; returns the exit code and the last lines of output. After timeoutSecs it returns what it has so far and the command keeps running (servers, watchers, or a program waiting for input such as psql), which terminal_send and terminal_read then drive.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -306,6 +308,36 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
                 timeoutSecs: { type: 'integer', minimum: 1, maximum: 600, description: 'How long to wait for it to finish; default 30.' },
             },
             required: ['command'],
+        },
+        loadMode: 'essential',
+    },
+    {
+        name: 'terminal_send',
+        label: 'Type in terminal',
+        description:
+            "Pair mode only. Type a line into a program still running in a Pi terminal (one run_in_terminal left running, such as psql answering a prompt), then wait until its output goes quiet and return only the new output, or its exit code if it ended. What you type is usually echoed into the terminal and its output: for passwords prefer .pgpass or environment variables, and never repeat a secret back.",
+        parameters: {
+            ...OBJECT,
+            properties: {
+                terminal: { type: 'string', description: 'The Pi terminal\'s name, e.g. "Pi (2)"; default: the latest one still running.' },
+                text: { type: 'string', description: 'What to type, e.g. a SQL statement; may be empty to just press Enter.' },
+                enter: { type: 'boolean', description: 'Press Enter after it; default true.' },
+                waitSecs: { type: 'integer', minimum: 1, maximum: 30, description: 'How long to wait for its output to go quiet; default 2.' },
+            },
+            required: ['text'],
+        },
+        loadMode: 'essential',
+    },
+    {
+        name: 'terminal_read',
+        label: 'Read terminal',
+        description:
+            'Pair mode only. What a program left running in a Pi terminal printed since you last saw it (its last lines when nothing is new), and whether it is still running.',
+        parameters: {
+            ...OBJECT,
+            properties: {
+                terminal: { type: 'string', description: 'The Pi terminal\'s name, e.g. "Pi (2)"; default: the latest one still running.' },
+            },
         },
         loadMode: 'essential',
     },
@@ -406,6 +438,10 @@ export interface EditorHands {
     saveFiles(path: string | undefined): Promise<string>;
     closeEditor(path: string): Promise<string>;
     runInTerminal(command: string, timeoutMs: number): Promise<string>;
+    /** Types into the program a run left running in a Pi terminal (default: the latest); returns its new output. */
+    sendToTerminal(input: { terminal?: string; text: string; enter: boolean; waitMs: number }): Promise<string>;
+    /** What a program left running in a Pi terminal printed since last shown, and whether it still runs. */
+    readTerminal(terminal: string | undefined): Promise<string>;
     /** Without source: what there is to read. */
     readOutput(source: string | undefined, lines: number): Promise<string>;
     startDebugging(configuration: string | undefined, noDebug: boolean, timeoutMs: number): Promise<string>;
@@ -430,6 +466,8 @@ const PAIR_ONLY: Record<string, true> = {
     save_file: true,
     close_editor: true,
     run_in_terminal: true,
+    terminal_send: true,
+    terminal_read: true,
     debug_start: true,
     debug_control: true,
     set_breakpoint: true,
@@ -450,9 +488,11 @@ const PERMISSION_TIER: Record<string, 'write' | 'exec'> = {
     save_file: 'write',
     delete_file: 'exec',
     run_in_terminal: 'exec',
+    terminal_send: 'exec',
     debug_start: 'exec',
 };
 const DEFAULT_TERMINAL_TIMEOUT_SECS = 30;
+const DEFAULT_TERMINAL_WAIT_SECS = 2;
 const DEFAULT_DEBUG_START_SECS = 15;
 const DEFAULT_DEBUG_STEP_SECS = 10;
 const DEFAULT_OUTPUT_LINES = 80;
@@ -569,13 +609,14 @@ export class HostToolRouter {
 
     async execute(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<ToolResult> {
         try {
-            return { text: await this._run(toolName, args, turn), isError: false };
+            const out = await this._run(toolName, args, turn);
+            return typeof out === 'string' ? { text: out, isError: false } : out;
         } catch (err: unknown) {
             return { text: err instanceof Error ? err.message : String(err), isError: true };
         }
     }
 
-    private async _run(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<string> {
+    private async _run(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<string | ToolResult> {
         const { tabId } = turn;
         if (turn.proactive && toolName !== 'worker_status') {
             throw new Error('Nobody asked for this: the user has not spoken since this update. Tell them and let them decide.');
@@ -606,6 +647,14 @@ export class HostToolRouter {
                 return this._holdForApproval(tabId, toolName, args, () => this._act(toolName, args, turn));
             }
         }
+        if (toolName === 'research') {
+            const job = this._startResearch(tabId, requireString(args, 'question'));
+            return {
+                text: `Started research ${job.id} in the background. Tell the user you are looking into it and carry on; the findings arrive in a later message as <research-result id="${job.id}">.`,
+                isError: false,
+                research: job,
+            };
+        }
         return this._act(toolName, args, turn);
     }
 
@@ -635,7 +684,7 @@ export class HostToolRouter {
                     return 'Not switched yet. Ask the user to confirm pair mode: you will edit files and run commands yourself in their editor and terminal, and will not direct omp. Call set_mode pair again only after they agree in their next message.';
                 }
                 this.setMode('pair');
-                return 'Now in pair mode: edit files with edit_file, manage them with create_file, create_folder, rename_file, delete_file, save_file and close_editor, run commands with run_in_terminal, and debug with debug_start, set_breakpoint, debug_control and debug_inspect, saying what you do as you go. The worker is not yours to direct until you switch to omp mode: when the user asks for it, or on your own for a job too heavy to do yourself.';
+                return 'Now in pair mode: edit files with edit_file, manage them with create_file, create_folder, rename_file, delete_file, save_file and close_editor, run commands with run_in_terminal (and drive one left running with terminal_send and terminal_read), and debug with debug_start, set_breakpoint, debug_control and debug_inspect, saying what you do as you go. The worker is not yours to direct until you switch to omp mode: when the user asks for it, or on your own for a job too heavy to do yourself.';
             }
             case 'edit_file':
                 return this._requireHands().editFile({
@@ -677,6 +726,23 @@ export class HostToolRouter {
                 return this._requireHands().closeEditor(requireString(args, 'path'));
             case 'run_in_terminal':
                 return this._requireHands().runInTerminal(requireString(args, 'command'), seconds(args.timeoutSecs, 600, DEFAULT_TERMINAL_TIMEOUT_SECS) * 1000);
+            case 'terminal_send': {
+                if (typeof args.text !== 'string') {
+                    throw new Error('Missing text.');
+                }
+                const enter = args.enter !== false;
+                if (args.text === '' && !enter) {
+                    throw new Error('Nothing to send: give text, or leave enter on to press Enter.');
+                }
+                return this._requireHands().sendToTerminal({
+                    terminal: optionalString(args, 'terminal'),
+                    text: args.text,
+                    enter,
+                    waitMs: seconds(args.waitSecs, 30, DEFAULT_TERMINAL_WAIT_SECS) * 1000,
+                });
+            }
+            case 'terminal_read':
+                return this._requireHands().readTerminal(optionalString(args, 'terminal'));
             case 'read_output': {
                 const lines = typeof args.lines === 'number' ? Math.min(Math.max(Math.round(args.lines), 1), 400) : DEFAULT_OUTPUT_LINES;
                 return this._requireHands().readOutput(optionalString(args, 'source'), lines);
@@ -781,10 +847,6 @@ export class HostToolRouter {
                     ? 'Answered.'
                     : 'Too late: it was already answered in the editor or timed out.';
             }
-            case 'research': {
-                const job = this._startResearch(tabId, requireString(args, 'question'));
-                return `Started research ${job.id} in the background. Tell the user you are looking into it and carry on; the findings arrive in a later message as <research-result id="${job.id}">.`;
-            }
             case 'worker_status':
                 return this._statusReport(tabId);
             case 'open_file': {
@@ -871,7 +933,8 @@ export class HostToolRouter {
      */
     private _holdForApproval(tabId: string, toolName: string, args: Record<string, unknown>, act: () => Promise<string>): string {
         const id = `a${this._nextApproval++}`;
-        const command = typeof args.command === 'string' ? args.command : undefined;
+        // terminal_send's text is what gets typed into the running program.
+        const command = typeof args.command === 'string' ? args.command : typeof args.text === 'string' ? args.text : undefined;
         const target = typeof args.path === 'string' ? args.path : undefined;
         const move = typeof args.from === 'string' ? `${args.from} -> ${String(args.to)}` : undefined;
         const held: HeldApproval = { id, tabId, toolName, summary: command ?? move ?? target ?? '' };

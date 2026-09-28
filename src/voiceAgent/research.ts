@@ -16,7 +16,7 @@ const MAX_RUNNING = 3;
 /** omp enforces it with --max-time; pi has no such flag, so the job is killed. */
 const MAX_TIME_MS = 5 * 60_000;
 
-const RESEARCH_PROMPT = `You answer one question about the codebase in the current directory by reading files. Never modify anything. Your answer goes to a voice assistant who relays it aloud, so lead with the answer, then give the key facts and the files they come from. Plain text, no code blocks, under 250 words. Say what you could not find rather than guess.`;
+const RESEARCH_PROMPT = `You answer one question about the codebase in the current directory by reading files; when the question needs outside information such as library docs and a web search tool is available, search the web too. Never modify anything. Your answer goes to a voice assistant who relays it aloud, so lead with the answer, then give the key facts and the files they come from. Plain text, no code blocks, under 1500 words. Say what you could not find rather than guess.`;
 
 /** A job until it settles: its process once spawned, and whether stopAll asked it to stop. */
 interface RunningJob {
@@ -75,11 +75,11 @@ export class ResearchRunner {
         }
         const args = ['-p', '--no-session', '--no-skills'];
         if (invocation.backend === 'omp') {
-            args.push('--tools', 'read,grep,glob', '--no-extensions', '--no-rules', '--no-lsp', '--no-title', '--approval-mode', 'yolo', '--max-time', '5m');
+            args.push('--tools', 'read,grep,glob,web_search', '--no-extensions', '--no-lsp', '--no-title', '--approval-mode', 'yolo', '--max-time', '5m');
         } else {
             // Extensions stay on: a pi package may provide the model; the allowlist keeps their tools out.
-            // No AGENTS.md / CLAUDE.md, like omp's --no-rules: they instruct the coding agent, not this reader.
-            args.push('--tools', 'read,grep,find,ls', '--no-prompt-templates', '--no-context-files');
+            // AGENTS.md / CLAUDE.md load, like omp's rules: they tell this reader where things live.
+            args.push('--tools', 'read,grep,find,ls', '--no-prompt-templates');
         }
         args.push('--thinking', 'off', '--system-prompt', RESEARCH_PROMPT);
         if (model) {

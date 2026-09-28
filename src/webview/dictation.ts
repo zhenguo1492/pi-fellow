@@ -11,7 +11,6 @@ import { setWaveOpen } from './voiceWave';
 import { vscode } from './vscodeApi';
 
 const MIC_BUTTON_ID = 'btn-mic';
-const SHORTCUT = navigator.userAgent.includes('Mac') ? '⌘⌥M' : 'Ctrl+Alt+M';
 
 let status: DictationStatus = { recording: false, speaking: false, pending: 0 };
 /** The STT service's check; absent until the host reports it (the mic stays hidden until then). */
@@ -115,19 +114,23 @@ function renderMicButton(): void {
         : unavailable
           ? (stt?.reason ?? 'Speech-to-text is unavailable.')
           : status.recording
-            ? `Stop voice input and transcribe (${SHORTCUT})`
+            ? 'Stop voice input and transcribe'
             : busy
               ? 'Transcribing…'
-              : `Voice input (${SHORTCUT})`;
+              : 'Voice input';
     btn.title = label;
     btn.setAttribute('aria-label', label);
     btn.setAttribute('aria-pressed', status.recording ? 'true' : 'false');
 }
 
-/** Voice mode: the mic is green while open; a click mutes (mic-off icon) or unmutes it. */
+/**
+ * Voice mode: the mic is green while open; a click mutes (mic-off icon) or unmutes it. Without STT
+ * voice mode never opens the microphone: the button is disabled and says why.
+ */
 function renderVoiceMic(btn: HTMLButtonElement, v: VoiceStatus): void {
-    // Starting, or another window has the voice: nothing to mute here.
-    const idle = v.starting || v.phase === 'standby';
+    const deaf = v.unavailable?.stt;
+    // Starting, another window has the voice, or nothing to hear with: nothing to mute here.
+    const idle = v.starting || v.phase === 'standby' || deaf !== undefined;
     const open = !v.muted && !idle;
     btn.hidden = false;
     btn.disabled = idle;
@@ -143,14 +146,17 @@ function renderVoiceMic(btn: HTMLButtonElement, v: VoiceStatus): void {
     if (line) {
         line.hidden = true;
     }
+    // Without TTS nothing plays, so the bot's line never opens either (its phase is never speaking).
     setWaveOpen({ user: open, bot: v.phase === 'speaking' });
     const label = v.starting
         ? 'The voice agent is starting'
-        : v.phase === 'standby'
-          ? 'Another VS Code window has the microphone'
-          : v.muted
-            ? `Unmute the microphone (${SHORTCUT})`
-            : `Mute the microphone (${SHORTCUT})`;
+        : deaf !== undefined
+          ? `The voice agent can't hear: ${deaf} Type to it instead.`
+          : v.phase === 'standby'
+            ? 'Another VS Code window has the microphone'
+            : v.muted
+              ? 'Unmute the microphone'
+              : 'Mute the microphone';
     btn.title = label;
     btn.setAttribute('aria-label', label);
     btn.setAttribute('aria-pressed', v.muted ? 'true' : 'false');

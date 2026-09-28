@@ -65,6 +65,8 @@ export interface RpcSlashCommand {
     name: string;
     description?: string;
     source: 'builtin' | 'extension' | 'prompt' | 'skill';
+    /** pi: the file that defines it (a skill's SKILL.md); omp does not report it. */
+    path?: string;
 }
 
 export interface RpcSessionState {

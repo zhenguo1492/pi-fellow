@@ -15,6 +15,8 @@
  *   speaking across the gaps between the sentences of one reply; it stops when the reply's audio
  *   is over, when nothing has been playing or synthesizing for a while mid-reply (a tool call),
  *   or when it is cut off.
+ * - Without text-to-speech (`voiced: false`) replies are only shown as text: nothing goes to TTS,
+ *   the status goes from thinking back to listening once the reply is generated.
  *
  * Cancellation contract: every reply is one cancellation scope in the executor. `cancelTurn`
  * aborts it, and the executor delivers no further event of that turn. So no stale-event checks
@@ -59,6 +61,10 @@ export interface Metrics {
 export interface ConvState {
     /** This window has the microphone and speakers (design §13 R9). */
     active: boolean;
+    /** Replies are spoken; false when voice mode runs without text-to-speech and replies are only shown. */
+    voiced: boolean;
+    /** TTS came or went while a reply was being given: `voiced` takes this once that reply is over. */
+    nextVoiced?: boolean;
     userSpeaking: boolean;
     sttPending: number;
     /** Heard or typed, not yet sent; typed messages may carry the composer's attachments. */
@@ -108,7 +114,9 @@ export type ConvEvent =
     /** This window gained or lost the voice (focus moved between VS Code windows in voice mode). */
     | { type: 'active'; active: boolean; at: number }
     /** The user stopped the reply without saying anything (voice panel, Esc). */
-    | { type: 'hush'; at: number };
+    | { type: 'hush'; at: number }
+    /** Text-to-speech became available (or not): from the next reply on, replies are spoken (or only shown). */
+    | { type: 'voiced'; voiced: boolean; at: number };
 
 export type Effect =
     | { type: 'prompt'; turnId: number; text: string; source: 'text' | 'stt'; interrupted?: string; attachments?: VoiceAttachments }
@@ -125,9 +133,10 @@ export interface Step {
 
 const RECENT_REPLIES = 2;
 
-export function initialState(active = true): ConvState {
+export function initialState(active = true, voiced = true): ConvState {
     return {
         active,
+        voiced,
         userSpeaking: false,
         sttPending: 0,
         userBuffer: [],
@@ -174,12 +183,22 @@ function withBot(s: ConvState, turnId: number, fn: (b: BotTurn) => BotTurn): Con
     return s.bot?.turnId === turnId ? { ...s, bot: fn(s.bot) } : s;
 }
 
+/** The reply is over: it becomes an echo reference, and a change of `voiced` waiting for it applies. */
 function retire(s: ConvState, bot: BotTurn): ConvState {
-    return { ...s, bot: undefined, recentReplies: [...s.recentReplies, bot.generated].slice(-RECENT_REPLIES) };
+    return {
+        ...s,
+        bot: undefined,
+        voiced: s.nextVoiced ?? s.voiced,
+        nextVoiced: undefined,
+        recentReplies: [...s.recentReplies, bot.generated].slice(-RECENT_REPLIES),
+    };
 }
 
 /** What the user heard of the reply being cut off, phrased for the LLM. */
-function interruptionNote(bot: BotTurn): string {
+function interruptionNote(s: ConvState, bot: BotTurn): string {
+    if (!s.voiced) {
+        return 'The user sent a new message while you were still writing your previous reply; they saw only the part written so far.';
+    }
     const heard = bot.spoken.join(' ');
     if (!heard && !bot.playing) {
         return 'The user spoke again before your previous reply was voiced; they heard none of it.';
@@ -198,7 +217,7 @@ function interrupt(s: ConvState, at: number): Step {
         return { state: s, effects: [] };
     }
     return {
-        state: { ...retire(s, bot), textBuffer: '', ttsActive: false, botSpeaking: false, interruptedNote: interruptionNote(bot), metrics: {} },
+        state: { ...retire(s, bot), textBuffer: '', ttsActive: false, botSpeaking: false, interruptedNote: interruptionNote(s, bot), metrics: {} },
         effects: [{ type: 'cancelTurn', turnId: bot.turnId, metrics: { ...s.metrics, cutAt: at } }],
     };
 }
@@ -288,15 +307,15 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
                 return { state: s, effects: [] };
             }
             const turnId = ev.turnId;
+            const next = withBot(s, turnId, (b) => ({ ...b, generated: b.generated + ev.delta }));
+            const metrics = { ...s.metrics, firstTextAt: s.metrics.firstTextAt ?? ev.at };
+            if (!s.voiced) {
+                return { state: { ...next, metrics }, effects: [] };
+            }
             // Nothing synthesizing, queued or playing (start of reply, or TTS ran dry): cut early at a comma.
             const { sentences, rest } = takeSentences(s.textBuffer + ev.delta, !s.ttsActive);
-            const next = withBot(s, turnId, (b) => ({ ...b, generated: b.generated + ev.delta }));
             return {
-                state: toTts(
-                    { ...next, textBuffer: rest, metrics: { ...s.metrics, firstTextAt: s.metrics.firstTextAt ?? ev.at } },
-                    sentences.length,
-                    ev.at,
-                ),
+                state: toTts({ ...next, textBuffer: rest, metrics }, sentences.length, ev.at),
                 effects: sentences.map((text) => ({ type: 'speak', turnId, text })),
             };
         }
@@ -360,5 +379,8 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
         }
         case 'hush':
             return interrupt(s, ev.at);
+        case 'voiced':
+            // A reply half shown as text is not voiced from the middle, nor one half spoken muted.
+            return { state: s.bot ? { ...s, nextVoiced: ev.voiced } : { ...s, voiced: ev.voiced, nextVoiced: undefined }, effects: [] };
     }
 }
