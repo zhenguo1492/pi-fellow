@@ -9,7 +9,6 @@
 import { escapeHtml } from '../shared/html';
 import type { ClientMessage } from '../shared/protocol';
 import {
-    VOICE_MODE_LABEL,
     type VoiceCallUsage,
     type VoiceEntry,
     type VoiceProposalCard,
@@ -28,7 +27,7 @@ import { handleSentenceMessage } from './sentenceActions';
 import { voiceToolRenderer } from './toolCards/voice';
 import type { ToolResultPayload } from './toolCards/types';
 import { createToolView, toToolResult, updateToolView, type ToolViewPayload } from './toolView';
-import { setVoiceBarAvatar } from './voiceBar';
+import { setVoiceBarBot } from './voiceBar';
 import { pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from './sentencePick';
 import { vscode } from './vscodeApi';
 
@@ -80,7 +79,7 @@ async function applySpeakers(speakers: VoiceSpeakers): Promise<void> {
     }
     speakerView.user = { name: escapeHtml(speakers.user.name), avatar: user };
     speakerView.bot = { name: escapeHtml(speakers.bot.name), avatar: bot };
-    setVoiceBarAvatar(bot);
+    setVoiceBarBot(speakers.bot.name, bot);
     if (lastState) {
         renderStream(lastState);
     }
@@ -202,7 +201,7 @@ function renderHead(s: VoiceViewState): void {
     const rows = [
         row(
             'LLM',
-            [escapeHtml(llm.model ?? 'the chat tab’s model'), `thinking ${escapeHtml(llm.thinking)}`, `${VOICE_MODE_LABEL[s.mode]} mode`].join(sep),
+            [escapeHtml(llm.model ?? 'the chat tab’s model'), `thinking ${escapeHtml(llm.thinking)}`].join(sep),
             'oh-my-pi-chater.voiceAgent.model / thinking',
         ),
         row('STT', [escapeHtml(shortUrl(stt.url)), escapeHtml(stt.model), `language ${escapeHtml(stt.language)}`].join(sep), 'oh-my-pi-chater.voice.*'),

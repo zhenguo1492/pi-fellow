@@ -1,24 +1,45 @@
-import type { ExtensionUiRequestPayload } from '../shared/extensionUi';
+import type { ExtensionUiCard } from '../shared/extensionUi';
 import { escapeHtml } from '../shared/html';
 import { vscode } from './vscodeApi';
 
-let activeRequest: ExtensionUiRequestPayload | null = null;
-const pendingQueue: ExtensionUiRequestPayload[] = [];
+let activeRequest: ExtensionUiCard | null = null;
+const pendingQueue: ExtensionUiCard[] = [];
 let keyHandler: ((e: KeyboardEvent) => void) | null = null;
 
-export function initExtensionUiHost(): void {
+/** Keys typed into a TUI tab's terminal are the TUI's, even while one of its dialogs has a card. */
+function inTerminal(element: Element | null): boolean {
+    return !!element?.closest('.tui-host');
+}
+
+export interface ExtensionUiHostOptions {
+    /** Puts keyboard focus in a tab's terminal (tuiView's focusTui). */
+    focusTui(tabId: string): void;
+}
+
+export function initExtensionUiHost(options: ExtensionUiHostOptions): void {
     const host = document.getElementById('extension-ui-host');
     if (!host) {
         return;
     }
+    host.addEventListener('mousedown', (e) => {
+        // The button hands focus to the terminal: it must not take it itself.
+        if ((e.target as HTMLElement).closest('[data-extension-ui-show-tui]')) e.preventDefault();
+    });
     host.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
+        const showTui = target.closest<HTMLElement>('[data-extension-ui-show-tui]');
+        if (showTui) {
+            const tabId = showTui.dataset.extensionUiShowTui ?? '';
+            vscode.postMessage({ type: 'showTui', tabId });
+            // Shown already: focus it now; else the sync that shows it focuses it.
+            options.focusTui(tabId);
+            return;
+        }
         const cancelBtn = target.closest('[data-extension-ui-cancel]');
         if (cancelBtn && activeRequest) {
             respond({ id: activeRequest.id, cancelled: true });
             return;
         }
-
         const optionBtn = target.closest('[data-extension-ui-option]') as HTMLElement | null;
         if (optionBtn && activeRequest) {
             const value = optionBtn.dataset.extensionUiOption ?? '';
@@ -56,7 +77,7 @@ export function initExtensionUiHost(): void {
     }
 }
 
-export function showExtensionUiRequest(request: ExtensionUiRequestPayload): void {
+export function showExtensionUiRequest(request: ExtensionUiCard): void {
     pendingQueue.push(request);
     drainExtensionUiQueue();
 }
@@ -82,8 +103,11 @@ function drainExtensionUiQueue(): void {
     host.style.display = 'block';
     host.innerHTML = renderRequest(activeRequest);
     bindExtensionUiKeyboard(activeRequest);
-    const firstOption = host.querySelector('.extension-ui-option') as HTMLButtonElement | null;
-    firstOption?.focus();
+    // Someone typing in a TUI keeps their focus: the card is clicked, or answered in the TUI.
+    if (!inTerminal(document.activeElement)) {
+        const firstOption = host.querySelector('.extension-ui-option') as HTMLButtonElement | null;
+        firstOption?.focus();
+    }
     host.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
@@ -103,10 +127,14 @@ function respond(payload: { id: string; cancelled?: boolean; value?: string; con
     dismissExtensionUi(payload.id);
 }
 
-function bindExtensionUiKeyboard(req: ExtensionUiRequestPayload): void {
+function bindExtensionUiKeyboard(req: ExtensionUiCard): void {
     unbindExtensionUiKeyboard();
+    // A screen card has nothing to answer from the keyboard.
+    if (req.method === 'screen') {
+        return;
+    }
     keyHandler = (e: KeyboardEvent) => {
-        if (!activeRequest || activeRequest.id !== req.id) {
+        if (!activeRequest || activeRequest.id !== req.id || inTerminal(e.target instanceof Element ? e.target : null)) {
             return;
         }
         if (e.key === 'Escape') {
@@ -152,7 +180,21 @@ function parseOptionDisplay(opt: string): { title: string; description?: string;
     return { title: body || opt, value };
 }
 
-function renderRequest(req: ExtensionUiRequestPayload): string {
+function renderRequest(req: ExtensionUiCard): string {
+    if (req.method === 'screen') {
+        return `
+            <div class="extension-ui-card" role="dialog" aria-label="${escapeHtml(req.title)}">
+                <div class="extension-ui-header">
+                    <span class="extension-ui-badge">TUI</span>
+                    <div class="extension-ui-title">${escapeHtml(req.title)}</div>
+                    <p class="extension-ui-subtitle">Answer it in the terminal, or tell the voice agent.</p>
+                </div>
+                <pre class="extension-ui-screen">${escapeHtml(req.message)}</pre>
+                <div class="extension-ui-actions-row">
+                    <button type="button" class="extension-ui-btn primary" data-extension-ui-show-tui="${escapeHtml(req.tabId)}">Show the terminal</button>
+                </div>
+            </div>`;
+    }
     const title = req.title?.trim() || 'Selection required';
     const badge =
         req.method === 'select'
@@ -162,6 +204,8 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
               : req.method === 'editor'
                 ? 'Text'
                 : 'Input';
+    // Detail lines, such as the command a tool approval would run.
+    const message = req.method !== 'confirm' && req.message?.trim() ? `<p class="extension-ui-message">${escapeHtml(req.message.trim())}</p>` : '';
 
     if (req.method === 'confirm') {
         const msg = req.message?.trim() || '';
@@ -189,6 +233,7 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
                 <div class="extension-ui-header">
                     <span class="extension-ui-badge">${badge}</span>
                     <div class="extension-ui-title">${escapeHtml(title)}</div>
+                    ${message}
                     <p class="extension-ui-subtitle">Submit to reply · Esc to cancel</p>
                 </div>
                 <textarea id="extension-ui-input" class="extension-ui-textarea" rows="${rows}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(prefill)}</textarea>
@@ -225,6 +270,7 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
             <div class="extension-ui-header">
                 <span class="extension-ui-badge">${badge}</span>
                 <div class="extension-ui-title">${escapeHtml(title)}</div>
+                ${message}
                 <p class="extension-ui-subtitle">${escapeHtml(keyHint)}</p>
             </div>
             <div class="extension-ui-options">${optionButtons}</div>

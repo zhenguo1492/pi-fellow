@@ -8,7 +8,6 @@ node_modules/
 !.env.example
 .kemdicode-mcp.json
 screenshot.png
-AGENTS.md
 TODO.md
 HandOff/
 .env.local

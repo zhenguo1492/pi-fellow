@@ -1,4 +1,5 @@
-import type { WorkerEvent, WorkerStatus } from './workerController';
+import type { ExtensionUiQuestion } from '../shared/extensionUi';
+import { TUI_RUN_END, TUI_RUN_START, type WorkerEvent, type WorkerStatus } from './workerController';
 
 /**
  * Decides when the voice agent speaks up without being asked (docs/voice-agent-design.md §5.9):
@@ -7,11 +8,16 @@ import type { WorkerEvent, WorkerStatus } from './workerController';
  */
 
 /** Highest priority first. */
-export type ObservationKind = 'approval' | 'needs_input' | 'error' | 'done' | 'research' | 'progress';
+export type ObservationKind = 'approval' | 'needs_input' | 'stopped' | 'error' | 'done' | 'research' | 'progress';
 
 export type Observation =
     | { kind: 'approval'; tabId: string }
     | { kind: 'needs_input'; tabId: string; requestIds: string[] }
+    /**
+     * A TUI tab's run stopped: done, or waiting on a question; `screen` is its last lines, `question`
+     * the dialog it waits on when its card could read it.
+     */
+    | { kind: 'stopped'; tabId: string; screen: string; question?: ExtensionUiQuestion }
     | { kind: 'error'; tabId: string; detail: string }
     | { kind: 'done'; tabId: string }
     | { kind: 'research'; tabId: string; jobId: string }
@@ -61,6 +67,8 @@ interface TabWatch {
     error?: string;
     /** Requests the user has already been told about. */
     told: Set<string>;
+    /** A TUI run stopped, with the last lines of its screen and its dialog's question, and the user has not heard about it. */
+    stopped?: { screen: string; question?: ExtensionUiQuestion };
 }
 
 export class FloorArbiter {
@@ -77,9 +85,14 @@ export class FloorArbiter {
         const watch = this._watch(tabId);
         switch (event.type) {
             case 'agent_start':
+            case TUI_RUN_START:
                 // A new run makes the previous outcome old news.
                 watch.endedAt = undefined;
                 watch.error = undefined;
+                watch.stopped = undefined;
+                return;
+            case TUI_RUN_END:
+                watch.stopped = { screen: typeof event.screen === 'string' ? event.screen : '', question: readQuestion(event.question) };
                 return;
             case 'agent_end': {
                 if (event.isTerminal === false || event.willRetry === true) {
@@ -127,6 +140,10 @@ export class FloorArbiter {
         if (view.requestIds.some((id) => !watch.told.has(id)) && (settings.narration !== 'off' || view.fromVoice)) {
             return { kind: 'needs_input', tabId, requestIds: view.requestIds };
         }
+        // A stopped TUI may be asking something (a tool approval) that only its screen shows: like a request, it never waits.
+        if (watch.stopped !== undefined && view.phase === 'idle' && (settings.narration !== 'off' || view.fromVoice)) {
+            return { kind: 'stopped', tabId, screen: watch.stopped.screen, ...(watch.stopped.question ? { question: watch.stopped.question } : {}) };
+        }
         if (settings.narration === 'off') {
             return undefined;
         }
@@ -166,6 +183,9 @@ export class FloorArbiter {
             case 'error':
                 watch.error = undefined;
                 return;
+            case 'stopped':
+                watch.stopped = undefined;
+                return;
             case 'done':
                 watch.endedAt = undefined;
                 return;
@@ -178,6 +198,7 @@ export class FloorArbiter {
         watch.endedAt = undefined;
         watch.error = undefined;
         watch.told = new Set(requestIds);
+        watch.stopped = undefined;
     }
 
     turnEnded(now: number): void {
@@ -203,4 +224,16 @@ export class FloorArbiter {
         }
         return watch;
     }
+}
+
+const QUESTION_METHODS: Record<string, true> = { select: true, confirm: true, input: true, editor: true };
+
+/** A `tui_run_end` event's dialog question, checked: worker events are untyped. */
+function readQuestion(value: unknown): ExtensionUiQuestion | undefined {
+    if (typeof value !== 'object' || value === null || !('method' in value) || !('title' in value)) return undefined;
+    const { method, title } = value;
+    if (typeof method !== 'string' || !QUESTION_METHODS[method] || typeof title !== 'string') return undefined;
+    const message = 'message' in value && typeof value.message === 'string' ? value.message : undefined;
+    const options = 'options' in value && Array.isArray(value.options) && value.options.every((o) => typeof o === 'string') ? (value.options as string[]) : undefined;
+    return { method: method as ExtensionUiQuestion['method'], title, ...(message ? { message } : {}), ...(options ? { options } : {}) };
 }

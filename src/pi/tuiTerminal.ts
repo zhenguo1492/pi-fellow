@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { Terminal as HeadlessTerminal } from '@xterm/headless';
 import * as vscode from 'vscode';
+import { ScreenReader, watchScreenText, type TerminalScreen } from './terminalScreen';
 import { cliCommand, piCliChildEnv, resolvePiCliInvocation } from './piCliPaths';
 import type { AgentBackend } from './agentBackend';
 
@@ -66,6 +67,10 @@ export interface TuiProcessOptions {
     cols: number;
     rows: number;
     onData: (data: string) => void;
+    /** The output changed the screen's text (not only its colors): the TUI drew something new. */
+    onScreenChange: () => void;
+    /** The TUI set its terminal title (OSC 0/2); omp's `π ! …` says it waits on the user. */
+    onTitleChange: () => void;
     onExit: (exitCode: number) => void;
 }
 
@@ -78,8 +83,12 @@ export class TuiProcess {
     private _exitCode: number | undefined;
     /** Output held back while a snapshot is being taken; delivered right after it. */
     private _held: string | undefined;
+    /** The screen as the voice agent and the dialog cards see it, made on first use. */
+    private _screen: ScreenReader | undefined;
     /** Resolves once the CLI enabled bracketed paste, i.e. its editor is reading keys. */
     private readonly _inputReady = Promise.withResolvers<void>();
+    /** The terminal title the TUI last set. */
+    private _title = '';
 
     private constructor(
         private readonly _pty: Pty,
@@ -127,6 +136,12 @@ export class TuiProcess {
             invocation.backend,
             options.sessionFile,
         );
+        // Disposed with the mirror when the TUI exits.
+        watchScreenText(mirror, options.onScreenChange);
+        mirror.onTitleChange((title) => {
+            proc._title = title;
+            options.onTitleChange();
+        });
         pty.onData((data) => {
             mirror.write(data, () => {
                 if (mirror.modes.bracketedPasteMode) {
@@ -151,6 +166,10 @@ export class TuiProcess {
         return this._exitCode !== undefined;
     }
 
+    get title(): string {
+        return this._title;
+    }
+
     write(data: string): void {
         if (!this.exited) {
             this._pty.write(data);
@@ -172,6 +191,15 @@ export class TuiProcess {
         this._rows = rows;
         this._pty.resize(cols, rows);
         this._mirror.resize(cols, rows);
+    }
+
+    /** The voice agent's view of the TUI's screen (the mirror); throws once the TUI has exited and the mirror is gone. */
+    screen(): TerminalScreen {
+        if (this.exited) {
+            throw new Error('The TUI has exited.');
+        }
+        this._screen ??= new ScreenReader(this._mirror, (keys) => this.write(keys));
+        return this._screen;
     }
 
     /**

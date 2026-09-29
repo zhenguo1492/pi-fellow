@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AVATAR_PRESETS, avatarPresetSrc } from '../shared/avatarPresets';
+import { AVATAR_PRESETS, ICON_PRESETS, avatarPresetMouthSrcs, avatarPresetSrc } from '../shared/avatarPresets';
 import {
     avatarImageMime,
     parseAvatarSetting,
@@ -67,11 +67,16 @@ async function resolveAvatar(raw: unknown): Promise<VoiceAvatar | undefined> {
         return { kind: 'text', text: setting.text };
     }
     if (setting.kind === 'preset') {
+        const icon = ICON_PRESETS.find((p) => p.id === setting.id);
+        if (icon) {
+            return { kind: 'icon', icon: icon.icon };
+        }
         const src = avatarPresetSrc(setting.id);
         if (!src) {
-            throw new Error(`There is no avatar preset "${setting.id}": pick one of ${AVATAR_PRESETS.map((p) => p.id).join(', ')}.`);
+            const ids = [...ICON_PRESETS, ...AVATAR_PRESETS].map((p) => p.id).join(', ');
+            throw new Error(`There is no avatar preset "${setting.id}": pick one of ${ids}.`);
         }
-        return { kind: 'image', src };
+        return { kind: 'image', src, mouthSrcs: avatarPresetMouthSrcs(setting.id) };
     }
     const file = avatarPath(setting.path);
     const mime = avatarImageMime(file);

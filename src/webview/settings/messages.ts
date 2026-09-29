@@ -1,5 +1,6 @@
 import type { SettingsData, SettingsServerMessage } from '../../shared/protocol';
 import { applySttDryRun, applyTtsDryRunResult } from '../voiceDryRun';
+import { applyVoiceprintRun } from '../voiceprintDialog';
 import { vscode } from './api';
 import { showToast } from './dom';
 import { render, renderMcpSection } from './render';
@@ -69,11 +70,14 @@ export function registerMessageListener(): void {
             case 'ttsDryRunResult':
                 applyTtsDryRunResult(msg);
                 break;
+            case 'voiceprintRun':
+                applyVoiceprintRun(msg.run, msg.event);
+                break;
         }
     });
 }
 
 /** The settings minus the Voice tab's, to tell a voice-only change from one that needs a full render. */
 function withoutVoice(data: SettingsData): string {
-    return JSON.stringify({ ...data, voice: undefined, tts: undefined, voiceReadiness: undefined, voiceApiKeys: undefined, voiceOwnServers: undefined, voiceSkills: undefined });
+    return JSON.stringify({ ...data, voice: undefined, tts: undefined, voiceReadiness: undefined, voiceApiKeys: undefined, voiceOwnServers: undefined, voiceSkills: undefined, voiceprint: undefined });
 }

@@ -1,6 +1,8 @@
 import * as path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { Terminal as HeadlessTerminal } from '@xterm/headless';
 import * as vscode from 'vscode';
+import { ScreenReader, drawsScreen } from '../pi/terminalScreen';
 import type { AgentCursor } from './agentCursor';
 import type { CodeAnchor } from './codeAnchors';
 import type { DebugDriver } from './debugDriver';
@@ -24,6 +26,8 @@ const MAX_OUTPUT_CHARS = 200_000;
 /** terminal_send returns once a program's output has been quiet this long. */
 const QUIET_MS = 500;
 const POLL_MS = 100;
+/** run_in_terminal returns early once a command's output has been quiet this long: it may be waiting for input. */
+const STALLED_MS = 5000;
 /** A command's stream ends right after it; its last chunk may still be on the way. */
 const LAST_CHUNK_MS = 500;
 /** How long open_with waits for an editor to open or an extension's preview command to return. */
@@ -33,10 +37,19 @@ const NEW_TAB_WAIT_MS = 1500;
 /** A file just written may not be visible to stat yet: tries, this far apart. */
 const STAT_ATTEMPTS = 5;
 const STAT_RETRY_MS = 200;
+/**
+ * The emulator a screen-drawing program's output is replayed into. Extensions cannot learn a terminal's
+ * size, so it is larger than most: a program drawing for a smaller terminal fits, with blank space left over.
+ */
+const SCREEN_COLS = 200;
+const SCREEN_ROWS = 60;
+const SCREEN_SCROLLBACK = 1000;
+/** Enough of the previous chunk to catch an escape sequence split between two chunks. */
+const SEQUENCE_TAIL = 16;
 
 /**
  * The voice agent's hands in the user's VS Code (docs/voice-pair-agent-cursor.md §11-§13): it opens
- * code and reads VS Code's output, and in pair mode types edits into the editor character by character (at once when not followed) at Pi's
+ * code and reads VS Code's output, types edits into the editor character by character (at once when not followed) at Pi's
  * writing highlight, manages files, runs commands in a Pi terminal the user can see, and drives the debugger.
  */
 export class PairHands implements EditorHands, vscode.Disposable {
@@ -279,19 +292,22 @@ export class PairHands implements EditorHands, vscode.Disposable {
                 run.finish(e.exitCode);
             }
         });
-        const timeout = new AbortController();
-        const done = await Promise.race([
-            run.ended.then(() => true),
-            sleep(timeoutMs, false, { signal: timeout.signal }).catch(() => false),
-        ]);
-        timeout.abort();
-        if (!done) {
+        // A program asking a question (a prompt, a selection menu) goes quiet: return then, not at the timeout.
+        const deadline = Date.now() + timeoutMs;
+        while (!run.done && Date.now() < deadline && Date.now() - run.lastDataAt < STALLED_MS) {
+            await sleep(POLL_MS);
+        }
+        if (!run.done) {
             this._leftRunning.push(run);
-            const soFar = cleanTerminalOutput(run.output);
+            const soFar = run.drawsScreen ? await run.screen().read() : cleanTerminalOutput(run.output);
             run.shown = run.received;
+            const why =
+                Date.now() < deadline
+                    ? `Its output has been quiet for ${STALLED_MS / 1000}s, so it may be waiting for input, or just working silently`
+                    : `Still running after ${Math.round(timeoutMs / 1000)}s`;
             return (
-                `Still running after ${Math.round(timeoutMs / 1000)}s in the "${terminal.name}" terminal. It keeps running; if it waits for input, ` +
-                `type a line into it with terminal_send, and see what it printed since with terminal_read (terminal "${terminal.name}"). Output so far:\n${soFar || '(none)'}`
+                `${why}, in the "${terminal.name}" terminal. It keeps running; if it waits for input, ` +
+                `type a line into it with terminal_send, and see what it printed since with terminal_read (terminal "${terminal.name}"). ${run.drawsScreen ? 'Its screen' : 'Output so far'}:\n${soFar || '(none)'}`
             );
         }
         await Promise.race([run.reading, sleep(LAST_CHUNK_MS)]);
@@ -327,13 +343,13 @@ export class PairHands implements EditorHands, vscode.Disposable {
         return `Typed ${input.enter ? 'a line' : 'text'} into "${run.terminal.name}". ${await this._report(run)}`;
     }
 
-    async readTerminal(terminal: string | undefined): Promise<string> {
+    async readTerminal(terminal: string | undefined, pagesBack: number): Promise<string> {
         const run = this._leftRun(terminal);
-        if (!run.done && run.received === run.shown) {
+        if (!run.done && run.received === run.shown && !run.drawsScreen) {
             const last = cleanTerminalOutput(run.output, 20, 2000);
             return `"${run.terminal.name}" is still running, with no new output since you last looked. Its last lines:\n${last || '(none)'}`;
         }
-        return this._report(run);
+        return this._report(run, pagesBack);
     }
 
     /** The left-running command in the Pi terminal named `name`, else the latest still running (else the latest). */
@@ -358,19 +374,25 @@ export class PairHands implements EditorHands, vscode.Disposable {
 
     /**
      * The output not yet shown (once an ended command's last chunk is in), and whether it still runs;
-     * an ended command is reported once, then forgotten.
+     * an ended command is reported once, then forgotten. A program still drawing a screen is shown as
+     * that screen, `pagesBack` screens up when asked: its raw stream is cursor moves, not lines.
      */
-    private async _report(run: TerminalRun): Promise<string> {
+    private async _report(run: TerminalRun, pagesBack = 0): Promise<string> {
         if (run.done) {
             await Promise.race([run.reading, sleep(LAST_CHUNK_MS)]);
+        }
+        const name = `"${run.terminal.name}"`;
+        if (!run.done && run.drawsScreen) {
+            run.shown = run.received;
+            return `${name} is still running. Its screen:\n${await run.screen().read(pagesBack)}`;
         }
         // Only what the buffer still holds of it.
         const unseen = run.received - run.shown;
         const fresh = cleanTerminalOutput(unseen >= run.output.length ? run.output : run.output.slice(run.output.length - unseen));
         run.shown = run.received;
-        const name = `"${run.terminal.name}"`;
         if (run.done) {
             this._leftRunning = this._leftRunning.filter((r) => r !== run);
+            run.dispose();
             const exit = run.exitCode === undefined ? 'unknown (the shell did not report it)' : String(run.exitCode);
             return `The command in ${name} has ended, exit code ${exit}.${fresh ? ` Its last output:\n${fresh}` : ''}`;
         }
@@ -400,9 +422,13 @@ class TerminalRun {
     lastDataAt = Date.now();
     done = false;
     exitCode: number | undefined;
+    /** The output moved the cursor or switched to the alternate screen: it is read as a screen, not as lines. */
+    drawsScreen = false;
     readonly reading: Promise<void>;
     readonly ended: Promise<void>;
     private readonly _end: () => void;
+    /** Made on the first screen read, from the output kept so far; fed every chunk after. */
+    private _screen: { term: HeadlessTerminal; reader: ScreenReader } | undefined;
 
     constructor(
         readonly terminal: vscode.Terminal,
@@ -412,12 +438,32 @@ class TerminalRun {
         this.ended = promise;
         this._end = resolve;
         this.reading = (async () => {
+            let tail = '';
             for await (const data of execution.read()) {
                 this.output = (this.output + data).slice(-MAX_OUTPUT_CHARS);
                 this.received += data.length;
                 this.lastDataAt = Date.now();
+                this.drawsScreen ||= drawsScreen(tail + data);
+                tail = data.slice(-SEQUENCE_TAIL);
+                this._screen?.term.write(data);
             }
         })().catch(() => undefined);
+    }
+
+    /** The program's screen, replayed from its output; keys go to the terminal. */
+    screen(): ScreenReader {
+        if (!this._screen) {
+            const term = new HeadlessTerminal({ cols: SCREEN_COLS, rows: SCREEN_ROWS, scrollback: SCREEN_SCROLLBACK, allowProposedApi: true });
+            term.write(this.output);
+            this._screen = { term, reader: new ScreenReader(term, (keys) => this.terminal.sendText(keys, false)) };
+        }
+        return this._screen.reader;
+    }
+
+    dispose(): void {
+        this._screen?.reader.dispose();
+        this._screen?.term.dispose();
+        this._screen = undefined;
     }
 
     finish(exitCode: number | undefined): void {

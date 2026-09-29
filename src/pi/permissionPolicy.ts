@@ -9,10 +9,15 @@
  * `select` titled like omp's own approval prompt (`Allow tool: <name>`, options Approve / Deny),
  * so the chat's dialog, the fallback modal and the voice agent's answer_worker all handle them the
  * same way.
+ *
+ * Gate → host: before a call that changes files runs (every call the gate does not block), the gate
+ * appends one NDJSON line `{"paths": [absolute paths]}` (`modifiedPaths`) to the file named by
+ * EDITS_FILE_ENV. The host reads it as the worker's file lock for the voice agent (src/pi/workerEdits.ts).
  */
 import type { PermissionLevel } from '../shared/protocol';
 
 export const PERMISSION_FILE_ENV = 'VSCODE_PI_PERMISSION_FILE';
+export const EDITS_FILE_ENV = 'VSCODE_PI_EDITS_FILE';
 export const PERMISSION_LEVELS: readonly PermissionLevel[] = ['ask', 'edit', 'plan', 'auto'];
 export const APPROVE_OPTION = 'Approve';
 export const DENY_OPTION = 'Deny';
@@ -119,6 +124,77 @@ export function toolTier(toolName: string, input: Record<string, unknown>): 'rea
         return removesOrMovesFiles(input) ? 'exec' : 'write';
     }
     return toolName === 'ast_edit' ? 'write' : 'exec';
+}
+
+/**
+ * Files an edit or write tool call changes, first as named: `path` / `file_path`, the `[path#tag]`
+ * section headers of an omp hashline patch and its `MV dest` lines, apply_patch file headers and
+ * `*** Move to:`, and `edits[].rename`.
+ */
+export function editPaths(args: unknown): string[] {
+    const a = (args ?? {}) as Record<string, unknown>;
+    const paths: string[] = [];
+    for (const key of ['path', 'file_path']) {
+        const value = a[key];
+        if (typeof value === 'string') {
+            paths.push(value);
+        }
+    }
+    if (typeof a.input === 'string') {
+        for (const m of a.input.matchAll(/^\[([^#\]\n]+)#[^\]\n]*\]/gm)) {
+            paths.push(m[1]);
+        }
+        for (const m of a.input.matchAll(/^[ \t]*MV[ \t]+(?:"([^"\n]+)"|(\S+))/gm)) {
+            paths.push(m[1] ?? m[2]);
+        }
+        for (const m of a.input.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)) {
+            paths.push(m[1]);
+        }
+    }
+    if (Array.isArray(a.edits)) {
+        for (const e of a.edits) {
+            const rename = (e as { rename?: unknown } | null)?.rename;
+            if (typeof rename === 'string') {
+                paths.push(rename);
+            }
+        }
+    }
+    return [...new Set(paths.map((p) => p.trim()).filter((p) => p.length > 0))];
+}
+
+/** A glob's folder before its first wildcard (`src/**` gives `src`); `.` when the glob starts with one. */
+function globBase(pattern: string): string {
+    const wildcard = pattern.search(/[*?[{]/);
+    if (wildcard < 0) {
+        return pattern;
+    }
+    const prefix = pattern.slice(0, wildcard);
+    const slash = Math.max(prefix.lastIndexOf('/'), prefix.lastIndexOf('\\'));
+    return slash < 0 ? '.' : prefix.slice(0, slash) || prefix.slice(0, 1);
+}
+
+/**
+ * Files and folders a call will change, as the tool names them (relative to the worker's cwd, or
+ * absolute): file edits (write tier) and edits that delete or move files. Commands are not parsed:
+ * `rm` or `mv` through bash, and other exec tools, give nothing. An lsp rename reports only its file.
+ */
+export function modifiedPaths(toolName: string, input: Record<string, unknown>): string[] {
+    if (toolTier(toolName, input) === 'read') {
+        return [];
+    }
+    let paths: string[];
+    if (toolName === 'write' || toolName === 'edit') {
+        paths = editPaths(input);
+    } else if (toolName === 'ast_edit') {
+        const targets = writeTargets(input);
+        // Without paths, ast_edit rewrites the whole working folder.
+        paths = targets.length > 0 ? targets.map(globBase) : ['.'];
+    } else if (toolName === 'lsp') {
+        paths = [input.file, input.action === 'rename_file' ? input.new_name : undefined].filter((p): p is string => typeof p === 'string' && p.length > 0);
+    } else {
+        return [];
+    }
+    return [...new Set(paths.filter((p) => !p.includes('://')))];
 }
 
 export function planBlockReason(toolName: string): string {

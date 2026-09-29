@@ -42,9 +42,8 @@ export function render(data: SettingsData): void {
     const app = document.getElementById('settings-app')!;
     // Saving a text field echoes the settings back and rebuilds the page; keep
     // the field being typed in (value, caret, focus) and the scroll position.
-    const focused = document.activeElement instanceof HTMLInputElement && document.activeElement.id
-        ? document.activeElement
-        : null;
+    const active = document.activeElement;
+    const focused = (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) && active.id ? active : null;
     const typing = focused && {
         id: focused.id,
         value: focused.value,
@@ -78,7 +77,7 @@ export function render(data: SettingsData): void {
     renderVoiceSkills();
     window.scrollTo(0, scrollY);
     const refocus = typing && document.getElementById(typing.id);
-    if (typing && refocus instanceof HTMLInputElement) {
+    if (typing && (refocus instanceof HTMLInputElement || refocus instanceof HTMLTextAreaElement)) {
         refocus.value = typing.value;
         refocus.focus();
         if (typing.selectionStart !== null && typing.selectionEnd !== null) {

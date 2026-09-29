@@ -6,6 +6,7 @@ import { cliCommand, piCliChildEnv, resolvePiCliInvocation } from './piCliPaths'
 import { PiHostTools } from './piHostTools';
 import { PermissionGateFile } from './permissionGate';
 import type { PermissionGateState } from './permissionPolicy';
+import type { WorkerEditLocks } from './workerEdits';
 import { isVscodeOnlySlash } from './slashCommandRouter';
 import type {
     PiAgentEvent,
@@ -301,6 +302,16 @@ export class PiRpcBridge {
     /** The worker's permission level for its next tool call (bridge started with the `permission` option). */
     setPermission(state: PermissionGateState): void {
         this._permissionGate?.write(state);
+    }
+
+    /** The files the worker's current task changes, as the permission gate reports them; undefined without the gate. */
+    workerEdits(): WorkerEditLocks | undefined {
+        return this._permissionGate?.edits();
+    }
+
+    /** The worker's task ended: its files are no longer locked. */
+    clearWorkerEdits(): void {
+        this._permissionGate?.clearEdits();
     }
 
     private _handleLine(line: string): void {

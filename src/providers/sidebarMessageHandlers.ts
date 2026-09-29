@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { updatePiDefaults } from '../pi/piAgentConfig';
 import { DEFAULT_CONVERSATION_TITLE } from '../shared/conversationTitle';
 import type { ClientMessage } from '../shared/protocol';
+import type { ExtensionUiAnswerer } from '../shared/extensionUi';
 import type { SidebarHost } from './sidebarHost';
 import { openPlanDocument, type PlanDocumentProvider } from './plan-document';
 import { SettingsPanel } from './settings-panel';
@@ -17,7 +18,12 @@ export type MessageHandler<T extends ClientMessage['type']> = (msg: ClientMessag
 export type MessageHandlers = { [T in ClientMessage['type']]?: MessageHandler<T> };
 
 /** The active tab's model, session, file changes and checkpoints, plan mode, and dialogs. */
-export function conversationHandlers(host: SidebarHost, planDocument: PlanDocumentProvider): MessageHandlers {
+export function conversationHandlers(
+    host: SidebarHost,
+    planDocument: PlanDocumentProvider,
+    /** The dialog cards of tabs showing their TUI: their answers are typed into it, not sent over RPC. */
+    tuiDialogs: ExtensionUiAnswerer & { owns(id: string): boolean },
+): MessageHandlers {
     return {
         selectModel: async () => {
             await vscode.commands.executeCommand('oh-my-pi-chater.selectModel');
@@ -188,12 +194,9 @@ export function conversationHandlers(host: SidebarHost, planDocument: PlanDocume
             );
         },
         extensionUiResponse: (msg, tab) => {
-            tab.session.rpcExtensionUi.respond({
-                id: msg.id,
-                cancelled: msg.cancelled,
-                value: msg.value,
-                confirmed: msg.confirmed,
-            });
+            // One card UI, two answer paths: typed into a TUI, or back over the tab's RPC.
+            const answerer: ExtensionUiAnswerer = tuiDialogs.owns(msg.id) ? tuiDialogs : tab.session.rpcExtensionUi;
+            answerer.respond({ id: msg.id, cancelled: msg.cancelled, value: msg.value, confirmed: msg.confirmed });
         },
     };
 }

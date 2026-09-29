@@ -62,6 +62,7 @@ body.vscode-high-contrast-light .vp {
     animation: vp-flow 1.4s linear infinite;
 }
 .vp[data-state="listening"]    { --state: var(--link); }
+.vp[data-state="soundDetected"] { --state: var(--link); }
 .vp[data-state="userSpeaking"] { --state: var(--link); }
 .vp[data-state="transcribing"] { --state: var(--link); }
 .vp[data-state="thinking"]     { --state: var(--warn); }
@@ -248,7 +249,7 @@ body.vscode-high-contrast-light .vp {
 .vp-cut-tag { margin-left: 5px; border-radius: 7px; color: var(--error); border: 1px solid color-mix(in srgb, var(--error) 40%, transparent); }
 .vp-barge { margin-right: 5px; border-radius: 7px; color: var(--user); border: 1px solid color-mix(in srgb, var(--user) 45%, transparent); }
 .vp-kind { margin-right: 5px; font-family: var(--font-mono); border-radius: 3px; background: color-mix(in srgb, var(--k, var(--warn)) 16%, transparent); color: color-mix(in srgb, var(--k, var(--warn)) 80%, var(--fg)); }
-.vp-kind.approval { --k: var(--warn); } .vp-kind.needs_input { --k: var(--warn); } .vp-kind.error { --k: var(--error); } .vp-kind.done { --k: var(--ok); } .vp-kind.research { --k: var(--link); } .vp-kind.progress { --k: var(--muted); } .vp-kind.opening { --k: var(--ok); }
+.vp-kind.approval { --k: var(--warn); } .vp-kind.needs_input { --k: var(--warn); } .vp-kind.stopped { --k: var(--warn); } .vp-kind.error { --k: var(--error); } .vp-kind.done { --k: var(--ok); } .vp-kind.research { --k: var(--link); } .vp-kind.progress { --k: var(--muted); } .vp-kind.opening { --k: var(--ok); }
 .vp-partial { color: var(--muted); font-style: italic; }
 .vp-err { color: var(--error); margin-top: 2px; }
 

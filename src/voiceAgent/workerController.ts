@@ -28,6 +28,7 @@ export interface WorkerController {
      * Throws when the tab is gone or the message is a slash command / `!` shell shortcut.
      */
     send(tabId: string, text: string, options: WorkerSendOptions): Promise<WorkerSendOutcome>;
+    /** A TUI tab gets its interrupt key (Escape) instead. */
     abort(tabId: string): Promise<void>;
     status(tabId: string): WorkerStatus;
     /** Dialogs waiting on the user, oldest first; omp tool approvals arrive here as `select` Approve/Deny. */
@@ -48,6 +49,21 @@ export interface WorkerController {
     permissionLevel(tabId: string): PermissionLevel;
     /** Manual (and Edit automatically, for commands and deletions): resolves true once the user approved the voice agent's change in the tab, false when they rejected it or the tab closed. */
     requestToolApproval(tabId: string, toolName: string, args: Record<string, unknown>): Promise<boolean>;
+    /**
+     * Of the files and folders the worker's running task changes (the permission gate reports each
+     * before it happens), those that overlap `paths` (workspace-relative or absolute): the same path,
+     * one inside the other. Workspace-relative for display; empty while the worker is idle. Not known
+     * for a tab in TUI mode (the TUI does not load the gate): always empty there.
+     */
+    lockedPaths(tabId: string, paths: string[]): string[];
+    /**
+     * A tab in TUI mode (`status().tui`): its screen as text, NO_CHANGE when it is what the last read
+     * returned; `pagesBack` looks that many screens further up (see ScreenReader.read). Throws for a
+     * chat tab, or a TUI that is not running.
+     */
+    readTuiScreen(tabId: string, pagesBack: number): Promise<string>;
+    /** Types `keys` into the tab's TUI as they are and returns its screen once redrawn. Throws as readTuiScreen. */
+    typeIntoTui(tabId: string, keys: string): Promise<string>;
 }
 
 export interface WorkerTask {
@@ -98,8 +114,13 @@ export interface WorkerStatus {
     /** Messages waiting in the tab's send queue. */
     queued: number;
     error?: string;
-    /** While awaiting: the instruction the worker is on (its latest user message) was sent by the voice agent. */
+    /** While awaiting: the instruction the worker is on (its latest user message) was sent by the voice agent. In a TUI tab: the last prompt typed into it was the voice agent's. */
     fromVoice?: boolean;
+    /**
+     * The tab shows the CLI's own TUI: its screen is the view of the worker (readTuiScreen), prompts are
+     * typed into it, and its questions (tool approvals) are on the screen, not in pendingRequests.
+     */
+    tui?: boolean;
 }
 
 export interface WorkerRequest {
@@ -117,6 +138,13 @@ export interface WorkerTurn {
     /** Worker's last text reply in that turn; empty while it is still working. */
     reply: string;
 }
+
+/**
+ * The worker events of a TUI tab, whose agent events the extension does not see: a run started, and a
+ * run stopped, with `screen`, the last lines of the TUI's screen (it finished, or waits for an answer).
+ */
+export const TUI_RUN_START = 'tui_run_start';
+export const TUI_RUN_END = 'tui_run_end';
 
 /** A worker agent event as the sidebar receives it (pi/omp RPC session events). */
 export interface WorkerEvent {

@@ -1,0 +1,30 @@
+│     Claude Opus 5.5      │                                                                     │
+│        anthropic         │                                                                     │
+│                          │ ─────────────────────────────────────────────────────────────────── │
+│                          │ Recent sessions                                                     │
+│                          │ No recent sessions                                                  │
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+╰──────────────────────────┴─────────────────────────────────────────────────────────────────────╯
+ Tip: Drop the word `ultrathink` in your message for harder multi-step reasoning — watch it glow
+      rainbow as you type
+
+
+ MCP server failed to connect: expo:expo [config:
+ ~/.claude/plugins/cache/claude-plugins-official/expo/1.13.6/.mcp.json]: HTTP 401:
+ {"error":"invalid_token","error_description":"Missing Authorization h…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.4.3 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+╭─ Branch name ────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ >                                                                                                │
+│                                                                                                  │
+│ enter submit  esc cancel                                                                         │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

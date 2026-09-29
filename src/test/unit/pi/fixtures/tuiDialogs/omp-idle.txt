@@ -1,0 +1,20 @@
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+╰──────────────────────────┴─────────────────────────────────────────────────────────────────────╯
+ Tip: Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `omp -c`
+      resumes the right one
+
+
+ Connecting to MCP servers: expo:expo…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.4.3 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ RESULT select: "Production"
+
+ π > ◒ Opus 5.5 > 🗑 probe > (sub) ▶──4%───────────────────────────────────────────────╎─┃────────1M─
+╰─

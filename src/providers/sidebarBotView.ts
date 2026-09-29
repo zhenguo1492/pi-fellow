@@ -24,10 +24,10 @@ export class SidebarBotView {
         return this._voiceStatus;
     }
 
-    /** The active tab shows the Bot view (never while it shows its TUI). */
+    /** The active tab shows the Bot view; in a TUI tab, in place of the terminal, whose TUI keeps running. */
     showsBotView(): boolean {
         const tab = this._host.tabs.get(this._host.activeTabId);
-        return !!tab && !tab.tuiMode && tab.botView;
+        return !!tab && tab.botView;
     }
 
     /** The Bot view with the voice agent offline: the composer takes no text, typed or dictated. */
@@ -52,11 +52,11 @@ export class SidebarBotView {
     async showBotView(preserveFocus: boolean, options: { onlyIfWorkerUnused?: boolean } = {}): Promise<void> {
         const tab = this._host.activeTab;
         // Same rule as restoring a session: no worker message yet means the tab is the voice agent's.
-        if (options.onlyIfWorkerUnused && (!tab || tab.isStreaming || tab.session.messages.length > 0)) {
+        // A TUI tab's messages are in its TUI, not in the idle RPC session: it keeps showing the terminal.
+        if (options.onlyIfWorkerUnused && (!tab || tab.tuiMode || tab.isStreaming || tab.session.messages.length > 0)) {
             return;
         }
-        // A tab showing its TUI has no Bot view; the voice agent still runs from its bar.
-        if (tab && !tab.botView && !tab.tuiMode) {
+        if (tab && !tab.botView) {
             tab.botView = true;
             this._host.sendStateSync();
         }
@@ -72,8 +72,22 @@ export class SidebarBotView {
     private _toggleBotView(tabId: string): void {
         const tab = this._host.tabs.get(tabId);
         if (!tab) return;
-        if (!tab.tuiMode) tab.botView = !tab.botView;
+        // A TUI tab toggles between its terminal and the Bot view; the TUI keeps running behind it.
+        tab.botView = !tab.botView;
         if (tabId === this._host.activeTabId) {
+            this._host.sendStateSync();
+        } else {
+            this._tabs.switchTab(tabId);
+        }
+    }
+
+    /** A fallback dialog card's button: the tab's terminal, not the Bot view over it, in view. */
+    private _showTui(tabId: string): void {
+        const tab = this._host.tabs.get(tabId);
+        if (!tab?.tuiMode) return;
+        tab.botView = false;
+        if (tabId === this._host.activeTabId) {
+            // The sync also focuses the terminal.
             this._host.sendStateSync();
         } else {
             this._tabs.switchTab(tabId);
@@ -106,6 +120,9 @@ export class SidebarBotView {
             },
             toggleBotView: (msg) => {
                 this._toggleBotView(msg.tabId ?? this._host.activeTabId);
+            },
+            showTui: (msg) => {
+                this._showTui(msg.tabId);
             },
         };
     }

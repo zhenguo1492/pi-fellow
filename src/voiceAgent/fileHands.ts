@@ -17,7 +17,7 @@ export interface WorkspacePath {
 }
 
 /**
- * The voice agent's file operations in pair mode (docs/voice-pair-agent-cursor.md §13): create files
+ * The voice agent's file operations (docs/voice-pair-agent-cursor.md §13): create files
  * and folders, rename, delete (to the trash, or after a backup when the trash fails), save and close.
  * Every path must lie in a workspace folder, also once symbolic links are followed. Deleting asks the
  * user first; that is HostToolRouter's job, this only checks and does it.

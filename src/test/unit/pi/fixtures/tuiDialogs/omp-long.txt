@@ -1,0 +1,30 @@
+ {"error":"invalid_token","error_description":"Missing Authorization h…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.4.3 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+╭─ Pick a number ──────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│                                                                                                  │
+│  ❯ Option 1                                                                                      │
+│    Option 2                                                                                      │
+│    Option 3                                                                                      │
+│    Option 4                                                                                      │
+│    Option 5                                                                                      │
+│    Option 6                                                                                      │
+│    Option 7                                                                                      │
+│    Option 8                                                                                      │
+│    Option 9                                                                                      │
+│    Option 10                                                                                     │
+│    Option 11                                                                                     │
+│    Option 12                                                                                     │
+│    Option 13                                                                                     │
+│    Option 14                                                                                     │
+│    Option 15                                                                                     │
+│    (1/16)  Type to search                                                                        │
+│                                                                                                  │
+│ up/down navigate  enter select  esc cancel                                                       │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

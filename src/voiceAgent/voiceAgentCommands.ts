@@ -15,11 +15,12 @@ import {
 } from '../voice/voiceSettings';
 import { STT_MODEL, TTS_MODEL_ID, TTS_VOICE } from '../voice/builtinEngine/models';
 import { explainVoiceError } from '../voice/voiceErrors';
+import { speechGate } from '../voice/voiceprint';
 import { SettingsPanel } from '../providers/settings-panel';
 import { FileEditorTracker } from '../utils/fileEditor';
+import { builtinVoiceSkills, resolveVoiceSkills } from './builtinSkills';
 import { AgentCursor } from './agentCursor';
 import { DebugDriver } from './debugDriver';
-import type { AgentMode } from './hostTools';
 import { PairHands } from './pairHands';
 import { OutputReader } from './vscodeOutput';
 import { WorkerFocusTracker } from './workerFocus';
@@ -39,6 +40,7 @@ import {
 import type { SkillInfo, VoiceLevelSource, VoiceServiceCheck } from '../shared/protocol';
 import { ActiveVoiceWindow } from './activeWindow';
 import type { ArbiterSettings, Narration } from './floorArbiter';
+import type { Humor } from './tone';
 import { VoiceAgent, type VoiceTurnListener, type VoiceTurnResult } from './voiceAgent';
 import { TTS_LANGUAGE_HANDLING } from './tts';
 import { ReplayPlayer, type ReplayOutput } from './replay';
@@ -170,12 +172,12 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         log,
         vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<boolean>('followPi', true),
     );
-    /** The voice agent's hands in the editor, terminal and debugger: open_file, list_viewers, open_with and read_output always, the rest in pair mode. */
+    /** The voice agent's hands in the editor, terminal and debugger. */
     const debug = new DebugDriver(root, cursor);
     const outputs = new OutputReader(context.logUri, () => debug.consoles());
     const hands = new PairHands(root, cursor, debug, outputs);
-    /** A new voice agent always starts in pair mode. */
-    const setMode = (mode: AgentMode) => getAgent().setMode(mode);
+    /** Skills shipped with the extension, always loaded next to the chosen ones. */
+    const builtinSkills = builtinVoiceSkills(context.extensionPath);
     /** What the worker reads and writes shows as Pi's focus while the voice agent is on. */
     let workerFocus: WorkerFocusTracker | undefined;
     /** Marks the anchor in the output channel; in a text turn the agent points at once, in voice mode as the sentence plays. */
@@ -252,7 +254,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     });
 
     // The Bot view, drawn by a chat tab in place of its conversation.
-    const view = new VoicePanel(store, worker, { phase: viewPhase, mode: () => agent?.mode ?? 'pair', engines, agent: () => agent, replay }, chat);
+    const view = new VoicePanel(store, worker, { phase: viewPhase, engines, agent: () => agent, replay }, chat);
 
     /** The robot status line, follow button and composer mic follow voice mode and Pi's focus. */
     const publishStatus = () =>
@@ -260,7 +262,6 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             phase: viewPhase(),
             starting,
             muted: voiceMode?.muted ?? false,
-            mode: agent?.mode ?? 'pair',
             following: cursor.following,
             ...(voiceMode ? { unavailable: voiceMode.unavailable } : {}),
         });
@@ -367,26 +368,18 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 model: config.get<string>('model', '').trim(),
                 thinking: config.get<string>('thinking', 'off'),
                 // Read at every process start, so a change applies once voice starts again.
-                skills: async () => {
-                    const names = new Set(vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<string[]>('skills', []));
-                    if (names.size === 0) {
-                        return [];
-                    }
-                    const installed = await installedSkills().catch((err: unknown) => {
-                        log(`Could not list the installed skills: ${err instanceof Error ? err.message : String(err)}`);
-                        return undefined;
-                    });
-                    // Without the list omp still finds them by name; pi, which needs their files, loads none.
-                    if (!installed) {
-                        return [...names].map((name) => ({ name }));
-                    }
-                    const chosen = installed.filter((skill) => names.has(skill.name));
-                    const missing = [...names].filter((name) => !chosen.some((skill) => skill.name === name));
-                    if (missing.length > 0) {
-                        log(`Voice skills not installed, not loaded: ${missing.join(', ')}.`);
-                    }
-                    return chosen.map((skill) => ({ name: skill.name, filePath: skill.filePath || undefined }));
-                },
+                skills: () =>
+                    resolveVoiceSkills(
+                        builtinSkills,
+                        vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<string[]>('skills', []),
+                        () =>
+                            installedSkills().catch((err: unknown) => {
+                                log(`Could not list the installed skills: ${err instanceof Error ? err.message : String(err)}`);
+                                return undefined;
+                            }),
+                        log,
+                    ),
+                extraPrompt: () => vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<string>('extraPrompt', ''),
                 confirmBeforeDispatch: () =>
                     vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<boolean>('confirmBeforeDispatch', true),
                 arbiter: (): ArbiterSettings => {
@@ -398,6 +391,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                     };
                 },
                 names: speakerNames,
+                humor: () => vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<Humor>('humor', 'occasional'),
                 onProactiveTurn: (kind, task) => {
                     const reply = store.beginReply({ proactive: kind });
                     const listener = proactiveListener(kind, task, reply.listener);
@@ -415,15 +409,6 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 editor: () => fileEditor.editor && editorSnapshot(fileEditor.editor),
                 onRead: (target) => cursor.activity('reading', target),
                 hands,
-                onModeChange: (mode) => {
-                    store.addSystem(
-                        mode === 'pair'
-                            ? 'Pair mode: the voice agent now edits files and runs commands itself, and does not direct the worker.'
-                            : 'Delegate mode: the voice agent hands the work to the omp worker again.',
-                    );
-                    publishStatus();
-                    view.refresh();
-                },
                 log,
             });
             workerFocus = new WorkerFocusTracker(worker, root, (kind, target) => cursor.activity(kind, target));
@@ -533,6 +518,8 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 stt,
                 tts,
                 unavailable,
+                // Only your voice is a turn (and can cut a reply off), once you have a voiceprint turned on.
+                gate: speechGate,
                 turnStopSecs: config.get<number>('turnStopSecs', 1.2),
                 vadConfidence: voice.vadConfidence,
                 chromeArgs: options.chromeArgs ?? [],
@@ -671,6 +658,10 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             if (e.affectsConfiguration('oh-my-pi-chater.voice') || e.affectsConfiguration('oh-my-pi-chater.voiceAgent.tts')) {
                 void serviceSync?.sync();
             }
+            // The system prompt is read only when the process starts.
+            if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent.extraPrompt')) {
+                void agent?.restartProcess();
+            }
         }),
         chat.onVoiceAction((action) => {
             switch (action.type) {
@@ -685,9 +676,6 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                     return;
                 case 'hush':
                     voiceMode?.hush();
-                    return;
-                case 'mode':
-                    setMode(action.mode);
                     return;
                 case 'follow':
                     cursor.setFollowing(action.following);
@@ -719,8 +707,6 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.say', say),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.clearHighlight', () => cursor.clear()),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.agentFocus', () => cursor.current()),
-        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.toggleMode', () => setMode(agent?.mode === 'omp' ? 'pair' : 'omp')),
-        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.mode', () => agent?.mode ?? 'pair'),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.takeProactiveTurns', () => {
             const taken = proactiveTurns;
             proactiveTurns = [];

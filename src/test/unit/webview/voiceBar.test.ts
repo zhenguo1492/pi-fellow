@@ -5,11 +5,11 @@ import type { VoiceStatus } from '../../../shared/voiceViewProtocol';
 const vscode = vi.hoisted(() => ({ postMessage: vi.fn() }));
 vi.mock('../../../webview/vscodeApi', () => ({ vscode }));
 
-import { applyVoiceBarStatus, bindVoiceBar, setVoiceReadiness, voiceBarHtml } from '../../../webview/voiceBar';
+import { applyVoiceBarStatus, bindVoiceBar, setBotViewShown, setVoiceBarBot, setVoiceReadiness, voiceBarHtml } from '../../../webview/voiceBar';
 
 const STT_DOWN = "The speech-to-text service isn't running at 127.0.0.1:8010.";
 const TTS_DOWN = 'Text-to-speech is not set up: choose Built-in, a cloud service or your server in Settings → Voice.';
-const on = (over: Partial<VoiceStatus> = {}): VoiceStatus => ({ phase: 'listening', starting: false, muted: false, mode: 'pair', following: false, ...over });
+const on = (over: Partial<VoiceStatus> = {}): VoiceStatus => ({ phase: 'listening', starting: false, muted: false, following: false, ...over });
 
 const $ = <T extends HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 const tag = (service: 'stt' | 'tts') => $(`[data-service="${service}"]`);
@@ -93,5 +93,72 @@ describe('voice bar with a speech service not working', () => {
         expect(tag('stt').hidden).toBe(false);
         expect(tag('stt').title).toContain('NotFoundError');
         expect(label()).toBe('Online');
+    });
+});
+
+describe('voice bar label', () => {
+    it("is the voice agent's name from the settings while offline, and what it is doing while on", () => {
+        setVoiceBarBot('Alfred', '<svg></svg>');
+        expect(label()).toBe('Alfred');
+        applyVoiceBarStatus(on({ phase: 'thinking' }));
+        expect(label()).toBe('Thinking');
+        applyVoiceBarStatus(undefined);
+        setVoiceBarBot('Jeeves', '<svg></svg>');
+        expect(label()).toBe('Jeeves');
+    });
+});
+
+describe('voice bar robot button', () => {
+    const toggles = () => vscode.postMessage.mock.calls.filter(([msg]) => msg.type === 'toggleBotView').length;
+
+    it('switches to the Bot view on start and back to the worker view on stop', () => {
+        const robot = $<HTMLButtonElement>('[data-act="robot"]');
+        setBotViewShown(false);
+        robot.click();
+        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'voiceAgent', action: { type: 'start' } });
+        expect(toggles()).toBe(1);
+
+        // Starting while already in the Bot view stays there.
+        setBotViewShown(true);
+        vscode.postMessage.mockClear();
+        robot.click();
+        expect(toggles()).toBe(0);
+
+        // Stopping from the Bot view goes back to the worker view.
+        applyVoiceBarStatus(on());
+        robot.click();
+        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'voiceAgent', action: { type: 'stop' } });
+        expect(toggles()).toBe(1);
+
+        // Stopping from the worker view stays there.
+        setBotViewShown(false);
+        vscode.postMessage.mockClear();
+        robot.click();
+        expect(toggles()).toBe(0);
+
+        // Still starting: no start or stop, but the conversation is shown.
+        setBotViewShown(false);
+        applyVoiceBarStatus(on({ phase: 'off', starting: true }));
+        vscode.postMessage.mockClear();
+        robot.click();
+        expect(vscode.postMessage.mock.calls).toEqual([[{ type: 'toggleBotView' }]]);
+    });
+});
+
+describe('voice bar Bot view button in a TUI tab', () => {
+    const panel = () => $<HTMLButtonElement>('[data-act="panel"]');
+
+    it('shows the Bot view over the terminal and says the way back leads to the running TUI', () => {
+        setBotViewShown(false, true);
+        expect(panel().title).toMatch(/^Show the voice agent conversation/);
+        panel().click();
+        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'toggleBotView' });
+
+        setBotViewShown(true, true);
+        expect(panel().title).toBe('Back to the terminal (TUI); it kept running');
+        expect(panel().getAttribute('aria-pressed')).toBe('true');
+
+        setBotViewShown(true, false);
+        expect(panel().title).toBe('Back to the worker conversation');
     });
 });

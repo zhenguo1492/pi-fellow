@@ -10,12 +10,15 @@ import type { VoiceSpeakers } from './voiceSpeakers';
 
 /**
  * Voice mode phase as shown; `off` when voice mode is not running, `muted` when the mic is muted
- * while listening. `synthesizing`: the reply's first sentence is with TTS and nothing plays yet.
+ * while listening. `soundDetected`: a sound is heard that the voiceprint check has not yet found to
+ * be the user's (`userSpeaking` once it has). `synthesizing`: the reply's first sentence is with TTS
+ * and nothing plays yet.
  */
 export type VoicePhase =
     | 'off'
     | 'standby'
     | 'listening'
+    | 'soundDetected'
     | 'userSpeaking'
     | 'transcribing'
     | 'thinking'
@@ -38,16 +41,11 @@ export interface VoiceStatus {
     /** Voice mode is starting: the phase is still `off`. */
     starting: boolean;
     muted: boolean;
-    /** `omp`: the voice agent directs the worker; `pair`: it edits and runs commands itself. */
-    mode: 'omp' | 'pair';
     /** The editor follows Pi's focus (AgentCursor): opens and scrolls to what Pi points at, reads or writes. */
     following: boolean;
     /** While voice mode is on: the speech services it runs without; absent while off or starting. */
     unavailable?: VoiceUnavailable;
 }
-
-/** What the UI calls each mode. The values stay `omp` / `pair`: the voice model's set_mode tool and saved state use them. */
-export const VOICE_MODE_LABEL: Record<VoiceStatus['mode'], string> = { omp: 'Delegate', pair: 'Pair' };
 
 /** Voice mode is on or starting: the composer's text can go to the voice agent. */
 export function voiceIsOn(status: VoiceStatus | undefined): boolean {
@@ -65,7 +63,6 @@ export type VoiceAgentAction =
     | { type: 'stop' }
     | { type: 'mute'; muted: boolean }
     | { type: 'hush' }
-    | { type: 'mode'; mode: 'omp' | 'pair' }
     /** The follow button in the status line: whether the editor follows Pi's focus; remembered in the `followPi` setting. */
     | { type: 'follow'; following: boolean }
     /** Typed in the composer for the voice agent: goes in like speech. */
@@ -124,7 +121,7 @@ export interface VoiceLatency {
 }
 
 /** Why the voice agent spoke up on its own (design §5.9); `opening`: it speaks first as voice comes on. */
-export type VoiceObservationKind = 'approval' | 'needs_input' | 'error' | 'done' | 'research' | 'progress' | 'opening';
+export type VoiceObservationKind = 'approval' | 'needs_input' | 'stopped' | 'error' | 'done' | 'research' | 'progress' | 'opening';
 
 /** One sentence of a spoken reply: queued for TTS, playing, fully played, or cut off before the user heard it all. */
 export interface VoiceSentence {
@@ -249,8 +246,6 @@ export interface VoiceUsageTotals {
 
 export interface VoiceViewState {
     phase: VoicePhase;
-    /** `omp`: the voice agent directs the worker; `pair`: it edits and runs commands itself. */
-    mode: 'omp' | 'pair';
     engines: VoiceEngines;
     /** The loaded voice context's totals; absent before its first turn. */
     usage?: VoiceUsageTotals;

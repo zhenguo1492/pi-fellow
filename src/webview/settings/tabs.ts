@@ -2,6 +2,7 @@ import type { AgentBackend } from '../../shared/protocol';
 import { vscode } from './api';
 import { el, showToast } from './dom';
 import { settingsState } from './state';
+import { switchVoiceSubtab, voiceSubtabOf } from './voiceTabs';
 
 export type SettingsTabId = 'general' | 'auth' | 'voice' | 'packages' | 'skills' | 'mcp' | 'commands';
 
@@ -22,6 +23,9 @@ const SECTION_TO_TAB: Record<string, SettingsTabId> = {
     voice: 'voice',
     stt: 'voice',
     tts: 'voice',
+    'voice-listening': 'voice',
+    voiceprint: 'voice',
+    'voice-agent': 'voice',
     auth: 'auth',
     defaults: 'auth',
     packages: 'packages',
@@ -38,6 +42,11 @@ export function scrollToSettingsSection(section: string): void {
     }
     requestAnimationFrame(() => {
         const found = document.getElementById(`section-${section}`);
+        // On the Voice tab: the sub-tab that holds it.
+        const subtab = tab === 'voice' ? voiceSubtabOf(found) : undefined;
+        if (subtab) {
+            switchVoiceSubtab(subtab, false);
+        }
         // A section of a Voice setup not shown (e.g. the server fields on Built-in): the setup choice instead.
         const target = found?.closest('[hidden]') && tab === 'voice' ? document.getElementById('section-voice') : found;
         if (target) {

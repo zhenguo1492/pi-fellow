@@ -42,22 +42,6 @@ export function readTarget(args: unknown): FocusTarget | undefined {
     return { path };
 }
 
-/** Files an edit or write tool call changes: `path` / `file_path`, or the `[path#tag]` section headers of an omp patch. */
-export function editPaths(args: unknown): string[] {
-    const a = (args ?? {}) as Record<string, unknown>;
-    for (const key of ['path', 'file_path']) {
-        const value = a[key];
-        if (typeof value === 'string' && value) {
-            return [value];
-        }
-    }
-    if (typeof a.input !== 'string') {
-        return [];
-    }
-    const paths = [...a.input.matchAll(/^\[([^#\]\n]+)#[^\]\n]*\]/gm)].map((m) => m[1].trim());
-    return [...new Set(paths)];
-}
-
 /**
  * Lines of `after` that differ from `before`, 1-based: from the first changed line to the last.
  * A pure deletion points at the line after the cut; unchanged text gives undefined; a new file is all of it.

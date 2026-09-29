@@ -1,0 +1,30 @@
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package Updates Available
+ Package updates are available. Run pi update --extensions
+ Packages:
+ - @narumitw/pi-btw
+ - pi-mcp-adapter
+ - pi-goal-x
+ - @plannotator/pi-extension
+ - @quintinshaw/pi-dynamic-workflows
+ - pi-subagents
+ - pi-provider-antigravity
+ - pi-pinball
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ Commit message
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ enter submit  shift+enter/ctrl+j newline  escape/ctrl+c cancel  ctrl+g external editor
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+/tmp/probe
+$0.000 (sub) 0.0%/1.0M (auto)                                  (antigravity) gemini-3.8-flash • high
+🎯 (on)

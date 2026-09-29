@@ -1,886 +1,889 @@
-# 语音结对智能体（Voice Agent）设计文档
+# Voice Pair Agent (Voice Agent) Design Document
 
-状态：P1（指挥 worker）、主动播报、音频环路和语音视图已在扩展里实现并实测（2026-09-25）；进度见 §14.1，交接说明见 [`voice-agent-handoff.md`](./voice-agent-handoff.md)
+Status: P1 (directing the worker), proactive narration, the audio loop, and the voice view are implemented in the extension and tested in practice (2026-09-25); see §14.1 for progress.
 
-原型：已验证的语音环路在独立项目 `voice-loop-prototype` 里（本机 `~/source/ai/voice-loop-prototype`，从本仓库 f8d8f06 抽出）。下文的"原型文档"指该项目的 `docs/voice-loop-prototype.md`。
+Prototype: the validated voice loop lives in the standalone project `voice-loop-prototype` (locally at `~/source/ai/voice-loop-prototype`, extracted from this repo at f8d8f06). "Prototype doc" below refers to that project's `docs/voice-loop-prototype.md`.
 
-## 1. 目标
+## 1. Goals
 
-在 VS Code 扩展中提供一个**实时语音聊天机器人**。它和用户持续对话，同时指挥 omp/pi 干活。
+Provide a **real-time voice chatbot** inside the VS Code extension. It holds an ongoing conversation with the user while directing omp/pi to do the work.
 
-两个智能体，职责严格分开：
+Two agents with strictly separated responsibilities:
 
-| | 语音智能体（Voice Agent） | 工作智能体（Worker） |
+| | Voice agent (Voice Agent) | Worker agent (Worker) |
 |---|---|---|
-| 身份 | 坐在旁边的搭档，"看着 omp 干活并和你聊" | 真正写代码的 omp/pi 会话（即现有侧边栏会话） |
-| 上下文 | 独立：与用户的对话 + 注入的观察（worker 进展、编辑器状态） | 自己的编程上下文，不感知语音 |
-| 能力 | 理解意图、给 worker 派指令/纠偏/叫停、播报进展、完成后总结、就当前代码和文档讨论 | 读写代码、运行命令 |
-| 写代码 | **不写**，只读 | 写 |
-| 发声 | 是 | 否 |
+| Identity | A partner sitting beside you, "watching omp work and chatting with you" | The omp/pi session that actually writes code (i.e. the existing sidebar session) |
+| Context | Independent: the conversation with the user + injected observations (worker progress, editor state) | Its own coding context; unaware of voice |
+| Capabilities | Understand intent; edit files, run commands, and debug small jobs itself; dispatch heavy jobs to the worker, course-correct, stop it; narrate progress; summarize on completion; discuss the current code and docs | Read and write code, run commands |
+| Writes code | Yes, small jobs; heavy jobs go to the worker | Yes |
+| Speaks | Yes | No |
 
-### 1.1 功能
+### 1.1 Features
 
-1. 语音闲聊与讨论，可随时打断机器人（barge-in）。
-2. 理解意图后给 worker 派任务；干活途中可插话纠偏、排队追加、叫停。
-3. worker 干活时，简要说明它正在做什么；不刷屏，不念代码。
-4. worker 完成时做一次总结：做了什么、改了哪些文件、测试结果、遗留问题。
-5. worker 需要确认/选择/输入时，由语音智能体转述并收集用户回答。
-6. 结对编程：基于用户当前打开的文件、选区、可见范围讨论代码和文档，需要时自行读取文件。
+1. Voice chat and discussion; the user can interrupt the bot at any time (barge-in).
+2. Dispatch tasks to the worker once intent is understood; while it works, the user can cut in to course-correct, queue follow-ups, or stop it.
+3. While the worker works, briefly explain what it is doing; no flooding, no reading code aloud.
+4. When the worker finishes, give one summary: what was done, which files changed, test results, open issues.
+5. When the worker needs a confirmation/choice/input, the voice agent relays it and collects the user's answer.
+6. Pair programming: discuss code and docs based on the user's currently open file, selection, and visible range, reading files itself when needed.
 
-### 1.2 非目标（首版）
+### 1.2 Non-goals (first version)
 
-- worker 不直接发声。
-- 结对模式是默认模式：语音智能体自己改文件、在终端里跑命令，不指挥 worker。委派模式下，它不直接修改文件，所有写操作都经 worker 执行。见 `voice-pair-agent-cursor.md` §11。界面上两个模式叫“委派”和“结对”（英文界面 Delegate / Pair）；代码、设置、`set_mode` 工具参数和每轮的 `<mode name="…"/>` 里仍是 `omp` / `pair`，不改，免得打断已保存的状态和语音模型的工具调用。
-- 模式按任务选（`hostTools.ts` 的 `set_mode`）：在结对模式里，用户交代一件事时语音智能体先判断轻重。小而快的改动（一个函数或几块代码，一两个文件）它当场自己做；重活（改很多文件、大重构、长时间跑测试、适合多个子智能体并行的事）它自己切到委派（`set_mode` 带 `auto=true`），简短说一句，把任务交给 worker（worker 可以自己开子智能体），做完再切回结对。切到委派总是立即生效。切回结对通常要用户在之后一轮里确认（两次调用）；唯一例外是语音智能体自己从结对切到委派的那一次，活干完后它可以直接切回结对，不用确认。这个“自己切走的”标记在用户用界面切换模式、或切回结对时清除；用户要求（口头或界面）切到委派的，切回结对仍要确认。
-- 不做远程通话（WebRTC/电话）；只支持本机麦克风和扬声器。
-- 首版不做回声消除（AEC），见 §12。
+- The worker does not speak directly.
+- The voice agent edits files, runs commands in the terminal, and debugs itself, and it directs the worker; see `voice-pair-agent-cursor.md` §11. It sizes up each job: small, quick changes (one function or a few blocks of code, one or two files) it does on the spot; heavy work (many files, large refactors, long test runs, things suited to several subagents in parallel) it hands to the worker with `tell_worker`, saying so in a short sentence (the worker can spawn its own subagents).
+- Worker file lock: while the worker's running task changes a file, the voice agent's file tools refuse that file until the task ends. The permission gate (`src/piExtension/permissionGate.ts`) reports each file-changing worker tool call to the host before it runs; `HostToolRouter._workerLock` checks `edit_file`, `create_file`, `delete_file`, `rename_file`, and `save_file` against it (`voice-pair-agent-cursor.md` §11). Known gaps: `rm` / `mv` / `sed -i` through bash are not reported; TUI tabs do not load the gate, so while a TUI tab's task runs, all of the voice agent's file changes are refused.
+- No remote calls (WebRTC/phone); only the local microphone and speakers are supported.
+- No acoustic echo cancellation (AEC) in the first version; see §12.
 
-## 2. 已验证事实
+## 2. Verified Facts
 
-本节只记录实测结果（2026-09-24，omp v18.2.11，本机）。
+This section records only measured results (2026-09-24, omp v18.2.11, local machine).
 
-### 2.1 用第二个 omp RPC 进程充当语音智能体：可行
+### 2.1 Using a second omp RPC process as the voice agent: feasible
 
-启动命令：
+Launch command:
 
 ```
 omp --mode rpc --no-tools --no-skills --no-rules --no-extensions --no-lsp \
-    --no-session --no-title --thinking off --system-prompt "<语音智能体提示词>"
+    --no-session --no-title --thinking off --system-prompt "<voice agent prompt>"
 ```
 
-然后发送 `set_host_tools`，注册宿主侧工具 `dispatch_task`，并将 `loadMode` 设为 `essential`。
+Then send `set_host_tools` to register the host-side tool `dispatch_task`, with `loadMode` set to `essential`.
 
-| 测量项 | 结果 |
+| Measurement | Result |
 |---|---|
-| 进程启动 → `ready` 帧 | 0.28 s |
-| `set_host_tools` | 成功，响应 `toolNames: ["dispatch_task"]` |
-| 默认模型（`get_state`） | `anthropic/claude-opus-5-5`，即 omp 当前默认模型 |
-| 纯闲聊一轮 | 首个 text_delta 0.7 s，整轮 1.78 s |
-| 派活一轮（"让它把 README 版本号改成 0.3.0"） | 2.82 s 发出 `host_tool_call`；回传结果后，4.05 s 出首句 |
+| Process start → `ready` frame | 0.28 s |
+| `set_host_tools` | Succeeded; response `toolNames: ["dispatch_task"]` |
+| Default model (`get_state`) | `anthropic/claude-opus-5-5`, i.e. omp's current default model |
+| One pure-chat turn | First text_delta 0.7 s, whole turn 1.78 s |
+| One dispatch turn ("have it change the README version to 0.3.0") | `host_tool_call` emitted at 2.82 s; after returning the result, first sentence at 4.05 s |
 
-模型自主把口语改写成了结构化的 worker 指令，包括范围约束和自检步骤。
+The model on its own rewrote the spoken request into a structured worker instruction, including scope constraints and self-check steps.
 
-结论如下：
+Conclusions:
 
-- 语音智能体的 LLM **直接复用 omp 的登录凭据、provider 和模型体系**，扩展不需要自己实现 LLM 客户端。
-- `--no-tools` 不影响 host tools 的注册与调用。
-- 流式文本来自 `message_update.assistantMessageEvent.text_delta`，一轮结束以 `agent_end` 为准。
-- host tools 属于 omp 的 RPC 扩展，pi 的 RPC 没有（见 omp `rpc.md`「Pi-family adapter」一节）。最初因此语音智能体进程始终用 omp。
-- **2026-09-26 起 pi 也可以**：语音进程跟随当前后端。后端是 pi 时，`PiRpcBridge` 用 `--extension` 加载扩展自带的 Pi 扩展（`src/piExtension/hostTools.ts`，打包为 `out/pi-extension/hostTools.js`，用户不用装任何东西），模拟 host tools，协议见 `src/pi/hostToolsProtocol.ts`：
-  - 工具定义写进临时 JSON 文件，路径经环境变量传给 Pi 扩展；扩展加载时注册，所以 `new_session` / `switch_session` 重建扩展运行时后工具仍在。之后改工具集时重写文件，再发 `/vscode-host-tools` 让它重读（先用 `get_commands` 确认命令存在，免得这行字当成 prompt 发给模型）。
-  - 工具调用 = 标题为 `vscode-host-tool-call` 的 `input` 对话框，参数在 `placeholder` 里；bridge 把它翻译成 `host_tool_call`，`host_tool_result` 则翻译成 `extension_ui_response`。取消 = 键为 `vscode-host-tool-cancel` 的 `setStatus`，翻译成 `host_tool_cancel`。这些帧不会到达 `RpcExtensionUiHandler`。
-  - pi 的 `--tools` 白名单同时过滤扩展工具，所以语音进程的白名单要带上宿主工具名；只读内置工具是 `read,grep,find`（pi 没有 `glob`，`--append-system-prompt` 告诉模型 find 就是 glob）。pi 的 `agent_end` 之后还可能重试，一轮以 `agent_settled` 结束。
-  - pi 的语音进程和 research **不加 `--no-extensions`**（omp 照旧加）：pi 的模型 provider 可以来自 pi 包（如 `pi-provider-antigravity`），不加载扩展时 `--model antigravity/…` 直接以 "Model not found" 退出，语音一句话都答不了（2026-09-26 实测）。用户扩展的工具仍被 `--tools` 白名单挡在外面，它们弹出的阻塞对话框由 VoiceLlm 自动取消。
-  - 规则文件（`AGENTS.md` / `CLAUDE.md`）：起初 pi 加 `--no-context-files`、omp 加 `--no-rules` 不读，因为其中给写代码的智能体的回复格式规则会被语音智能体照做并念出来（2026-09-26 实测：一条用户级规则让每句回复都带上固定前缀）。2026-09-27 改为语音进程和 research 都加载，以便知道项目结构；语音提示词说明其中的回复格式规则不适用于朗读。
-  - 一轮跑不起来时（语音进程启动失败、没有会话 tab 等），`VoiceAgent.say` 不抛错，而是用带 `error` 的结果走 `onEnd`：Bot 视图里这条回复显示 ⚠ 错误，不会一直停在“…”。
-  - 实测（2026-09-26，pi 0.87.1，`openai-codex/gpt-5.5`）：宿主工具调用、错误结果、`new_session` 与 `switch_session` 之后再调用、打断时 `host_tool_cancel` 都正常；普通会话（不带 hostTools 选项）不加载该扩展。
+- The voice agent's LLM **directly reuses omp's login credentials, providers, and model system**; the extension does not need its own LLM client.
+- `--no-tools` does not affect registering and calling host tools.
+- Streaming text comes from `message_update.assistantMessageEvent.text_delta`; a turn ends at `agent_end`.
+- Host tools are an omp RPC extension; pi's RPC does not have them (see the "Pi-family adapter" section of omp's `rpc.md`). Originally, for this reason, the voice agent process always used omp.
+- **Since 2026-09-26 pi works too**: the voice process follows the current backend. When the backend is pi, `PiRpcBridge` uses `--extension` to load the Pi extension bundled with the extension (`src/piExtension/hostTools.ts`, packaged as `out/pi-extension/hostTools.js`; the user installs nothing), which emulates host tools; the protocol is in `src/pi/hostToolsProtocol.ts`:
+  - Tool definitions are written to a temporary JSON file whose path is passed to the Pi extension via an environment variable; the extension registers them on load, so the tools survive `new_session` / `switch_session` rebuilding the extension runtime. When the tool set changes later, the file is rewritten and `/vscode-host-tools` is sent to make it reload (first confirming the command exists via `get_commands`, so this line is not sent to the model as a prompt).
+  - Tool call = an `input` dialog titled `vscode-host-tool-call`, with arguments in `placeholder`; the bridge translates it into `host_tool_call`, and translates `host_tool_result` into `extension_ui_response`. Cancel = a `setStatus` with key `vscode-host-tool-cancel`, translated into `host_tool_cancel`. These frames never reach `RpcExtensionUiHandler`.
+  - pi's `--tools` allowlist also filters extension tools, so the voice process's allowlist must include the host tool names; the read-only built-in tools are `read,grep,find` (pi has no `glob`; `--append-system-prompt` tells the model that find is glob). pi may still retry after `agent_end`; a turn ends at `agent_settled`.
+  - pi's voice process and research **do not get `--no-extensions`** (omp still does): pi's model providers can come from pi packages (e.g. `pi-provider-antigravity`); without loading extensions, `--model antigravity/…` exits immediately with "Model not found" and voice cannot answer a single sentence (measured 2026-09-26). User extensions' tools are still blocked by the `--tools` allowlist, and blocking dialogs they pop up are auto-cancelled by VoiceLlm.
+  - Rule files (`AGENTS.md` / `CLAUDE.md`): initially pi got `--no-context-files` and omp got `--no-rules` so they were not read, because reply-format rules in them meant for the coding agent would be followed by the voice agent and read aloud (measured 2026-09-26: a user-level rule made every reply start with a fixed prefix). On 2026-09-27 this changed so that both the voice process and research load them, in order to know the project structure; the voice prompt states that reply-format rules in them do not apply to speech.
+  - When a turn cannot run (voice process failed to start, no session tab, etc.), `VoiceAgent.say` does not throw but goes through `onEnd` with a result carrying `error`: in the Bot view this reply shows a ⚠ error instead of staying stuck on "…".
+  - Measured (2026-09-26, pi 0.87.1, `openai-codex/gpt-5.5`): host tool calls, error results, calls after `new_session` and `switch_session`, and `host_tool_cancel` on interrupt all work; ordinary sessions (without the hostTools option) do not load this extension.
 
-### 2.2 `omp say`：不能直接作为中文实时 TTS
+### 2.2 `omp say`: cannot be used directly as real-time Chinese TTS
 
-| 测量项 | 结果 |
+| Measurement | Result |
 |---|---|
-| 引擎 | 本地 Kokoro（首次运行下载 `model_quantized.onnx`） |
-| 可用音色 | `tts.localVoice` 枚举：af_heart / af_bella / af_nicole / af_aoede / af_kore / af_sarah / am_michael / am_fenrir / am_puck / bf_emma / bm_george / bm_fable，**全部是英文音色** |
-| 中文音色 `zf_xiaobei` | 拒绝，退出码 1 |
-| 输出 | 24 kHz / 16 bit / 单声道 WAV，整段生成完才返回，不能流式输出 |
-| 耗时（模型已缓存） | 7.21 s 生成 15.7 s 音频，含每次启动进程和加载模型的开销 |
+| Engine | Local Kokoro (downloads `model_quantized.onnx` on first run) |
+| Available voices | `tts.localVoice` enum: af_heart / af_bella / af_nicole / af_aoede / af_kore / af_sarah / am_michael / am_fenrir / am_puck / bf_emma / bm_george / bm_fable, **all English voices** |
+| Chinese voice `zf_xiaobei` | Rejected, exit code 1 |
+| Output | 24 kHz / 16 bit / mono WAV, returned only after the whole clip is generated; no streaming output |
+| Time (model cached) | 7.21 s to generate 15.7 s of audio, including the overhead of starting the process and loading the model each time |
 
-结论：`omp say` 作为**可选 TTS 后端**保留，适合英文场景或零配置试用。中文实时对话默认应走可配置的 OpenAI 兼容 TTS 服务。另外，omp 配置里有 `modelRoles.speech`（当前值为 `deepinfra/hexgrad/Kokoro-82M`），说明 omp 自身也有云端 TTS 角色；它能否被外部调用尚未验证，见 §13。
+Conclusion: `omp say` is kept as an **optional TTS backend**, suitable for English use or zero-config trials. Real-time Chinese conversation should default to a configurable OpenAI-compatible TTS service. Also, the omp config has `modelRoles.speech` (currently `deepinfra/hexgrad/Kokoro-82M`), indicating omp itself has a cloud TTS role; whether it can be called externally is unverified, see §13.
 
-### 2.3 一个 omp 进程承载多个任务的语音上下文：可行
+### 2.3 One omp process hosting voice contexts for multiple tasks: feasible
 
-实测（2026-09-25，omp 18.2.11）：启动参数把 `--no-session` 换成 `--session-dir <临时目录>`，先 `set_host_tools`，然后：
+Measured (2026-09-25, omp 18.2.11): replace `--no-session` in the launch arguments with `--session-dir <temp dir>`, send `set_host_tools` first, then:
 
-| 步骤 | 结果 |
+| Step | Result |
 |---|---|
-| 会话 A 里说"暗号是 APPLE"，`get_state` 取 `sessionFile` | 得到 A 的会话文件路径 |
-| `new_session`，在会话 B 里说"暗号是 BANANA" | `new_session` 0.02 s |
-| `switch_session` 回 A，问暗号 | 切换 0.02 s；回答 APPLE，整轮 1.41 s |
-| `switch_session` 到 B，问暗号并要求调用 host tool | 回答 BANANA，1.98 s 发出 `host_tool_call` |
+| In session A say "the password is APPLE", get `sessionFile` via `get_state` | Obtained A's session file path |
+| `new_session`, in session B say "the password is BANANA" | `new_session` 0.02 s |
+| `switch_session` back to A, ask for the password | Switch 0.02 s; answered APPLE, whole turn 1.41 s |
+| `switch_session` to B, ask for the password and request a host tool call | Answered BANANA, `host_tool_call` emitted at 1.98 s |
 
-结论：
+Conclusions:
 
-- 上下文彼此隔离，切换耗时可以忽略。
-- `set_host_tools` 注册的工具在 `new_session` / `switch_session` 之后仍然有效，不需要重新注册。
-- 所以"每个任务一个语音上下文"（§5.12）只需要**一个** omp 子进程，不需要每个 tab 各起一个。
+- Contexts are isolated from each other; switching time is negligible.
+- Tools registered via `set_host_tools` remain valid after `new_session` / `switch_session`; no re-registration is needed.
+- So "one voice context per task" (§5.12) needs only **one** omp child process, not one per tab.
 
-### 2.4 worker 的 `prompt` + `streamingBehavior`：pi 和 omp 都支持
+### 2.4 Worker `prompt` + `streamingBehavior`: supported by both pi and omp
 
-实测（2026-09-25，omp 18.2.11；pi 0.87.1，模型 `openai-codex/gpt-5.5`）：worker 正在执行 `sleep 6`，此时发第二条 `prompt`。
+Measured (2026-09-25, omp 18.2.11; pi 0.87.1, model `openai-codex/gpt-5.5`): while the worker is running `sleep 6`, send a second `prompt`.
 
-| 发送方式 | omp | pi |
+| How sent | omp | pi |
 |---|---|---|
-| 不带 `streamingBehavior` | 报错 "Agent is already processing" | 报错 "Specify streamingBehavior" |
-| `streamingBehavior: 'followUp'` | 当前任务答完 FINISHED 后，接着答 FOLLOWUP | 同 omp |
-| `streamingBehavior: 'steer'` | **正在执行的命令被立即截断**；插话那一轮结束时没有文字，约 3 s 后自动再开一轮，才答 STEERED | 等命令执行完，才处理插话，答 STEERED；插话期间有 `queue_update` |
-| worker 空闲时带 `streamingBehavior` | 当作普通 prompt 执行 | 同 omp |
-| omp 开启 `--approval-mode always-ask` | 工具审批以 `extension_ui_request` 的 `select` 发出：标题 `Allow tool: bash\nCommand: echo hi`，选项 `Approve` / `Deny` | — |
+| Without `streamingBehavior` | Error "Agent is already processing" | Error "Specify streamingBehavior" |
+| `streamingBehavior: 'followUp'` | After the current task answers FINISHED, it goes on to answer FOLLOWUP | Same as omp |
+| `streamingBehavior: 'steer'` | **The running command is cut off immediately**; the steering turn ends with no text, and about 3 s later a new turn starts automatically and only then answers STEERED | Waits for the command to finish before handling the steer, answers STEERED; `queue_update` during the steer |
+| With `streamingBehavior` while the worker is idle | Executed as an ordinary prompt | Same as omp |
+| omp with `--approval-mode always-ask` | Tool approval is sent as an `extension_ui_request` `select`: title `Allow tool: bash\nCommand: echo hi`, options `Approve` / `Deny` | — |
 
-结论：
+Conclusions:
 
-- `tell_worker` 发消息时总是带上 `streamingBehavior`：worker 空闲时两种后端都按普通 prompt 执行，所以不存在"刚好结束"的竞态（§6）。
-- 用 omp 插话时，第一个 `agent_end` 不等于任务结束。WorkerObserver 判断 `done` 要等 worker 稳定空闲（§5.8）。
-- 工具审批就是普通的 select 对话框，不需要单独的审批通道。
+- `tell_worker` always sends messages with `streamingBehavior`: when the worker is idle, both backends execute it as an ordinary prompt, so there is no "just finished" race (§6).
+- When steering with omp, the first `agent_end` does not mean the task is over. WorkerObserver waits for the worker to be stably idle before judging `done` (§5.8).
+- Tool approval is just an ordinary select dialog; no separate approval channel is needed.
 
-## 3. 总体架构
+## 3. Overall Architecture
 
 ```mermaid
 flowchart TB
-  subgraph Ext["VS Code 扩展进程"]
-    subgraph IO["适配层（接口，可替换）"]
+  subgraph Ext["VS Code extension process"]
+    subgraph IO["Adapter layer (interfaces, replaceable)"]
       AIO[AudioIO]
-      VAD[Vad + 分段]
+      VAD[Vad + segmentation]
       STT[Stt]
       TTS[Tts]
       VL[VoiceLlm]
     end
-    R["中心状态机<br/>reduce(state, event) → {state, effects}"]
-    X[执行器<br/>每轮一个取消令牌]
-    OBS[WorkerObserver<br/>每个 tab 一个]
+    R["Central state machine<br/>reduce(state, event) → {state, effects}"]
+    X[Executor<br/>one cancellation token per turn]
+    OBS[WorkerObserver<br/>one per tab]
     EDW[EditorWatcher]
     HT[HostToolRouter]
-    WC[WorkerController<br/>由 SidebarProvider 实现]
-    TABS[(侧边栏 tab<br/>TabState + RpcSessionManager)]
-    AIO -->|PCM| VAD -->|语音段| STT
-    VAD & STT & VL & OBS & EDW -->|事件| R
-    R -->|副作用| X
+    WC[WorkerController<br/>implemented by SidebarProvider]
+    TABS[(Sidebar tabs<br/>TabState + RpcSessionManager)]
+    AIO -->|PCM| VAD -->|speech segment| STT
+    VAD & STT & VL & OBS & EDW -->|events| R
+    R -->|effects| X
     X --> VL
     X --> TTS -->|PCM| AIO
     HT -->|send / abort / answer / status| WC --> TABS
-    TABS -.事件流.-> OBS
+    TABS -.event stream.-> OBS
   end
-  AIO <-->|本地 WebSocket PCM| CH[[隐藏 Chrome<br/>麦克风 + 播放 + AEC3]]
-  VL <-->|stdio JSON-RPC<br/>switch_session 切换语音上下文| VP[[omp 子进程<br/>语音智能体 LLM]]
+  AIO <-->|local WebSocket PCM| CH[[Hidden Chrome<br/>microphone + playback + AEC3]]
+  VL <-->|stdio JSON-RPC<br/>switch_session switches voice context| VP[[omp child process<br/>voice agent LLM]]
   VP -->|host_tool_call| HT
-  HT -->|diff / diagnostics| FS[(工作区, 只读)]
+  HT -->|diff / diagnostics| FS[(Workspace, read-only)]
 ```
 
-**关键点**：
+**Key points**:
 
-- worker 就是现有侧边栏里的会话。用户在聊天面板里看到的内容和语音驱动的内容是同一个会话，两种操作方式可以混用。
-- **语音附着在任务上**：用户先在某个 tab 里发起任务，再在这个任务里用语音讨论和控制。每个 worker 会话有自己的语音上下文；用户切换 tab 时，语音智能体切换到该任务的上下文。不存在一个统管所有 tab 的语音智能体（§5.12）。
-- 语音 omp 子进程只有一个（一个麦克风、一个扬声器），用 `switch_session` 在各个语音上下文之间切换（§2.3）。语音会话文件跟着工作区保存，语音模式重新打开（或换了窗口）时，每个任务接着用它上一次的语音上下文（§5.12 规则 2）。
-- 语音智能体只做**任务控制**，控制入口是 `WorkerController`，不直接调用 worker 的 `RpcBridge`（§5.11）。
-- 麦克风和播放在扩展启动的**隐藏 Chrome** 里：webview 开不了麦克风，而且回声消除要靠 Chrome 的 AEC3，它必须同时掌握播放和录音。Chrome 通过本地 WebSocket 和扩展进程交换 PCM；VAD、STT、LLM、TTS 和所有决策都在扩展进程里。依据见原型文档 §3、§8。
+- The worker is the existing session in the sidebar. What the user sees in the chat panel and what voice drives are the same session; the two modes of operation can be mixed.
+- **Voice attaches to a task**: the user first starts a task in some tab, then discusses and controls it by voice within that task. Each worker session has its own voice context; when the user switches tabs, the voice agent switches to that task's context. There is no single voice agent overseeing all tabs (§5.12).
+- There is only one voice omp child process (one microphone, one speaker), switching between voice contexts with `switch_session` (§2.3). Voice session files are saved with the workspace; when voice mode is reopened (or the window changes), each task continues with its previous voice context (§5.12 rule 2).
+- The voice agent does only **task control**; its control entry point is `WorkerController`, and it does not call the worker's `RpcBridge` directly (§5.11).
+- Microphone and playback live in a **hidden Chrome** launched by the extension: a webview cannot open the microphone, and echo cancellation relies on Chrome's AEC3, which must own both playback and recording. Chrome exchanges PCM with the extension process over a local WebSocket; VAD, STT, LLM, TTS, and all decisions live in the extension process. Rationale: prototype doc §3, §8.
 
-## 4. 运行模型：接口 + 中心状态机 + 取消令牌
+## 4. Runtime Model: Interfaces + Central State Machine + Cancellation Tokens
 
-**决定（2026-09-24，原型验证后）：不实现 Pipecat 式的帧流水线（Frame / FrameProcessor / Pipeline）。** 原型已按本节结构实现（独立项目 `voice-loop-prototype`）。
+**Decision (2026-09-24, after prototype validation): do not implement a Pipecat-style frame pipeline (Frame / FrameProcessor / Pipeline).** The prototype is already implemented following this section's structure (standalone project `voice-loop-prototype`).
 
-### 4.1 为什么不用帧
+### 4.1 Why not frames
 
-| Pipecat 需要帧的原因 | 我们的情况 |
+| Why Pipecat needs frames | Our situation |
 |---|---|
-| 通用框架：上百种 STT/TTS/LLM 服务、十几种传输方式，用户可以随意拼装处理器，所以需要统一的"货币"在环节之间流动 | 具体应用：环节固定（音频、VAD、STT、LLM、TTS），拓扑不变。可替换的只有 TTS 后端和音频方式，用接口就够 |
-| 决策分散在各处理器里，跨环节的规则靠帧上下传递 | 复杂度集中在**决策**：谁该说话、插嘴真假、念到哪句、worker 播报。集中在一个状态机里更容易写对、测对 |
-| 打断必须穿过任意处理器，所以需要 `InterruptionFrame` | 这是帧唯一真正有价值的能力，用**每轮一个取消令牌**就能获得（§4.4） |
+| General framework: hundreds of STT/TTS/LLM services, a dozen-plus transports, users can assemble processors freely, so a uniform "currency" must flow between stages | Specific application: fixed stages (audio, VAD, STT, LLM, TTS), fixed topology. Only the TTS backend and the audio method are replaceable; interfaces suffice |
+| Decisions are scattered across processors; cross-stage rules rely on passing frames up and down | Complexity is concentrated in **decisions**: who should speak, whether a barge-in is real, which sentence playback is on, worker narration. Centralizing them in one state machine makes them easier to get right and test |
+| Interruption must traverse arbitrary processors, hence `InterruptionFrame` | This is the only truly valuable capability frames offer, and **one cancellation token per turn** provides it (§4.4) |
 
-引入帧的代价：队列、帧类型、方向、优先级这一整层框架；所有逻辑都要拆成"帧从 A 传到 B"，排序竞态也更难排查。
+Cost of introducing frames: an entire framework layer of queues, frame types, directions, and priorities; all logic has to be broken into "frame passes from A to B", and ordering races become harder to debug.
 
-**以后遇到下面的情况再考虑帧**：
-- 音频路径需要可配置地串接任意处理（降噪 → 说话人分离 → 情绪分析……）；
-- 需要同时处理多路音频流（多人会议）；
-- 想直接复用 Pipecat 的服务实现。
+**Reconsider frames later when**:
+- The audio path needs configurable chaining of arbitrary processing (denoising → speaker diarization → emotion analysis…);
+- Multiple audio streams must be processed simultaneously (multi-party meetings);
+- We want to reuse Pipecat's service implementations directly.
 
-### 4.2 接口（适配层）
+### 4.2 Interfaces (adapter layer)
 
-| 接口 | 职责 | 实现 |
+| Interface | Responsibility | Implementation |
 |---|---|---|
-| `AudioIO` | 送出 16 kHz 麦克风 PCM；按顺序播放 PCM；`flush()` 丢弃所有排队的音频 | 隐藏 Chrome（默认）/ 浏览器标签页（找不到 Chrome 时）/ pulse（对照组） |
-| `Vad` + 分段 | 每帧打分，产生 speechStart 和整段 PCM | `SileroVad` + `SpeechSegmenter`（正式代码） |
-| `Stt` | `transcribe(pcm) → text` | `SttClient`（OpenAI 兼容） |
-| `Tts` | `synthesize(text, signal) → PCM` | OpenAI 兼容 `/audio/speech` / `omp say` |
-| `VoiceLlm` | `prompt(message, signal)`，产生 `llmText`、`llmEnd` 事件（P1 起还有 `host_tool_call`） | omp RPC 子进程 |
+| `AudioIO` | Emit 16 kHz microphone PCM; play PCM in order; `flush()` discards all queued audio | Hidden Chrome (default) / browser tab (when Chrome is not found) / pulse (control group) |
+| `Vad` + segmentation | Score each frame; produce speechStart and whole-segment PCM | `SileroVad` + `SpeechSegmenter` (production code) |
+| `Stt` | `transcribe(pcm) → text` | `SttClient` (OpenAI-compatible) |
+| `Tts` | `synthesize(text, signal) → PCM` | OpenAI-compatible `/audio/speech` / `omp say` |
+| `VoiceLlm` | `prompt(message, signal)`, produces `llmText` and `llmEnd` events (plus `host_tool_call` from P1 on) | omp RPC child process |
 
-### 4.3 中心状态机
+### 4.3 Central state machine
 
-纯函数 `reduce(state, event) → { state, effects }`，不做任何 I/O；原型对应 `conversation.ts`。它做全部决策：话语权、什么时候发 prompt、打断、`<interrupted>` 补偿、切句。P1 的 FloorArbiter、观察队列和工具状态也放进这个状态机，或者作为它组合进来的子状态机，不另开决策点。
+A pure function `reduce(state, event) → { state, effects }` that does no I/O; the prototype's counterpart is `conversation.ts`. It makes all decisions: the floor, when to send a prompt, interruption, `<interrupted>` compensation, sentence splitting. P1's FloorArbiter, observation queue, and tool state also go into this state machine, or into sub-state machines it composes; no separate decision points.
 
-| 事件（输入） | 来源 |
+| Event (input) | Source |
 |---|---|
-| `userSpeechStart` / `userSpeechEnd` | VAD 分段（机器人说话时，要先经过插嘴确认） |
+| `userSpeechStart` / `userSpeechEnd` | VAD segmentation (while the bot is speaking, barge-in confirmation comes first) |
 | `transcript` | STT |
 | `llmText` / `llmEnd` | VoiceLlm |
-| `sentencePlaying` / `sentencePlayed` / `audioIdle` | 执行器（播放进度） |
-| `shutUp` / `toggleMute` / `toggleHalfDuplex` | 界面、快捷键 |
-| P1：`workerEvent`、`hostToolCall`、`activeTaskChanged`；P2：`editorChanged` | WorkerObserver、HostToolRouter、WorkerController、EditorWatcher |
+| `sentencePlaying` / `sentencePlayed` / `audioIdle` | Executor (playback progress) |
+| `shutUp` / `toggleMute` / `toggleHalfDuplex` | UI, keyboard shortcuts |
+| P1: `workerEvent`, `hostToolCall`, `activeTaskChanged`; P2: `editorChanged` | WorkerObserver, HostToolRouter, WorkerController, EditorWatcher |
 
-| 副作用（输出） | 执行 |
+| Effect (output) | Execution |
 |---|---|
-| `prompt { turnId, message }` | 新建本轮的取消令牌，调用 `VoiceLlm.prompt` |
-| `speak { turnId, text }` | 在本轮令牌下合成并排队播放 |
-| `cancelTurn { turnId }` | 中止本轮令牌 |
-| P1：`hostToolResult`、`workerCommand`、`switchVoiceContext` | HostToolRouter / WorkerController / VoiceLlm（`new_session`、`switch_session`） |
+| `prompt { turnId, message }` | Create this turn's cancellation token, call `VoiceLlm.prompt` |
+| `speak { turnId, text }` | Synthesize under this turn's token and queue for playback |
+| `cancelTurn { turnId }` | Abort this turn's token |
+| P1: `hostToolResult`, `workerCommand`, `switchVoiceContext` | HostToolRouter / WorkerController / VoiceLlm (`new_session`, `switch_session`) |
 
-### 4.4 取消令牌（替代 `InterruptionFrame`）
+### 4.4 Cancellation tokens (replacing `InterruptionFrame`)
 
-每一轮机器人回复对应一个 `AbortController`，由执行器在处理 `prompt` 副作用时创建。这一轮的所有异步工作都订阅它的 signal：
+Each bot reply turn has one `AbortController`, created by the executor when it handles the `prompt` effect. All async work for the turn subscribes to its signal:
 
-| 订阅者 | abort 时 |
+| Subscriber | On abort |
 |---|---|
-| VoiceLlm | 若 omp 仍在生成这一轮，发 RPC `abort`；丢弃之后到达的 `text_delta` |
-| Tts | 在途的合成请求随 `fetch` / 子进程一起取消 |
-| 播放队列 | 清空排队的句子；AudioIO `flush()`；清除播放进度计时器 |
+| VoiceLlm | If omp is still generating this turn, send RPC `abort`; discard `text_delta` arriving afterward |
+| Tts | In-flight synthesis requests are cancelled along with their `fetch` / child process |
+| Playback queue | Clear queued sentences; AudioIO `flush()`; clear the playback-progress timer |
 
-**约定**：abort 之后，这一轮不再向状态机投递任何事件，**唯一的例外是 `llmEnd`**。`llmEnd` 只表示"LLM 空闲了，可以发下一条 prompt"，因为 omp 一次只处理一条 prompt。因此状态机不需要判断事件是否过时。
+**Convention**: after abort, the turn delivers no further events to the state machine, **with the sole exception of `llmEnd`**. `llmEnd` only means "the LLM is idle and the next prompt can be sent", because omp processes only one prompt at a time. Therefore the state machine never needs to judge whether an event is stale.
 
-原型实测：打断时由 `cancelTurn` 一处完成全部停止；扬声器录音显示输出 0.3 s 内静音，被取消那一轮之后没有任何播放事件（原型文档 §5）。它替换了原型早期分散的四处处理：播放器代次计数、`discarding` 标记、按 `turnId` 丢弃事件、单独的页面 flush。
+Prototype measurement: on interrupt, `cancelTurn` alone performs the entire stop; a speaker recording showed output silenced within 0.3 s, with no playback events after the cancelled turn (prototype doc §5). It replaced four scattered mechanisms from the prototype's early days: a player generation counter, a `discarding` flag, discarding events by `turnId`, and a separate page flush.
 
-### 4.5 与 Pipecat 概念的对照
+### 4.5 Mapping to Pipecat concepts
 
-| Pipecat | 本项目 |
+| Pipecat | This project |
 |---|---|
-| `Frame` / `FrameProcessor` / `Pipeline` | 接口 + 事件 / 副作用 + 中心状态机 |
-| `InterruptionFrame` | `cancelTurn` → 本轮 `AbortController.abort()` |
-| `UserStarted/StoppedSpeakingFrame` | 事件 `userSpeechStart` / `userSpeechEnd` |
-| `TranscriptionFrame`、`LLMTextFrame` | 事件 `transcript`、`llmText` |
-| `BotStarted/StoppedSpeakingFrame`（向上游） | 事件 `sentencePlaying` / `audioIdle` |
-| `PipelineTask.queue_frames()`（外部注入） | 直接 `dispatch(event)` |
-| 用户轮次控制器、开始/结束/静音策略 | 状态机里的规则 |
-| VAD Analyzer / Smart Turn | `SileroVad`（每 5 s 重置状态，与 pipecat 一致）+ `SpeechSegmenter`；Smart Turn v3 作为后续增强 |
+| `Frame` / `FrameProcessor` / `Pipeline` | Interfaces + events / effects + central state machine |
+| `InterruptionFrame` | `cancelTurn` → this turn's `AbortController.abort()` |
+| `UserStarted/StoppedSpeakingFrame` | Events `userSpeechStart` / `userSpeechEnd` |
+| `TranscriptionFrame`, `LLMTextFrame` | Events `transcript`, `llmText` |
+| `BotStarted/StoppedSpeakingFrame` (upstream) | Events `sentencePlaying` / `audioIdle` |
+| `PipelineTask.queue_frames()` (external injection) | Direct `dispatch(event)` |
+| User turn controller, start/stop/mute strategies | Rules in the state machine |
+| VAD Analyzer / Smart Turn | `SileroVad` (state reset every 5 s, same as pipecat) + `SpeechSegmenter`; Smart Turn v3 as a later enhancement |
+## 5. Component Design
 
-## 5. 组件设计
+### 5.1 AudioIO (microphone + playback)
 
-### 5.1 AudioIO（麦克风 + 播放）
+- Default: the extension finds a local Chrome, Edge, Chromium, or Brave, launches it headless, and loads a local audio page. The page handles `getUserMedia` (with echo cancellation, noise suppression, and auto gain enabled) and WebAudio playback, and exchanges PCM with the extension over a local WebSocket. See prototype doc §3.2 for the protocol and launch arguments.
+- If Chrome is not found, open the same page with `vscode.env.openExternal` and ask the user to keep the tab open.
+- Dictation (the microphone button in the session composer, Ctrl+Alt+M) and voice mode are mutually exclusive (implemented 2026-09-25):
+  - From the moment voice mode starts until it ends, the microphone button is hidden and the shortcut has no effect (`when: !oh-my-pi-chater.voiceMode`).
+  - If voice mode is turned on while dictation is in progress, dictation stops first; the segment already recorded is transcribed as usual.
+  - When dictation is triggered from the command palette, show a message and do not record.
+  - Implementation: `VoiceInput.setBlocked`, the `voiceMode` field in the state sync, `SidebarProvider.setVoiceMode`.
 
-- 默认：扩展找到本机的 Chrome、Edge、Chromium 或 Brave，以无界面方式启动，加载本地音频页面。页面负责 `getUserMedia`（开启回声消除、降噪、自动增益）和 WebAudio 播放，通过本地 WebSocket 与扩展交换 PCM。协议和启动参数见原型文档 §3.2。
-- 找不到 Chrome 时，用 `vscode.env.openExternal` 打开同一页面，并提示用户保持标签页打开。
-- 听写（会话输入框里的麦克风按钮，Ctrl+Alt+M）和语音模式互斥（2026-09-25 已实现）：
-  - 语音模式从开始启动到结束，麦克风按钮都隐藏，快捷键也不生效（`when: !oh-my-pi-chater.voiceMode`）。
-  - 正在听写时开启语音模式，听写会先停下，已录下的片段照常转写。
-  - 从命令面板触发听写时，给出提示，不录音。
-  - 实现：`VoiceInput.setBlocked`，状态同步里的 `voiceMode` 字段，`SidebarProvider.setVoiceMode`。
+### 5.2 VAD and end-of-turn detection (TurnDetector)
 
-### 5.2 VAD 与说完判定（TurnDetector）
-
-- 复用 `SileroVad` 和 `SpeechSegmenter`。
-- 听写的结束阈值 `vadStopSecs=0.8` 对讨论场景来说太短。语音模式使用独立配置 `turnStopSecs`，默认 1.2 s（待调）。
-- `userSpeechStart` 需要**持续约 200 ms 的语音**才触发，避免咳嗽、键盘声造成误打断。机器人说话时还要经过插嘴确认（STT + 回声比对，见原型文档 §4.3）。
-- 增强（P3）：接入 Smart Turn v3 做语义层面的说完判定。
+- Reuse `SileroVad` and `SpeechSegmenter`.
+- Dictation's end threshold `vadStopSecs=0.8` is too short for discussion. Voice mode uses a separate setting `turnStopSecs`, default 1.2 s (to be tuned).
+- `userSpeechStart` fires only after **about 200 ms of sustained speech**, so coughs and keyboard noise don't cause false interrupts. While the bot is speaking, a barge-in must also be confirmed (STT + echo comparison, see prototype doc §4.3).
+- Enhancement (P3): integrate Smart Turn v3 for semantic end-of-turn detection.
 
 ### 5.3 Stt
 
-- 复用 `SttClient`（OpenAI 兼容 `/audio/transcriptions`），配置沿用 `oh-my-pi-chater.voice.sttUrl/sttModel/language`。
-- 同一轮里的多个语音片段按顺序拼接；用户在 `turnStopSecs` 之内继续说话时，合并为同一轮。
+- Reuse `SttClient` (OpenAI-compatible `/audio/transcriptions`); configuration keeps using `oh-my-pi-chater.voice.sttUrl/sttModel/language`.
+- Multiple speech segments within one turn are concatenated in order; if the user keeps speaking within `turnStopSecs`, it is merged into the same turn.
 
-### 5.4 VoiceLlm（omp 子进程）
+### 5.4 VoiceLlm (omp subprocess)
 
-**启动**：使用 §2.1 的命令行，额外参数如下：
+**Launch**: uses the command line from §2.1, with these extra arguments:
 
-- `--model <provider/id>`：配置 `voiceAgent.model` 为空时，**跟随 worker 当前模型**：启动前对 worker 执行 `getState()`，取 `model.provider/model.id`。
-- `--thinking <level>`：配置项，默认 `off`，语音场景对延迟敏感。
-- `--cwd <workspace>`：与 worker 保持一致。
-- `--tools read,grep,glob`：替代 §2.1 的 `--no-tools`，开放 omp 自带的**只读**工具，代码库读取不需要扩展自己实现。已实测（2026-09-25）：与 host tools 可以同时启用；"看一下 calc.js 里 clamp 是干嘛的"一轮 4.2 s，没有经过 worker。
-- `--session-dir <工作区 storage>/voice-sessions`：替代 §2.1 的 `--no-session`，每个语音上下文一个会话文件（§2.3、§5.12）。文件在语音模式关闭后保留，供下次续聊；关闭时删掉没有对话记录再引用的文件（被历史上限挤掉的、omp 启动时建的空会话）。没有打开文件夹的窗口没有工作区 storage，改用 `<globalStorage>/voice-sessions/<随机 id>`，关闭时整个删除，不续聊。
-- `--approval-mode yolo`：语音进程的工具只有只读工具和宿主工具，宿主工具的规则由 HostToolRouter 把关。不加的话，项目或用户配置里的 `approvalMode: always-ask` 会让宿主工具也弹审批框，而语音进程不加载扩展、没人能答，工具调用一律被拒（2026-09-25 冒烟测试实测）。
-- `--system-prompt`：内容见 §8。
+- `--model <provider/id>`: when the `voiceAgent.model` setting is empty, **follow the worker's current model**: before launch, call `getState()` on the worker and take `model.provider/model.id`.
+- `--thinking <level>`: a setting, default `off`; voice is latency-sensitive.
+- `--cwd <workspace>`: same as the worker.
+- `--tools read,grep,glob`: replaces §2.1's `--no-tools`, enabling omp's built-in **read-only** tools so the extension doesn't have to implement codebase reading itself. Tested (2026-09-25): can be enabled together with host tools; a turn of "take a look at what clamp does in calc.js" took 4.2 s without going through the worker.
+- `--session-dir <workspace storage>/voice-sessions`: replaces §2.1's `--no-session`; one session file per voice context (§2.3, §5.12). Files are kept after voice mode is turned off so the conversation can resume next time; on shutdown, files no longer referenced by any transcript are deleted (those pushed out by the history cap, and empty sessions created when omp starts). A window with no folder open has no workspace storage; it uses `<globalStorage>/voice-sessions/<random id>` instead, deletes it entirely on shutdown, and does not resume.
+- `--approval-mode yolo`: the voice process only has read-only tools and host tools, and host-tool rules are enforced by HostToolRouter. Without this flag, `approvalMode: always-ask` in project or user config makes host tools show approval prompts too, and since the voice process loads no extensions and nobody can answer, every tool call is rejected (observed in smoke testing, 2026-09-25).
+- `--system-prompt`: content in §8.
 
-**跟随 worker 模型**：
+**Following the worker model**:
 
-- 仅在语音模式启动时读取一次。
-- worker 中途换模型时，**不自动跟随**，避免对话中途改变语气和能力；用户可以通过命令"语音智能体：同步 worker 模型"手动同步，底层发 `set_model`。
-- 配置了固定模型时，始终使用该模型。
+- Read only once, when voice mode starts.
+- If the worker switches models midway, **do not follow automatically**, to avoid changing tone and capability mid-conversation; the user can sync manually with the command "Voice Agent: Sync worker model", which sends `set_model` under the hood.
+- When a fixed model is configured, always use it.
 
-**一轮对话**：
+**One conversation turn**:
 
-1. 发送 `prompt`，内容为用户话语，外加编辑器快照和未消费的观察，格式见 §7.2。
-2. 把 `text_delta` 作为 `llmText` 事件投递给状态机。
-3. 收到 `host_tool_call` 时交给 HostToolRouter，由它回传 `host_tool_result`。
-4. 收到 `agent_end` 时投递 `llmEnd`。
+1. Send `prompt` containing the user's utterance plus the editor snapshot and unconsumed observations; format in §7.2.
+2. Deliver `text_delta` to the state machine as `llmText` events.
+3. On `host_tool_call`, hand it to HostToolRouter, which sends back `host_tool_result`.
+4. On `agent_end`, deliver `llmEnd`.
 
-**打断**：本轮取消令牌被中止时发送 `abort`，丢弃之后到达的文字（§4.4）。
+**Interrupt**: when the turn's cancellation token is aborted, send `abort` and discard any text that arrives afterward (§4.4).
 
-**被打断后的上下文补偿**：omp 会话里保存的是**生成的全文**，而用户实际只听到一部分。下一轮 prompt 开头附上：
+**Context compensation after an interrupt**: the omp session stores the **full generated text**, but the user actually heard only part of it. Prepend to the next turn's prompt:
 
 ```
-<interrupted>你上一条回复只念到："……"，之后被用户打断，未念出的部分用户没有听到。</interrupted>
+<interrupted>Your previous reply was only read aloud up to: "……", then the user interrupted; the user did not hear the unread part.</interrupted>
 ```
 
-已念出的文字来自播放进度事件 `sentencePlayed`，精度到句子。
+The text that was read aloud comes from the playback-progress event `sentencePlayed`, with sentence-level precision.
 
-**进程健康**：子进程退出后，下一条用户消息会重新启动它，并对当前语音上下文执行 `switch_session`，回到原来的会话文件，上下文不会丢失。启动失败时，这一轮返回错误并写进语音输出面板。
+**Process health**: after the subprocess exits, the next user message relaunches it and runs `switch_session` for the current voice context, returning to the original session file, so no context is lost. If launch fails, that turn returns an error and writes it to the voice output panel.
 
-### 5.5 切句
+### 5.5 Sentence splitting
 
-- 把流式文本切成适合 TTS 的片段，切分点为中英文句末标点 `。！？!?.;；\n`。
-- 首句优先：第一个片段只要遇到逗号且长度达到约 8 个字就可以送出，以压低首句延迟。
-- 过滤不适合朗读的内容：代码块、URL、Markdown 符号。提示词要求模型不输出这类内容，这里是兜底。
+- Split streaming text into TTS-friendly chunks at sentence-ending punctuation: the full-width Chinese marks U+3002 (full stop), U+FF01 (exclamation), U+FF1F (question), U+FF1B (semicolon), plus ASCII `!?.;` and `\n`.
+- First sentence first: the first chunk can be sent as soon as it hits a comma and is about 8 characters long, to keep first-sentence latency low.
+- Filter out content unsuitable for reading aloud: code blocks, URLs, Markdown symbols. The prompt tells the model not to produce such content; this is the safety net.
 
-### 5.6 Tts（可配置）
+### 5.6 Tts (configurable)
 
-统一接口：
+Unified interface:
 
 ```
 synthesize(text, signal) → AsyncIterable<{ pcm: Int16Array, sampleRate }>
 ```
 
-| 后端 | 配置 | 流式 | 说明 |
+| Backend | Settings | Streaming | Notes |
 |---|---|---|---|
-| `openai`（默认） | `ttsUrl`、`ttsModel`、`ttsVoice` | 取决于服务端；支持 `response_format: pcm` 时按块读取 | OpenAI 兼容 `/audio/speech`，适配 OpenAI、本地 Kokoro-FastAPI / CosyVoice / speaches 等服务 |
-| `omp` | `ttsVoice`（omp 音色） | 否 | 调用 `omp say <text> --voice <v> -o <tmp.wav>`，再读取 WAV。仅适合英文，每句都要付出启动进程和加载模型的开销（§2.2） |
+| `openai` (default) | `ttsUrl`, `ttsModel`, `ttsVoice` | Depends on the server; read in chunks when `response_format: pcm` is supported | OpenAI-compatible `/audio/speech`; works with OpenAI and local services such as Kokoro-FastAPI / CosyVoice / speaches |
+| `omp` | `ttsVoice` (omp voice) | No | Calls `omp say <text> --voice <v> -o <tmp.wav>`, then reads the WAV. English only; every sentence pays the cost of starting a process and loading the model (§2.2) |
 
-- 句子之间流水线化：第 N 句播放时，并行合成第 N+1 句，最多提前合成 2 句。
-- 设置页的 STT 标签页扩展出 TTS 区块，提供"连通性测试"和"试听"两个功能，仿照现有 `testSttConnectivity`。
+- Pipeline between sentences: while sentence N plays, synthesize sentence N+1 in parallel, at most 2 sentences ahead.
+- The STT tab of the settings panel is extended with a TTS section offering "Connectivity test" and "Preview", modeled on the existing `testSttConnectivity`.
 
-**实现（2026-09-25）**：`src/voiceAgent/tts.ts`，只做了 OpenAI 兼容接口（`omp say` 没有中文音色、不能流式，§2.2，暂不做）。每句一次请求，所有句子并发合成、按顺序播放（没有"最多提前 2 句"的限制）。各服务收语言的方式不同，由设置 `tts.provider` 决定：
+**Implementation (2026-09-25)**: `src/voiceAgent/tts.ts`, OpenAI-compatible interface only (`omp say` has no Chinese voice and can't stream, §2.2; deferred). One request per sentence; all sentences are synthesized concurrently and played in order (no "at most 2 ahead" limit). Services take the language differently, selected by the `tts.provider` setting:
 
-| provider | 语言字段 | model / voice 为空时 |
+| provider | Language field | When model / voice is empty |
 |---|---|---|
-| `chatterbox`（chatterbox-tts，多语言，本机 `:8881`，当前在用） | 每句一个请求，含汉字发 `language: zh`，否则 `en` | `chatterbox-multilingual` / `default` |
-| `kokoro`（Kokoro-FastAPI，本机 `:8880`） | 按中文/非中文分段，中文段 `lang_code: z` | `kokoro` / `af_sarah` |
-| `openai` | 不发 | `tts-1` / `alloy` |
+| `chatterbox` (chatterbox-tts, multilingual, local `:8881`, currently in use) | One request per sentence; send `language: zh` if it contains Chinese characters, otherwise `en` | `chatterbox-multilingual` / `default` |
+| `kokoro` (Kokoro-FastAPI, local `:8880`) | Split into Chinese / non-Chinese segments; Chinese segments get `lang_code: z` | `kokoro` / `af_sarah` |
+| `openai` | Not sent | `tts-1` / `alloy` |
 
-**chatterbox-tts（实测，STT 回读检验）**：`language: zh` 时中英混排一次请求就能读对（"好的，我让它去跑 npm test" 原样识别回来，`average` 也对）；不发语言时英文读坏（"The tests passed." → "I-4 casts past"），所以英文句子必须发 `en`。它只接受加载的那个模型名，别的一律 400；Kokoro 的音色名会报 `unsupported reference-audio format`。每句合成约 0.5–1.2 s（Kokoro 约 0.1 s），端到端停嘴到听到回答 2.78 s（Kokoro 2.24 s）。它支持 `stream: true` + `response_format: pcm`，首字节约 0.46 s，还没用上。
+**chatterbox-tts (tested, verified by STT read-back)**: with `language: zh`, mixed Chinese-English text is read correctly in a single request (a Chinese sentence meaning "OK, I'll have it run npm test" was recognized back verbatim, and `average` was right too); without a language, English is mangled ("The tests passed." → "I-4 casts past"), so English sentences must send `en`. It accepts only the name of the loaded model and returns 400 for anything else; Kokoro voice names produce `unsupported reference-audio format`. Synthesis takes about 0.5–1.2 s per sentence (Kokoro about 0.1 s); end-to-end from the user stopping to hearing the answer is 2.78 s (Kokoro 2.24 s). It supports `stream: true` + `response_format: pcm` with a first byte at about 0.46 s, not yet used.
 
-**Kokoro 与中英混排（实测，本机 Kokoro-FastAPI，STT 回读检验）**：
+**Kokoro and mixed Chinese-English (tested, local Kokoro-FastAPI, verified by STT read-back)**:
 
-- 英文音色（如用户选的 `af_sarah`）直接读中文，只会反复念 "Chinese letter"；加 `lang_code: "z"` 后中文清楚（"测试跑完了，四个全部通过，没有改动任何文件"原样识别回来）。
-- 整句带 `z` 时英文单词被按中文读坏：`npm test` → "能试试"，`average` → "Avidai"。中文音色 `zf_xiaoxiao` 同样如此，这是 Kokoro 中文管线的限制。
-- 所以 `kokoro` 按文字切成中文段和非中文段，中文段带 `z`，其余用音色自己的语言，各段并发合成，去掉两端的静音垫后拼接（段间 50 ms）。实测 `npm test`、`average` 能读对；已知弱点是夹在英文词之间的单个汉字（"说" → "Joy"）。数字、空格、标点跟着所在的段走。
+- An English voice (such as the user's chosen `af_sarah`) reading Chinese directly just repeats "Chinese letter"; with `lang_code: "z"` the Chinese is clear (a Chinese sentence meaning "The tests finished, all four passed, no files were changed" was recognized back verbatim).
+- With `z` on the whole sentence, English words are mangled by Chinese pronunciation: `npm test` → "neng shi shi" (Chinese for "can try"), `average` → "Avidai". The Chinese voice `zf_xiaoxiao` behaves the same; this is a limitation of Kokoro's Chinese pipeline.
+- So `kokoro` splits the text into Chinese and non-Chinese segments; Chinese segments get `z`, the rest use the voice's own language. Segments are synthesized concurrently, leading/trailing silence padding is trimmed, and they are concatenated (50 ms between segments). Tested: `npm test` and `average` are read correctly; the known weak spot is a single Chinese character between English words ("shuo", "say", → "Joy"). Digits, spaces, and punctuation go with the segment they are in.
 
-### 5.7 播放与播放进度
+### 5.7 Playback and playback progress
 
-- 每句合成完成后按顺序交给 AudioIO 播放，采样率以每句返回的实际值为准。
-- 打断：由本轮取消令牌统一停止（§4.4）。已完整播放的句子记在状态机里，用于 `<interrupted>` 补偿。
-- 播放进度由音频页面回报（2026-09-26），做法参照 Pipecat：“机器人在说话”只由输出端根据实际播出的音频判定，再往回（上游）告诉状态机，不按 TTS 请求推算。
-  - 每句音频带一个 clip id（二进制头 `[u32 clipId][u32 sampleRate]` + PCM）。页面在它真正开始播放时回 `{type:'started', id, at, durationMs}`（用在同一时刻停止的静音 `ConstantSourceNode` 的 `onended` 触发，走音频时钟，后台标签页不节流；`at` 含输出延迟）；播完回 `{type:'ended', id, at}`。被 flush 的句子不回报。页面断开时，宿主把未完成的句子全部当作播完处理（没有开始播），所以一轮不会卡在“正在说”。
-  - 状态机里原来的 `audioActive` 拆成两个标志，对应 Pipecat 的 `TTSStarted/Stopped` 和 `BotStarted/StoppedSpeaking`：`ttsActive`（本轮有句子在合成、排队或播放）和 `botSpeaking`（页面报了第一句开始播放）。显示状态按优先级取：待命 > 你在说 > 正在说（`botSpeaking`）> 转写中 > 合成中（`ttsActive` 且还没出声）> 思考中 > 在听。
-  - 句子之间的空隙保持“正在说”。回复生成完、所有句子播完，或者播放队列空了 3 s（`BOT_STOP_FALLBACK_MS`，同 Pipecat 的 `BOT_VAD_STOP_FALLBACK_SECS`，比如中途在调工具），或者被打断，才算说完。3 s 兜底之后回到“思考中”。
-  - 插嘴检查只在 `botSpeaking` 时做：只有真的在出声才会有回声。合成中用户开口，按普通打断处理。
-  - 每轮结束（没被打断）时，执行器通过 `onMetrics(turnId, metrics)` 报告时间点：`silenceAt`、`endDetectedAt`、`sttDoneAt`、`promptAt`、`firstTextAt`、`firstSpeakAt`（第一句交给 TTS）、`firstAudioAt`（页面报的第一句开始播放）、`llmDoneAt`。Bot 视图每条回复下的 “Timing” 折叠项由此算出（§11.2）。
+- Each sentence is handed to AudioIO for playback in order once synthesized; the sample rate is whatever each sentence actually returns.
+- Interrupt: stopped uniformly by the turn's cancellation token (§4.4). Fully played sentences are recorded in the state machine for `<interrupted>` compensation.
+- Playback progress is reported by the audio page (2026-09-26), following Pipecat: "the bot is speaking" is determined only by the output side from the audio actually played, then reported back (upstream) to the state machine, not inferred from TTS requests.
+  - Each sentence's audio carries a clip id (binary header `[u32 clipId][u32 sampleRate]` + PCM). When it actually starts playing, the page replies `{type:'started', id, at, durationMs}` (fired by the `onended` of a silent `ConstantSourceNode` scheduled to stop at the same moment, so it runs on the audio clock and isn't throttled in background tabs; `at` includes output latency); when finished it replies `{type:'ended', id, at}`. Flushed sentences are not reported. When the page disconnects, the host treats all unfinished sentences as played (without having started), so a turn never gets stuck in "speaking".
+  - The state machine's former `audioActive` is split into two flags, matching Pipecat's `TTSStarted/Stopped` and `BotStarted/StoppedSpeaking`: `ttsActive` (this turn has sentences being synthesized, queued, or played) and `botSpeaking` (the page reported the first sentence started playing). The displayed state is chosen by priority: standby > you're speaking > speaking (`botSpeaking`) > transcribing > synthesizing (`ttsActive` but not yet audible) > thinking > listening.
+  - Gaps between sentences stay "speaking". It counts as done speaking only when the reply is fully generated and all sentences have played, or the playback queue has been empty for 3 s (`BOT_STOP_FALLBACK_MS`, like Pipecat's `BOT_VAD_STOP_FALLBACK_SECS`, e.g. while calling a tool midway), or it is interrupted. After the 3 s fallback it returns to "thinking".
+  - Barge-in checks happen only while `botSpeaking`: there can only be echo when audio is actually playing. If the user starts speaking during synthesis, it is handled as a normal interrupt.
+  - At the end of each turn (if not interrupted), the executor reports timestamps via `onMetrics(turnId, metrics)`: `silenceAt`, `endDetectedAt`, `sttDoneAt`, `promptAt`, `firstTextAt`, `firstSpeakAt` (first sentence handed to TTS), `firstAudioAt` (page reported the first sentence started playing), `llmDoneAt`. The "Timing" collapsible under each reply in the Bot view is computed from these (§11.2).
 
-**实现（2026-09-25）**：`src/voiceAgent/voiceMode.ts`（执行器：麦克风、VAD、插嘴检查、STT、播放、效果执行）、`conversation.ts`（状态机）、`browserAudio.ts`（本地 HTTP + `ws` 服务、音频页面、隐藏 Chrome）、`sentences.ts`、`echoFilter.ts`。和原型的差别：
+**Implementation (2026-09-25)**: `src/voiceAgent/voiceMode.ts` (executor: microphone, VAD, barge-in check, STT, playback, effect execution), `conversation.ts` (state machine), `browserAudio.ts` (local HTTP + `ws` server, audio page, hidden Chrome), `sentences.ts`, `echoFilter.ts`. Differences from the prototype:
 
-- 状态机不再自己发 prompt 给 omp，而是由执行器调用 `VoiceAgent.say(text, 'stt', listener, { signal, interrupted })`：轮次串行、上下文切换、工具都留在 `VoiceAgent` 里。所以去掉了 `llmBusy`；本轮取消令牌的 signal 传进 `say`，中止它就中止这一轮（还在排队的也一样：prompt 照发，让上下文里留下用户的话，然后立刻中止）。
-- `<interrupted>` 说明由状态机按实际播放的句子生成，随 prompt 交给 `VoiceAgent`，替换它按生成文字写的默认说明；被中止那轮已生效的工具调用照样附在后面。
-- 主动轮次：`VoiceAgent` 发 prompt 前调用 `onProactiveTurn`，执行器派发 `proactiveStart`，状态机只在没人说话、没有待识别和待发送的话、没有回复在进行时接受，返回这一轮的 signal；不接受就返回已中止的 signal。`VoiceAgent.floorBusy` 由状态机的 `floorFree` 决定；回复播完或用户的话落空时调用 `VoiceAgent.floorReleased()`，防连播间隔从这一刻算起。
-- 语音模式下打字（"Type a Message"）走状态机的 `typed` 事件：和说话一样先打断回复。
-- 音频页面只接受带随机 token 的连接，别的本地网页连不上麦克风数据流。
-- 删掉了原型的 pulse / 文件回放方式、终端界面、`[DEBUG-mic]` 和录音转储。
-- 顺带修了原型切句的一个问题：代码块内的换行会被当成句末，代码被逐行念出来；现在 ``` 围栏内不切句，整块由清理步骤去掉。
+- The state machine no longer sends prompts to omp itself; instead the executor calls `VoiceAgent.say(text, 'stt', listener, { signal, interrupted })`: turn serialization, context switching, and tools all stay in `VoiceAgent`. So `llmBusy` is gone; the turn's cancellation-token signal is passed into `say`, and aborting it aborts the turn (including one still queued: the prompt is still sent so the user's words remain in context, then aborted immediately).
+- The `<interrupted>` note is generated by the state machine from the sentences actually played and passed to `VoiceAgent` with the prompt, replacing its default note based on the generated text; tool calls that already took effect in the aborted turn are still appended.
+- Proactive turns: before sending the prompt, `VoiceAgent` calls `onProactiveTurn`; the executor dispatches `proactiveStart`, and the state machine accepts only when nobody is speaking, there is no speech pending recognition or sending, and no reply is in progress, returning the turn's signal; if it doesn't accept, it returns an already-aborted signal. `VoiceAgent.floorBusy` is determined by the state machine's `floorFree`; when a reply finishes playing or the user's utterance comes to nothing, `VoiceAgent.floorReleased()` is called, and the anti-back-to-back gap is counted from that moment.
+- Typing in voice mode ("Type a Message") goes through the state machine's `typed` event: like speaking, it interrupts the reply first.
+- The audio page only accepts connections carrying a random token, so other local web pages can't connect to the microphone stream.
+- Removed the prototype's pulse / file-playback modes, terminal UI, `[DEBUG-mic]`, and recording dumps.
+- Also fixed a prototype sentence-splitting bug: newlines inside code blocks were treated as sentence ends, so code was read line by line; now no splitting happens inside ``` fences, and the whole block is removed by the cleanup step.
 
 ### 5.8 WorkerObserver
 
-订阅 worker `RpcBridge` 的事件流（与侧边栏同源），维护两样东西：
+Subscribes to the worker `RpcBridge` event stream (the same source as the sidebar) and maintains two things:
 
-1. **工作日志（digest）**：把原始事件压缩成人类可读的条目，只保留最近 N 条。
+1. **Work log (digest)**: compresses raw events into human-readable entries, keeping only the latest N.
 
    ```
-   [12:03:10] 开始任务：把 README 版本号改为 0.3.0
-   [12:03:12] 读取 README.md
-   [12:03:18] 编辑 README.md
-   [12:03:25] 运行 grep "0.2.40" README.md → 无匹配
-   [12:03:30] 完成（本轮 20 s，修改 1 个文件）
+   [12:03:10] Started task: change the README version to 0.3.0
+   [12:03:12] Read README.md
+   [12:03:18] Edited README.md
+   [12:03:25] Ran grep "0.2.40" README.md → no matches
+   [12:03:30] Done (this turn 20 s, 1 file changed)
    ```
 
-2. **观察事件**：按类别产生 `observation` 事件，投递给中心状态机。
+2. **Observation events**: produces `observation` events by category and delivers them to the central state machine.
 
-| 类别 | 触发 | 优先级 | 默认处理 |
+| Category | Trigger | Priority | Default handling |
 |---|---|---|---|
-| `needs_input` | worker 发出 `extension_ui_request`（select / confirm / input / editor）；omp 的工具审批也以这种 select 发出（§2.4） | 高 | 尽快转述并询问用户 |
-| `error` | 工具失败累计、轮次异常结束、进程退出 | 高 | 尽快说明 |
-| `done` | worker `agent_end` 之后稳定空闲：omp 插话后会先结束一次，约 3 s 后自动再开一轮（§2.4） | 中 | 生成完成总结 |
-| `progress` | 阶段变化（开始编辑、开始运行测试、切换文件组），或距上次播报 ≥ `narrationIntervalSecs` | 低 | 节流，过期即丢 |
+| `needs_input` | Worker emits `extension_ui_request` (select / confirm / input / editor); omp tool approvals are also sent as such a select (§2.4) | High | Relay and ask the user as soon as possible |
+| `error` | Accumulated tool failures, turn ended abnormally, process exited | High | Explain as soon as possible |
+| `done` | Worker stays idle after `agent_end`: after an omp interjection it ends once and then automatically starts another turn about 3 s later (§2.4) | Medium | Generate a completion summary |
+| `progress` | Phase change (starts editing, starts running tests, switches file group), or ≥ `narrationIntervalSecs` since the last narration | Low | Throttled; dropped when stale |
 
-- 事件来源：阶段和进展取 `tool_execution_start/end`、`turn_end`；出错取 `auto_retry_end{success:false}`、`compaction_end{errorMessage}`、异常结束的 `agent_end`。digest 由规则生成，不调用 LLM。
-- `done` 总结的输入：本轮 digest、worker 最终 assistant 文本（`get_last_assistant_text`，截断）、改动的文件和行数（直接取 `tab.diffManager`，不从工具事件里自己统计）。
-- 当前 tab 里的所有任务都要观察和播报，不区分是在面板里打字发起的，还是语音派发的：语音附着在用户已经发起的任务上（§5.12）。
-- 实现：`src/voiceAgent/workerDigest.ts`。每个 tab 一份，只保留最近 60 条。omp 的 `tool_execution_start.intent` 本身就是可读描述（"Reading a.txt"），直接使用；pi 没有这个字段，按工具名和参数拼出描述。bash 结束时记录退出码和最后一行输出，跳过 omp 附加的耗时和退出码行。
-- 每个语音轮次附带该语音上下文还没看过的日志行，放在 `<worker-updates>` 里，最多 20 行。新建语音上下文时，旧日志属于 `<task-history>` 或同一 tab 里的上一个任务，所以只带正在进行的那次运行的日志。实测过：不这样处理的话，`/new` 之后语音智能体会汇报上一个任务的活动。
+- Event sources: phase and progress come from `tool_execution_start/end` and `turn_end`; errors come from `auto_retry_end{success:false}`, `compaction_end{errorMessage}`, and abnormally ended `agent_end`. The digest is rule-generated, without calling an LLM.
+- Inputs to the `done` summary: this turn's digest, the worker's final assistant text (`get_last_assistant_text`, truncated), and changed files and line counts (taken directly from `tab.diffManager`, not tallied from tool events).
+- All tasks in the current tab are observed and narrated, whether started by typing in the panel or dispatched by voice: voice attaches to tasks the user has already started (§5.12).
+- Implementation: `src/voiceAgent/workerDigest.ts`. One per tab, keeping only the latest 60 entries. omp's `tool_execution_start.intent` is already a readable description ("Reading a.txt") and is used directly; pi has no such field, so a description is built from the tool name and arguments. When bash finishes, record the exit code and the last output line, skipping the duration and exit-code lines omp appends.
+- Each voice turn includes the log lines this voice context hasn't seen yet, in `<worker-updates>`, at most 20 lines. When a new voice context is created, old logs belong to `<task-history>` or to a previous task in the same tab, so only the log of the currently running run is included. Tested: without this, after `/new` the voice agent reports the previous task's activity.
 
-### 5.9 FloorArbiter（话语权仲裁）
+### 5.9 FloorArbiter (floor arbitration)
 
-这是整个体验的核心，Pipecat 没有现成实现。它是中心状态机（§4.3）的一部分，不是独立的处理器。
+This is the core of the whole experience, and Pipecat has no ready-made implementation. It is part of the central state machine (§4.3), not a separate processor.
 
-**状态**：`userSpeaking`、`botSpeaking`、`llmBusy`，以及当前语音上下文的待发言观察队列。每个语音上下文各有一个队列，切换上下文时换成对应的队列（§5.12）。
+**State**: `userSpeaking`, `botSpeaking`, `llmBusy`, plus the current voice context's queue of observations waiting to be narrated. Each voice context has its own queue; switching contexts swaps in the corresponding queue (§5.12).
 
-**规则**：
+**Rules**:
 
-1. **用户优先**：`userSpeechStart` 到达时，如果 bot 正在说话或 LLM 正在生成，立即 `cancelTurn`（§4.4）。
-2. 用户说话期间，观察只入队，不触发 LLM。
-3. 一轮用户话语结束时，把未消费的观察合并进这一轮 prompt（§7.2），由模型自己决定是否顺带提及。
-4. 空闲时（用户没在说，bot 没在说，LLM 空闲），从队列里取优先级最高的观察，发一个**主动轮次** prompt：
+1. **User first**: when `userSpeechStart` arrives, if the bot is speaking or the LLM is generating, immediately `cancelTurn` (§4.4).
+2. While the user is speaking, observations are only queued and don't trigger the LLM.
+3. When a user utterance ends, unconsumed observations are merged into that turn's prompt (§7.2), and the model decides whether to mention them.
+4. When idle (user not speaking, bot not speaking, LLM idle), take the highest-priority observation from the queue and send a **proactive turn** prompt:
 
    ```
    <worker-update priority="done">…digest…</worker-update>
-   按需用一两句话告诉用户；如果不值得说，只回复 <silent/>。
+   Tell the user in a sentence or two if needed; if it's not worth mentioning, reply only <silent/>.
    ```
 
-   `<silent/>` 回复不送 TTS。
-5. **过期丢弃**：`progress` 类观察在队列里等待超过 `narrationIntervalSecs` 就丢弃，只保留最新一条。
-6. **防连播**：两次主动播报之间至少间隔 `minProactiveGapSecs`，默认 8 s。`needs_input` 和 `error` 不受此限制。
+   A `<silent/>` reply is not sent to TTS.
+5. **Drop when stale**: `progress` observations waiting in the queue longer than `narrationIntervalSecs` are dropped; only the latest one is kept.
+6. **No back-to-back narration**: at least `minProactiveGapSecs` (default 8 s) between two proactive narrations. `needs_input` and `error` are exempt.
 
-**实现（2026-09-25，打字模式）**：`src/voiceAgent/floorArbiter.ts`，纯簿记，时间由调用方传入。
+**Implementation (2026-09-25, typing mode)**: `src/voiceAgent/floorArbiter.ts`, pure bookkeeping; time is passed in by the caller.
 
-- 没有入队的观察对象，而是从状态推出来：`needs_input` = 当前任务有用户还没被告知的待回答请求（webview 先回答了，请求消失，观察自然撤回）；`research` = 该语音上下文里已结束、还没展示过的调研；`progress` = worker 在忙、有没看过的日志、距上一轮已超过 `narrationIntervalSecs`。只有 `done` 和 `error` 要从事件里记下来，每个 tab 各一份。
-- `done`：`agent_end`（`isTerminal !== false`、非 `willRetry`、非 `aborted`）之后 worker 保持空闲 4 s 才算。omp 插话后约 3 s 自动再开一轮、排队消息紧接着开跑，这两种情况都会先来一个 `agent_start`，清掉待报的 `done`。用户叫停（`aborted`）不播报。
-- `error`：`stopReason: 'error'` 的 `agent_end`、`auto_retry_end{success:false}`、`compaction_end{errorMessage}`。worker 进程意外退出目前没有事件，不播报。
-- 优先级 `needs_input` > `error` > `done` > `research` > `progress`。防连播的间隔从**任何一轮**（用户或主动）结束算起。
-- 用户轮次带走当前任务的全部观察（规则 3）；同一 tab 换了会话（`/new`、恢复历史）时丢弃该 tab 记下的 `done` / `error`；切换任务时进展计时重新开始，后台积压的 `progress` 不播报（§5.12 规则 5）。
-- `VoiceAgent` 每秒询问一次仲裁器，worker 请求增减时（`WorkerController.onRequestsChanged`）和调研结束时也立即询问。主动轮次和用户轮次排在同一条串行队列里；主动轮次在加载语音上下文之后、发出 prompt 之前重新选一次观察，此时如果有用户消息在排队就放弃，让用户先说。
-- 主动轮次的消息以 `<worker-update kind="…">` 加一句说明结尾，代替 `<user>`。`done` 附 worker 最后一条回复（截断到 600 字）。主动轮次里宿主工具只允许 `worker_status`，其他一律返回错误：没人要求，不能替用户派活、叫停或回答。
-- `<silent/>`：回复的文字在还可能是 `<silent/>` 的前缀时先不放出，确定是 `<silent/>` 就整轮不显示（将来也不送 TTS）。
-- **开场白**（2026-09-27）：语音模式连上时（`VoiceAgent.open({ reason: 'connect' })`），以及语音模式开着时用户从恢复列表恢复会话时（`WorkerController.onSessionResumed` → `open({ reason: 'resume', tabId })`），语音智能体先开口说一句：任务有之前的工作（语音对话、`<task-history>`、`<worker-updates>`）或 worker 在等回答时，简要说现在的进展，否则说一句“我在”。它走主动轮次的队列和话语权判断，消息以 `<voice-on reason="…" language="…"/>` 结尾，不允许 `<silent/>`，工具限制同主动轮次；像用户轮次一样带走当前任务的全部观察。用户在它开口之前先说话、或恢复的 tab 已经不是当前 tab 时，开场白作废。`language` 取 `oh-my-pi-chater.voice.language`，只在语音上下文里还没有用户说过的话时起作用。Bot 视图里显示为 `opening` 的 Update。
+- There are no queued observation objects; observations are derived from state: `needs_input` = the current task has a pending request the user hasn't been told about (if the webview answers first, the request disappears and the observation is naturally withdrawn); `research` = finished research in this voice context that hasn't been shown yet; `progress` = the worker is busy, there are unseen log lines, and more than `narrationIntervalSecs` has passed since the last turn. Only `done` and `error` need to be recorded from events, one of each per tab.
+- `done`: counts only after the worker stays idle for 4 s following `agent_end` (`isTerminal !== false`, not `willRetry`, not `aborted`). After an omp interjection a new turn starts automatically about 3 s later, and a queued message starts right away; both first produce an `agent_start`, which clears the pending `done`. A user stop (`aborted`) is not narrated.
+- `error`: `agent_end` with `stopReason: 'error'`, `auto_retry_end{success:false}`, `compaction_end{errorMessage}`. An unexpected worker process exit currently has no event and is not narrated.
+- Priority `needs_input` > `error` > `done` > `research` > `progress`. The anti-back-to-back gap is counted from the end of **any turn** (user or proactive).
+- A user turn takes all observations of the current task (rule 3); when the same tab switches session (`/new`, restoring history), the `done` / `error` recorded for that tab are discarded; when switching tasks the progress timer restarts, and `progress` accumulated in the background is not narrated (§5.12 rule 5).
+- `VoiceAgent` queries the arbiter once per second, and also immediately when worker requests change (`WorkerController.onRequestsChanged`) and when research finishes. Proactive turns and user turns share one serial queue; a proactive turn re-selects the observation after loading the voice context and before sending the prompt, and gives up if a user message is queued at that point, letting the user go first.
+- A proactive turn's message ends with `<worker-update kind="…">` plus a one-sentence instruction, instead of `<user>`. `done` includes the worker's last reply (truncated to 600 characters). In a proactive turn the only allowed host tool is `worker_status`; all others return an error: nobody asked, so it must not dispatch tasks, stop, or answer on the user's behalf.
+- `<silent/>`: reply text is held back while it could still be a prefix of `<silent/>`; once it is confirmed to be `<silent/>`, the whole turn is not displayed (and in the future not sent to TTS).
+- **Opening line** (2026-09-27): when voice mode connects (`VoiceAgent.open({ reason: 'connect' })`), and when the user restores a session from the resume list while voice mode is on (`WorkerController.onSessionResumed` → `open({ reason: 'resume', tabId })`), the voice agent speaks first: if the task has prior work (voice conversation, `<task-history>`, `<worker-updates>`) or the worker is waiting for an answer, it briefly states the current progress; otherwise it says "I'm here". It goes through the proactive-turn queue and floor check; the message ends with `<voice-on reason="…" language="…"/>`, `<silent/>` is not allowed, and tool restrictions are the same as for proactive turns; like a user turn it takes all observations of the current task. If the user speaks before it does, or the restored tab is no longer the current tab, the opening line is dropped. `language` comes from `oh-my-pi-chater.voice.language` and only applies when the voice context has no user utterances yet. In the Bot view it appears as an `opening` Update.
 
 ### 5.10 EditorWatcher
 
-- 监听 `window.activeTextEditor`、选区和可见范围的变化，维护当前快照：文件相对路径、可见行范围、选区（带文本，截断）、语言。
-- 复用 `src/shared/editorContext.ts` 的片段格式。
-- 每个用户轮次附带**当前快照**。快照没变化时，只附一个"同上"标记，节省 token。
-- 语音模式下不附带文件全文，模型需要时自己调用 `read`，见 §7.4。
+- Listens for changes to `window.activeTextEditor`, the selection, and the visible range, and maintains the current snapshot: file relative path, visible line range, selection (with text, truncated), language.
+- Reuses the snippet format of `src/shared/editorContext.ts`.
+- Each user turn includes the **current snapshot**. When the snapshot hasn't changed, only a "same as before" marker is included, to save tokens.
+- In voice mode the full file text is not included; the model calls `read` itself when needed, see §7.4.
 
-### 5.11 HostToolRouter 与 WorkerController
+### 5.11 HostToolRouter and WorkerController
 
-HostToolRouter 负责分发 `host_tool_call`，执行后回传 `host_tool_result`；收到 `host_tool_cancel` 时中止执行。工具清单见 §6。
+HostToolRouter dispatches `host_tool_call`, executes it, and sends back `host_tool_result`; on `host_tool_cancel` it aborts execution. The tool list is in §6.
 
-HostToolRouter **不直接调用 worker 的 `RpcBridge`**，而是通过 `WorkerController`。这个接口由 `SidebarProvider` 实现，原因如下：
+HostToolRouter **does not call the worker's `RpcBridge` directly**; it goes through `WorkerController`. This interface is implemented by `SidebarProvider`, for these reasons:
 
-- `_startTurn` 负责 checkpoint 和 diff 的轮次划分，`_dispatchPrompt` 给 tab 命名，`queuedMessages` 给打字消息排队，`isStreaming` 维护上下文开关。绕过它们，回滚、diff 栏和排队就会与实际状态不一致。
-- `tab.session` 会被整体替换：`resumeSessionFromPanel` 切换后端或 cwd 时会重建 session。缓存下来的 bridge 引用会失效，所以每次调用都要按 tabId 实时解析。
-- 当前 tab 分 pi / omp 两个工作区：`_workspaces[backend].activeTabId`。
+- `_startTurn` handles checkpoint and diff turn boundaries, `_dispatchPrompt` names the tab, `queuedMessages` queues typed messages, and `isStreaming` maintains the context switch. Bypassing them makes rollback, the diff bar, and the queue diverge from actual state.
+- `tab.session` gets replaced wholesale: `resumeSessionFromPanel` rebuilds the session when switching backend or cwd. A cached bridge reference becomes stale, so every call must resolve by tabId at call time.
+- The current tab is split across two workspaces, pi / omp: `_workspaces[backend].activeTabId`.
 
 ```ts
 interface WorkerController {
-  /** 当前 tab；sessionFile 是语音上下文的键（§5.12）。 */
+  /** Current tab; sessionFile is the voice context key (§5.12). */
   activeTask(): { tabId: string; sessionFile?: string; name: string; backend: AgentBackend } | undefined;
-  /** 执行时读取 worker 状态再决定怎么发（§6 tell_worker），与面板打字走同一条发送路径。 */
+  /** Reads worker state at execution time to decide how to send (§6 tell_worker); uses the same send path as typing in the panel. */
   send(tabId: string, text: string, opts: { when: 'now' | 'after'; includeEditorContext?: boolean }): Promise<'started' | 'steered' | 'queued'>;
   abort(tabId: string): Promise<void>;
-  status(tabId: string): WorkerStatus;              // idle / working / awaiting / error，本轮耗时，排队条数
-  pendingRequests(tabId: string): WorkerRequest[];  // 待回答的 extension_ui_request（含 omp 工具审批）
-  /** 先到先得；请求已被回答或已超时时返回 false；答案与请求类型不符时抛错。 */
+  status(tabId: string): WorkerStatus;              // idle / working / awaiting / error, current turn duration, queued count
+  pendingRequests(tabId: string): WorkerRequest[];  // pending extension_ui_request (including omp tool approvals)
+  /** First come, first served; returns false if the request was already answered or timed out; throws if the answer doesn't match the request type. */
   answer(tabId: string, requestId: string, answer: WorkerAnswer): boolean;
-  /** 最近 count 轮的用户指令和 worker 的最终回复；用于 <task-history> 和 worker_status。 */
+  /** User instructions and worker final replies for the last count turns; used for <task-history> and worker_status. */
   recentTurns(tabId: string, count: number): WorkerTurn[];
-  /** 在每次 sendStateSync 时比对：点击 tab、切换后端、tab 内换会话都会触发；新 tab 拿到会话文件不算切换。 */
+  /** Compared on every sendStateSync: clicking a tab, switching backend, and switching session within a tab all trigger it; a new tab receiving its session file does not count as a switch. */
   onActiveTaskChanged(listener): Disposable;
-  /** 每个 tab 的原始 agent 事件，在侧边栏自己的处理之后发出，供工作日志使用。 */
+  /** Raw agent events per tab, emitted after the sidebar's own handling, for the work log. */
   onTabEvent(listener): Disposable;
 }
 ```
 
-实现：`src/voiceAgent/workerController.ts`（接口），`SidebarProvider`（实现）。调试入口：命令面板 "Voice Agent — Debug Worker Control"；内部命令 `oh-my-pi-chater.voiceAgent.workerControl` 接收 `{ action, ... }` 并返回结果，供脚本测试使用。
+Implementation: `src/voiceAgent/workerController.ts` (interface), `SidebarProvider` (implementation). Debug entry: command palette "Voice Agent — Debug Worker Control"; the internal command `oh-my-pi-chater.voiceAgent.workerControl` takes `{ action, ... }` and returns the result, for scripted testing.
 
-第 2 步实现（2026-09-25）：`voiceLlm.ts`（语音 omp 进程，复用 `PiRpcBridge`，新增 `setHostTools`、`onExit`）、`hostTools.ts`（HostToolRouter 与工具定义）、`voicePrompt.ts`（系统提示词与每轮消息）、`voiceAgent.ts`（编排：串行轮次、新消息打断、按任务切换语音上下文）、`voiceAgentCommands.ts`（命令面板 "Voice Agent — Type a Message" / "Voice Agent — Stop"，内部命令 `oh-my-pi-chater.voiceAgent.say`）。还没有音频，用打字代替说话，对话记录写在输出面板 "PI Buddy: Voice Agent"。
+Step 2 implementation (2026-09-25): `voiceLlm.ts` (voice omp process, reusing `PiRpcBridge`, adding `setHostTools` and `onExit`), `hostTools.ts` (HostToolRouter and tool definitions), `voicePrompt.ts` (system prompt and per-turn messages), `voiceAgent.ts` (orchestration: serial turns, new messages interrupt, switching voice context per task), `voiceAgentCommands.ts` (command palette "Voice Agent — Type a Message" / "Voice Agent — Stop", internal command `oh-my-pi-chater.voiceAgent.say`). No audio yet; typing substitutes for speaking, and the transcript is written to the output panel "PI Buddy: Voice Agent".
 
-- `send` 复用面板打字的发送路径：空闲时走 `_beginPrompt`（`_startTurn`、`_dispatchPrompt`），与面板发送共用；`after` 进 `queuedMessages`，与面板的"排队"是同一个队列，用户能看到、能编辑；`now` 发 `prompt` + `streamingBehavior: 'steer'`，并在面板上显示为插话。
-- 拒绝 `/` 开头的斜杠命令和 `!` 开头的 shell 快捷方式：语音只做任务控制（§6）。
-- `answer` 与 webview 共用 `RpcExtensionUiHandler` 的 `_pending`，谁先回答算谁的。语音回答后，向 webview 发 `extensionUiDismiss` 关闭对话框；请求超时时也会发，之前超时的对话框会一直留在面板上。webview 先回答时，从语音的观察队列里撤回这条请求。
-- select 的答案必须是选项之一；confirm 只接受 `confirmed`，其他类型只接受 `value`，不符时抛错，让模型重新问。
-- 语音侧只依赖这个接口，测试时换成假实现。
+- `send` reuses the panel's typing send path: when idle it goes through `_beginPrompt` (`_startTurn`, `_dispatchPrompt`), shared with panel sends; `after` goes into `queuedMessages`, the same queue as the panel's "queue", visible and editable by the user; `now` sends `prompt` + `streamingBehavior: 'steer'` and shows it in the panel as an interjection.
+- Rejects slash commands starting with `/` and shell shortcuts starting with `!`: voice only does task control (§6).
+- `answer` shares `_pending` of `RpcExtensionUiHandler` with the webview; whoever answers first wins. After a voice answer, `extensionUiDismiss` is sent to the webview to close the dialog; it is also sent on request timeout, since previously a timed-out dialog stayed on the panel forever. When the webview answers first, the request is withdrawn from the voice observation queue.
+- A select answer must be one of the options; confirm only accepts `confirmed`, and other types only accept `value`; mismatches throw so the model asks again.
+- The voice side depends only on this interface; tests swap in a fake implementation.
 
-### 5.12 多会话：语音上下文绑定任务
+### 5.12 Multiple sessions: voice context bound to the task
 
-侧边栏可以同时开多个会话（每个 tab 一个独立的 omp/pi 进程）。**决定（2026-09-25）**：语音附着在用户已经发起的任务上。每个 worker 会话有自己的语音上下文；用户切换 tab，语音上下文跟着切换。不存在一个统管所有 tab 的语音智能体。
+The sidebar can have multiple sessions open at once (each tab is an independent omp/pi process). **Decision (2026-09-25)**: voice attaches to tasks the user has already started. Each worker session has its own voice context; when the user switches tabs, the voice context switches with it. There is no single voice agent overseeing all tabs.
 
-**为什么**：
+**Why**:
 
-- 语音上下文里只有这一个任务的讨论和进展，A 任务里的"它""那个文件"不会被带进 B 任务。
-- 工具不需要 tab 参数，也不用按名字路由；STT 的错字不可能把指令派到别的会话。
-- 不需要 `<worker-switch>` 提示、后台 tab 播报规则和跨 tab 的仲裁队列。
+- The voice context contains only this task's discussion and progress; "it" or "that file" from task A won't carry over into task B.
+- Tools need no tab parameter and no routing by name; an STT typo can't send an instruction to another session.
+- No need for a `<worker-switch>` hint, background-tab narration rules, or a cross-tab arbitration queue.
 
-**规则**：
+**Rules**:
 
-1. **上下文的键是 worker 会话文件**（还没有会话文件时用 tabId）。同一个 tab 里恢复了另一个历史会话，或者执行了 `/new`，就算换了任务，语音上下文也跟着换。
-2. **一个进程，多份上下文**：语音 omp 子进程只有一个（§2.3）。某个任务第一次成为语音模式下的当前任务时，执行 `new_session` 建立它的语音会话，并发送引导轮次（§7.5）。映射 `worker 会话 → 语音会话文件` 由扩展维护：记在该任务的对话记录上（`VoiceSessionRecord.voiceSessionFile`，§11.4），随 `workspaceState` 保存。
+1. **The context key is the worker session file** (tabId when there is no session file yet). Restoring another history session in the same tab, or running `/new`, counts as a new task, and the voice context switches too.
+2. **One process, multiple contexts**: there is only one voice omp subprocess (§2.3). The first time a task becomes the current task in voice mode, run `new_session` to create its voice session and send the bootstrap turn (§7.5). The extension maintains the mapping `worker session → voice session file`: it is recorded on the task's transcript (`VoiceSessionRecord.voiceSessionFile`, §11.4) and saved with `workspaceState`.
 
-   **自动续聊（2026-09-26）**：语音智能体重新启动（语音模式关了又开、换了 VS Code 窗口）后，某个任务第一次成为当前任务时，如果它最近一次对话记录里的语音会话文件还在，就 `switch_session` 接着用，对话记录也接在那条后面；文件不在了就 `new_session`，另起一条对话记录。`switch_session` 失败时同样新建，并在原对话记录里注明"之前的对话没能恢复"。续上的上下文照样带 `<task-history>`，因为语音模式关着时 worker 做了什么它不知道；worker 日志（digest）随智能体重建，续上的上下文看到这次启动以来的全部日志。`tab:<tabId>` 键只在本次扩展运行内有效：tab 拿到会话文件后，本次运行里用 `tab:` 记下的对话连同语音会话文件改挂到会话文件上；以前窗口存下的 `tab:` 记录不再续聊。
-3. **切换任务 = 切换语音上下文**（事件 `activeTaskChanged`）：
-   1. `cancelTurn` 当前轮次，停止播放并中止生成；
-   2. 等到 `llmEnd`（omp 空闲）后，再发 `switch_session`（或 `new_session`）；
-   3. 把状态机的观察队列和待确认提案换成新上下文的。
+   **Automatic resume (2026-09-26)**: after the voice agent restarts (voice mode turned off and on again, or a different VS Code window), the first time a task becomes the current task, if the voice session file from its most recent transcript still exists, `switch_session` continues with it and the transcript continues from that one; if the file is gone, `new_session` starts a new transcript. If `switch_session` fails, a new one is created too, and the original transcript notes "the previous conversation could not be restored". A resumed context still gets `<task-history>`, because it doesn't know what the worker did while voice mode was off; the worker log (digest) is rebuilt with the agent, and the resumed context sees all logs since this launch. `tab:<tabId>` keys are valid only within the current extension run: once the tab gets a session file, the conversation recorded under `tab:` in this run, together with its voice session file, is re-attached to the session file; `tab:` records saved by earlier windows are not resumed.
+3. **Switching tasks = switching voice context** (event `activeTaskChanged`):
+   1. `cancelTurn` the current turn, stopping playback and aborting generation;
+   2. wait for `llmEnd` (omp idle), then send `switch_session` (or `new_session`);
+   3. swap the state machine's observation queue and pending proposals for the new context's.
 
-   用户正在说的话不丢弃，说完后送进**新**上下文。
-4. **轮次绑定任务**：一个语音轮次发出 prompt 时记下 tabId，这一轮的所有工具调用都作用于这个 tab。轮次进行中切换任务会取消该轮（规则 3）；已经发出的工具调用不撤销，结果回到原来的语音会话里。
-5. **后台任务不发声**：每个 tab 都有一个 WorkerObserver 持续记录 digest，但只有当前任务的观察进入仲裁队列。后台任务的完成、出错和等待确认，只靠侧边栏已有的 tab 通知标记（`hasNotification`）提示。切回该任务时，积压的 `needs_input`、`error`、`done` 进入队列，按 §5.9 播报一次；积压的 `progress` 丢弃，只把 digest 附在下一轮里。
-6. **不能用语音切换 tab**：语音智能体只做任务控制（§6），没有 `switch_worker` 工具；切换 tab 只能在界面上操作。
-7. **tab 生命周期**：
-   - 新开 tab：不做任何事；它成为当前任务时，按规则 2 建立上下文。
-   - 关闭 tab：丢弃它的观察和语音会话映射；针对它的在途工具调用返回"会话已关闭"。
-   - TUI 模式（按 tab）：TUI 与 RPC worker 不能同时写同一个会话文件，所以该任务的语音只保留讨论（状态条在 TUI 下方仍可用，pair 工具照常），派活/叫停工具由 `SidebarWorker` 抛错（`TUI_TAB_REFUSAL`：这个 tab 在 TUI 模式，无法语音控制，请用户切回聊天视图）。TUI tab 没有 Bot 视图。
-8. **语音模型**：§5.4 的"跟随 worker 模型"指开启语音模式时当前 tab 的模型；之后切换任务不改变语音模型。
+   What the user is currently saying is not discarded; once finished it goes to the **new** context.
+4. **Turns are bound to a task**: when a voice turn sends its prompt it records the tabId, and all tool calls in that turn act on that tab. Switching tasks mid-turn cancels the turn (rule 3); tool calls already sent are not undone, and their results return to the original voice session.
+5. **Background tasks stay silent**: each tab has a WorkerObserver continuously recording the digest, but only the current task's observations enter the arbitration queue. Completion, errors, and pending confirmations of background tasks are signaled only by the sidebar's existing tab notification marker (`hasNotification`). When switching back to that task, accumulated `needs_input`, `error`, and `done` enter the queue and are narrated once per §5.9; accumulated `progress` is dropped, and only the digest is attached to the next turn.
+6. **No switching tabs by voice**: the voice agent only does task control (§6); there is no `switch_worker` tool; tabs can only be switched in the UI.
+7. **Tab lifecycle**:
+   - New tab: do nothing; when it becomes the current task, create its context per rule 2.
+   - Closed tab: discard its observations and voice session mapping; in-flight tool calls targeting it return "session closed".
+   - TUI mode (per tab): the TUI and the RPC worker can't write the same session file at once, so the RPC worker is never used for that task. The voice agent drives the TUI itself through the same tools: `tell_worker` types the prompt into it, `worker_status` reads its screen, `stop_worker` presses Escape, `answer_worker` types the user's answer as text and keys; when a run stops it gets a `stopped` update with the screen's last lines (updated 2026-09-29; see [tabs-and-tui.md](./tabs-and-tui.md#tui-tabs-and-the-voice-agent)). The Bot view can cover a TUI tab's terminal (the TUI keeps running); the tab icon or the voice bar button switches back.
+8. **Voice model**: "following the worker model" in §5.4 means the current tab's model when voice mode is turned on; switching tasks afterward does not change the voice model.
 
-### 5.13 语音服务不可用时退回文字（2026-09-28）
+### 5.13 Falling back to text when voice services are unavailable (2026-09-28)
 
-STT、TTS 任一或两者不能用（没配置、检查失败、内置引擎下载失败）时，语音智能体照样上线，缺的方向改用文字：
+When STT, TTS, or both can't be used (not configured, check failed, built-in engine download failed), the voice agent still comes online and uses text for the missing direction:
 
-- **启动**：`voiceAgentCommands.ts` 的 `start` 先对没通过的服务重新检查一次（`probeStt` / `probeTts`，用户可能刚把服务开起来），仍不通过的不传给 `VoiceMode.start`，原因放进 `unavailable`。`VoiceMode.start` 不再因为缺 STT/TTS 抛错；STT 的 `/models` 检查失败也只是去掉 STT。两者都通过时行为不变。
-- **没有 STT**：不加载 VAD，音频页以 `capture=0` 打开，只播放、不调 `getUserMedia`，麦克风始终关着，波形不会随用户说话变化；静音无意义（`setMuted` 不生效），输入框麦克风置灰并说明原因。用户在 Bot 视图里打字（`VoiceMode.type`）。
-- **没有 TTS**：状态机 `ConvState.voiced = false`，回复不切句、不送 TTS，不进入 synthesizing / speaking，生成完即结束这一轮（`lastMetrics`、`floorReleased` 照常）；代码锚点立即指向；被打断时给模型的说明改为“用户看到了已写出的部分”。
-- **两者都没有**：不开音频页和隐藏 Chrome，语音模式就是 Bot 视图里的打字对话；Bot 视图的朗读按钮改在 Bot 视图里播放（`beginReplay` 返回 `undefined`）。
-- **提示**：机器人状态条上的 “Can't hear” / “No voice” 标签（§11.1），以及启动时 Bot 视图里的一条系统消息，说明它缺什么、为什么。
-- **中途失败**：语音模式运行中 STT 或 TTS 请求失败，只记日志并在 Bot 视图里记一条系统消息（每次连续失败只记一次，恢复后再失败再记），不停止对话：打字照样发给语音智能体，TTS 失败的句子不播放，状态不会卡在合成中。
-- **就绪状态跟随真实请求**（2026-09-28）：`voiceReadiness()` 起初只来自 `/models` 探测（启动、改设置、设置页 Test），服务能连上但模型、声音配错时也算通过。现在每次真实请求都记结果：`resolveSttConfig` / `resolveTtsConfig` 给配置挂上 `onOutcome`，`SttClient.transcribe`（语音模式、听写、设置页 Dry run）HTTP 成功就记可用（转写为空也算，可能只是安静），连不上、401/403、404、其他 4xx/5xx、超时记不可用；`TtsClient.synthesize`（语音模式、朗读按钮、Dry run）解析出 WAV 记可用，连不上、HTTP 错误、超时、返回的不是 16 位单声道 WAV 记不可用。调用方主动取消（打断、停止朗读）不记；调用方自己的期限到了（`TimeoutError`）算超时。结果按实际用的设置记（STT 键是 URL + 模型，TTS 键是 URL + 模型 + 声音 + languageField），设置已经换了的结果丢弃；用了设置页里临时输入、没保存的 key 时也不记。状态没变不通知，变了经 `onVoiceReadinessChange` → stateSync 更新标签，之后一次成功自动清掉。
-  - **探测不能推翻的失败**：真实请求的 404、返回不是语音服务的格式、其他错误（如 400 “unknown voice”）是 `/models` 看不出来的，记为 sticky：之后探测成功不清除它，只有一次成功的真实请求（如 Dry run、朗读按钮）或换了设置（键变了）才清除。连不上、超时、401/403、5xx、429 不是 sticky，服务重启后下一次探测就恢复（语音模式启动和听写开始前都会对不可用的服务重新探测一次）。
-  - **内置引擎**：没有结果时算可用；模型下载失败、引擎起不来（`builtinVoiceEngineUrl` 抛错，用户取消下载除外）或请求失败都记不可用，提示 “The built-in … engine failed: …”；探测不检查内置引擎，但会忘掉它的失败，所以下次使用时再试，成功即恢复。
-  - **麦克风**：音频页 `getUserMedia` 失败时发 `micError`（成功发 `micOk`，重连时重发），`VoiceMode.unavailable.stt` 变成 “Can't open the microphone (…)”，经 `onMicStatus` 更新状态条的 “Can't hear” 标签并在 Bot 视图记一条系统消息；这不算 STT 服务的失败，不写进就绪状态。听写的录音程序打不开时仍按原样报错。
-  - 在线时标签 = 当前缺的服务（或打不开的麦克风）∪ 就绪状态当前不可用的服务。
-- **运行中恢复与换设置，不用重启**（2026-09-28）：`src/voiceAgent/serviceSync.ts` 的 `VoiceServiceSync` 在语音模式开着时监听 `onVoiceReadinessChange` 和语音设置变化（`oh-my-pi-chater.voice.*`、`voiceAgent.tts.*`；改 STT 模型现在也会重新探测）。
-  - 缺的服务一旦就绪（改对了设置、服务起来了、内置引擎重试成功），就 `resolveSttConfig` / `resolveTtsConfig` 并接到正在运行的 `VoiceMode`：TTS 用 `useTts`，没有音频页就先开一个只播放的页面，状态机收到 `voiced` 事件，**从下一条回复起**朗读（正在以文字显示的回复不会从中间开始念，`ConvState.nextVoiced` 等这条结束再生效）；STT 用 `useStt`，先查 `/models`，再加载 Silero VAD，已有只播放的页面时发 `{"type":"capture"}` 让它打开麦克风（重连时服务端重发），没有页面就开一个采音的页面，麦克风开关照旧跟随静音和待命（`ActiveVoiceWindow`）。成功后 `unavailable` 里对应的原因去掉，重新推送 `VoiceStatus`（标签消失），Bot 视图记一条系统消息。
-  - 正在用的服务变不可用：不拆，照旧退回文字（逐句失败、标签显示）；服务恢复后下一次请求就成功。
-  - 正在用的服务设置变了（换声音、模型、URL、引擎、语速、语言）：配置是在解析时定下的（`TtsClient` / `SttClient` 持有它），所以同步会重新解析并换上新配置（`Speaker.setClient`、新的 `SttClient`），不论新设置的就绪状态如何，之后的请求按新设置发出，结果再更新就绪状态；已经送去合成的句子用原来的。朗读缓存的键（`liveTtsKey`）跟着更新。
-  - 接不上（`/models` 失败、VAD 加载失败、音频页连不上）时保持原样，`unavailable` 换成这次的原因；失败已记入就绪状态，下次状态或设置变化时再试。同步串行执行，期间再有变化就在结束后再跑一轮。
+- **Startup**: `start` in `voiceAgentCommands.ts` first re-checks services that didn't pass (`probeStt` / `probeTts`; the user may have just started the service); those still failing are not passed to `VoiceMode.start`, and the reason goes into `unavailable`. `VoiceMode.start` no longer throws for missing STT/TTS; a failed STT `/models` check also just drops STT. When both pass, behavior is unchanged.
+- **No STT**: VAD is not loaded; the audio page opens with `capture=0`, playback only, without calling `getUserMedia`; the microphone stays off and the waveform doesn't react to the user's voice; mute is meaningless (`setMuted` has no effect), and the composer microphone is greyed out with the reason explained. The user types in the Bot view (`VoiceMode.type`).
+- **No TTS**: the state machine's `ConvState.voiced = false`; replies are not split into sentences or sent to TTS, never enter synthesizing / speaking, and the turn ends as soon as generation finishes (`lastMetrics` and `floorReleased` as usual); code anchors point immediately; the note given to the model on interrupt becomes "the user saw the part already written".
+- **Neither**: no audio page and no hidden Chrome; voice mode is just a typed conversation in the Bot view; the Bot view's read-aloud button plays inside the Bot view instead (`beginReplay` returns `undefined`).
+- **Notice**: the "Can't hear" / "No voice" labels on the bot status bar (§11.1), plus a system message in the Bot view at startup, explaining what is missing and why.
+- **Failure mid-session**: if an STT or TTS request fails while voice mode is running, it is only logged and recorded as a system message in the Bot view (once per run of consecutive failures; recorded again if it fails again after recovering), without stopping the conversation: typing is still sent to the voice agent, sentences whose TTS failed are not played, and the state doesn't get stuck in synthesizing.
+- **Readiness follows real requests** (2026-09-28): `voiceReadiness()` originally came only from `/models` probes (on startup, settings change, and settings-panel Test), which passed even when the service was reachable but the model or voice was misconfigured. Now every real request records its outcome: `resolveSttConfig` / `resolveTtsConfig` attach `onOutcome` to the config; `SttClient.transcribe` (voice mode, dictation, settings-panel Dry run) records available on HTTP success (an empty transcription counts too, it may just be quiet), and unavailable on connection failure, 401/403, 404, other 4xx/5xx, or timeout; `TtsClient.synthesize` (voice mode, read-aloud button, Dry run) records available when a WAV is parsed, and unavailable on connection failure, HTTP error, timeout, or a response that isn't a 16-bit mono WAV. Caller-initiated cancellation (interrupt, stopping read-aloud) is not recorded; the caller's own deadline expiring (`TimeoutError`) counts as a timeout. Outcomes are recorded against the settings actually used (STT key is URL + model; TTS key is URL + model + voice + languageField), and outcomes for settings that have since changed are discarded; outcomes using a temporary, unsaved key entered in the settings panel are not recorded either. No notification if the state is unchanged; on change, `onVoiceReadinessChange` → stateSync updates the labels, and a later success clears it automatically.
+  - **Failures a probe can't overturn**: a real request's 404, a response not in a voice service format, and other errors (such as 400 "unknown voice") are invisible to `/models`, so they are recorded as sticky: a later successful probe doesn't clear them; only a successful real request (such as Dry run or the read-aloud button) or a settings change (key changed) clears them. Connection failure, timeout, 401/403, 5xx, and 429 are not sticky; the next probe after the service restarts recovers them (unavailable services are re-probed once before voice mode starts and before dictation starts).
+  - **Built-in engine**: counts as available when there is no outcome; a failed model download, an engine that won't start (`builtinVoiceEngineUrl` throws, except when the user cancels the download), or a failed request all record unavailable, with the message "The built-in … engine failed: …"; probes don't check the built-in engine but do forget its failure, so it is retried on next use and recovers on success.
+  - **Microphone**: when `getUserMedia` fails in the audio page it sends `micError` (on success `micOk`, resent on reconnect); `VoiceMode.unavailable.stt` becomes "Can't open the microphone (…)", and `onMicStatus` updates the status bar's "Can't hear" label and records a system message in the Bot view; this is not an STT service failure and is not written to readiness. When dictation's recording program can't be opened, it still reports the error as before.
+  - While online, labels = currently missing services (or an unopenable microphone) ∪ services currently unavailable per readiness.
+- **Recovering and changing settings at runtime, without restart** (2026-09-28): `VoiceServiceSync` in `src/voiceAgent/serviceSync.ts`, while voice mode is on, listens to `onVoiceReadinessChange` and voice settings changes (`oh-my-pi-chater.voice.*`, `voiceAgent.tts.*`; changing the STT model now also triggers a re-probe).
+  - As soon as a missing service becomes ready (settings fixed, service started, built-in engine retry succeeded), it runs `resolveSttConfig` / `resolveTtsConfig` and attaches it to the running `VoiceMode`: TTS via `useTts`, opening a playback-only page first if there is no audio page; the state machine receives a `voiced` event and reads aloud **starting from the next reply** (a reply currently shown as text isn't read from the middle; `ConvState.nextVoiced` waits for it to finish before taking effect). STT via `useStt`: first checks `/models`, then loads Silero VAD; if a playback-only page exists it sends `{"type":"capture"}` to have it open the microphone (the server resends it on reconnect), and if there is no page it opens a capturing page; the microphone switch still follows mute and standby (`ActiveVoiceWindow`). On success the corresponding reason is removed from `unavailable`, `VoiceStatus` is pushed again (the label disappears), and a system message is recorded in the Bot view.
+  - A service in use becomes unavailable: it isn't torn down; it falls back to text as before (per-sentence failures, label shown); once the service recovers, the next request succeeds.
+  - Settings of a service in use change (voice, model, URL, engine, speed, language): the config is fixed at resolve time (held by `TtsClient` / `SttClient`), so the sync re-resolves and swaps in the new config (`Speaker.setClient`, a new `SttClient`) regardless of the new settings' readiness; subsequent requests use the new settings, and their outcomes update readiness; sentences already sent for synthesis use the old config. The read-aloud cache key (`liveTtsKey`) is updated accordingly.
+  - If attaching fails (`/models` fails, VAD fails to load, audio page can't connect), things stay as they are and `unavailable` is replaced with this attempt's reason; the failure is already recorded in readiness, and it retries on the next state or settings change. Sync runs serially; if more changes arrive meanwhile, it runs another round after finishing.
+## 6. Voice agent tools (host tools)
 
-## 6. 语音智能体工具（host tools）
+**Scope (decided 2026-09-25)**: **task control** only: dispatching tasks, course-correcting, queueing, stopping, answering worker requests, and checking progress. No session management: no opening or switching tabs, no changing the worker model, no compacting, no slash commands. Every tool acts on the tab bound to the current turn (§5.12 rule 4); there is no tab parameter.
 
-**范围（2026-09-25 决定）**：只做**任务控制**，包括派活、纠偏、排队、叫停、回答 worker 的请求、查看进展。不做会话管理：不新开或切换 tab，不换 worker 模型，不 compact，不执行斜杠命令。所有工具都作用于本轮绑定的 tab（§5.12 规则 4），没有 tab 参数。
+All tools are set to `loadMode: 'essential'` so they are not classified as discoverable and hidden from the model.
 
-所有工具都设为 `loadMode: 'essential'`，避免被归类为 discoverable，导致模型看不到。
-
-| 工具 | 参数 | 行为 | 返回给模型 |
+| Tool | Parameters | Behavior | Returned to the model |
 |---|---|---|---|
-| `tell_worker` | `message`、`when: 'now' \| 'after'`、`includeEditorContext?` | 宿主在**执行时**读取 worker 状态后决定：空闲时作为新任务发 prompt（受确认策略约束，见下）；忙且 `now` 时插话纠偏（`prompt` + `streamingBehavior: 'steer'`）；忙且 `after` 时进入面板的排队队列，当前任务结束后作为新一轮发出 | 实际执行了什么："已作为新任务派出" / "已插话" / "已排队" / "需确认，提案 p3"。模型据此如实转述 |
-| `confirm_task` | `proposalId` | 执行挂起的派活提案（见下） | "已派出" 或失败原因 |
-| `stop_worker` | — | worker `abort` | "已叫停" |
-| `answer_worker` | `requestId`、`answer` | 回答 worker 的 `extension_ui_request`（select / confirm / input / editor），omp 的工具审批也在其中（§2.4） | "已回复" / "该请求已被回答或已超时" |
-| `worker_status` | — | worker 状态 + 当前 digest | 状态摘要文本 |
-| `research` | `question` | 后台起一次性只读进程（当前后端：`omp -p` 只开 read、grep、glob；`pi -p` 只开 read、grep、find、ls，超时由扩展杀进程），不保存会话，最长 5 分钟，同时最多 3 个；问题从 stdin 传入。实现：`research.ts` | "已在后台开始 r1"。之后每轮附 `<research status="running">`；做完后附一次 `<research-result>`（总结不超过 250 词），语音输出面板同时提示"r1 完成，问一下就能听到结果" |
-| `read` / `grep` / `glob`（pi 上是 `find`） | — | 后端内置只读工具（§5.4），不经过 HostToolRouter | 文件内容 / 匹配 / 路径 |
-| `worker_transcript` | `turn?`（默认最近一轮）、`detail?: 'summary' \| 'full'` | 取 worker 某一轮的用户指令、工具调用和最终回复，按 `detail` 截断 | 该轮记录。**未实现**：目前由 `worker_status` 返回最近两轮的指令和结论 |
-| `worker_diff` | `path?` | 本 tab `diffManager` 记录的改动统计；指定 `path` 时返回该文件 diff（截断） | diff 文本。**未实现** |
-| `diagnostics` | `path?` | VS Code `languages.getDiagnostics`，默认取当前文件 | 错误/警告列表 |
+| `tell_worker` | `message`, `when: 'now' \| 'after'`, `includeEditorContext?` | The host reads the worker state **at execution time** and decides: if idle, sends it as a new task via prompt (subject to the confirmation policy, see below); if busy and `now`, interjects to course-correct (`prompt` + `streamingBehavior: 'steer'`); if busy and `after`, puts it in the panel's queue, to be sent as a new turn after the current task ends | What actually happened: "dispatched as a new task" / "interjected" / "queued" / "needs confirmation, proposal p3". The model relays this truthfully |
+| `confirm_task` | `proposalId` | Executes a pending dispatch proposal (see below) | "Dispatched" or the reason for failure |
+| `stop_worker` | — | worker `abort` | "Stopped" |
+| `answer_worker` | `requestId`, `answer` | Answers the worker's `extension_ui_request` (select / confirm / input / editor), which includes omp's tool approvals (§2.4) | "Replied" / "That request was already answered or has timed out" |
+| `worker_status` | — | worker state + current digest | Status summary text |
+| `research` | `question` | Starts a one-off read-only process in the background (current backends: `omp -p` with only read, grep, glob enabled; `pi -p` with only read, grep, find, ls enabled, with the timeout enforced by the extension killing the process). No session is saved, at most 5 minutes, at most 3 at once; the question is passed via stdin. Implementation: `research.ts` | "Started r1 in the background". After that every turn carries `<research status="running">`; when done, a single `<research-result>` is attached (summary no longer than 250 words), and the voice output panel also shows "r1 finished, just ask to hear the result" |
+| `read` / `grep` / `glob` (`find` on pi) | — | The backend's built-in read-only tools (§5.4); they do not go through HostToolRouter | File contents / matches / paths |
+| `worker_transcript` | `turn?` (defaults to the latest turn), `detail?: 'summary' \| 'full'` | Fetches the user instruction, tool calls, and final reply of one worker turn, truncated according to `detail` | That turn's record. **Not implemented**: currently `worker_status` returns the instructions and conclusions of the last two turns |
+| `worker_diff` | `path?` | Change statistics recorded by this tab's `diffManager`; with `path`, returns that file's diff (truncated) | Diff text. **Not implemented** |
+| `diagnostics` | `path?` | VS Code `languages.getDiagnostics`, defaults to the current file | List of errors/warnings |
 
-**为什么合并成一个 `tell_worker`**（取代草案里的 `dispatch_task` / `steer` / `queue_followup`）：
+**Why merge into a single `tell_worker`** (replacing `dispatch_task` / `steer` / `queue_followup` from the draft):
 
-- **竞态**：模型决定插话之后、工具执行之前，worker 可能刚好结束。omp 18.2.11 会把空闲时收到的 steer 当成新一轮执行（2026-09-24 侧边栏 steer 调试）。由宿主在执行时路由，这个窗口就不存在了。
-- **延迟**：拆成三个工具时，模型判断错状态就要报错重试，而一次工具轮次约 2.8 s（§2.1）。
-- **可复用**：`RpcSessionManager.submitInput` 带显式 `streamingBehavior` 时，无论 worker 是否空闲都会带上它发出；pi 和 omp 在空闲时都按普通 prompt 执行（§2.4），不需要另写路由。
-- 每轮附件带 worker 状态行（§7.3），模型选 `when` 时有依据。
+- **Race**: after the model decides to interject but before the tool executes, the worker may just have finished. omp 18.2.11 executes a steer received while idle as a new turn (sidebar steer debugging, 2026-09-24). With the host routing at execution time, this window no longer exists.
+- **Latency**: with three separate tools, a wrong guess about the state means an error and a retry, and one tool round trip costs about 2.8 s (§2.1).
+- **Reuse**: when `RpcSessionManager.submitInput` has an explicit `streamingBehavior`, it sends it whether or not the worker is idle; both pi and omp execute it as a normal prompt when idle (§2.4), so no separate routing is needed.
+- Every turn's attachments include a worker status line (§7.3), so the model has a basis for choosing `when`.
 
-**派活确认：只有改文件的新任务才两阶段提交**（配置 `confirmBeforeDispatch`，默认 `true`）
+**Dispatch confirmation: only new tasks that modify files use a two-phase commit** (setting `confirmBeforeDispatch`, default `true`)
 
-`tell_worker` 带参数 `readOnly`：worker 只读、调研或跑测试这类检查时为 `true`。这类任务直接派出，宿主在指令末尾加上"只读任务：不要修改、创建或删除文件"。确认只用来防 STT 听错后误改代码，只读任务听错的代价小，每次都问反而别扭（2026-09-25 用户反馈）。
+`tell_worker` takes a `readOnly` parameter: `true` when the worker only reads, researches, or runs checks such as tests. Such tasks are dispatched directly, and the host appends "Read-only task: do not modify, create, or delete files" to the instruction. Confirmation exists only to prevent code changes caused by STT mishearing; a misheard read-only task costs little, and asking every time feels awkward (user feedback, 2026-09-25).
 
-不检查"本轮话语里有没有肯定词"，因为"好像不太好"里也有"好"。改为：
+We do not check "whether this turn's utterance contains an affirmative word", because "hao xiang bu tai hao" ("doesn't seem good") also contains "hao" ("good"). Instead:
 
-1. `tell_worker` 的路由结果是"新任务"、不是只读、并且需要确认时，宿主不发送，而是保存提案 `{proposalId, instruction, turnId}`，在面板上显示待确认卡片，工具返回"需用户确认，提案 p3"。
-2. 模型口头复述计划并询问。
-3. 只有在提案之后**出现过新的用户轮次**时，`confirm_task(p3)` 才会成功（宿主比较 turnId）。"用户确实回应过"由结构保证；"回应算不算同意"由模型判断。
-4. 出现新的提案，或者切换了语音上下文，旧提案作废。面板卡片上的"派出"按钮等价于 `confirm_task`，"取消"按钮作废提案。
-5. 用按钮确认或取消后，模型下一轮（用户轮次或主动轮次）的消息里带 `<proposal-settled id="p3" outcome="confirmed|cancelled|failed">`，每条只出现一次，模型据此不再追问。如果提出该提案的回复就是最新一轮，还在生成或播放，就把它打断（语音模式下同时 hush），`<interrupted>` 说明是按钮打断的。之后再对该提案调用 `confirm_task`：已派出时返回非错误的"用户已用按钮派出，不要再问"，已取消时返回错误并说明已被取消（2026-09-26 用户反馈：按钮确认后模型仍会再问一次）。
+1. When `tell_worker` routes to "new task", the task is not read-only, and confirmation is required, the host does not send it; it stores a proposal `{proposalId, instruction, turnId}`, shows a pending confirmation card in the panel, and the tool returns "needs user confirmation, proposal p3".
+2. The model restates the plan aloud and asks.
+3. `confirm_task(p3)` succeeds only if **a new user turn has occurred** after the proposal (the host compares turnIds). "The user really did respond" is guaranteed structurally; "whether the response counts as agreement" is judged by the model.
+4. A new proposal, or a switch of voice context, invalidates the old proposal. The "Dispatch" button on the panel card is equivalent to `confirm_task`; the "Cancel" button invalidates the proposal.
+5. After confirming or cancelling with a button, the model's next turn (user or proactive) carries `<proposal-settled id="p3" outcome="confirmed|cancelled|failed">`, each only once, so the model stops asking. If the reply that raised the proposal is the latest turn and is still being generated or played, it is interrupted (and in voice mode also hushed), and `<interrupted>` states that a button interrupted it. Calling `confirm_task` on that proposal afterwards: if already dispatched, it returns a non-error "The user already dispatched it with the button; don't ask again"; if cancelled, it returns an error saying it was cancelled (user feedback, 2026-09-26: after confirming with the button the model still asked once more).
 
-`confirmBeforeDispatch = false` 时，新任务直接派出。插话、排队、叫停不需要确认：它们只在 worker 忙时发生，本身就是用户的即时指令。
+With `confirmBeforeDispatch = false`, new tasks are dispatched directly. Interjecting, queueing, and stopping need no confirmation: they only happen while the worker is busy and are themselves immediate user instructions.
 
-**回答 worker 的请求**：`answer_worker` 只接受请求出现之后才发出的用户消息里的回答：宿主比较请求到达扩展的时间（`receivedAt`）和这条用户消息的时间，不允许模型替用户做决定。确认派活的规则按轮次序号判断：提案所在的轮次之后，必须再有一条用户消息。**工具审批允许用语音批准**（2026-09-25 决定）：转述时要说清具体执行什么（命令、要写的文件），用户明确回答后才放行。
+**Answering worker requests**: `answer_worker` only accepts an answer from a user message sent after the request appeared: the host compares the time the request reached the extension (`receivedAt`) with the time of that user message, so the model cannot decide on the user's behalf. The dispatch-confirmation rule is judged by turn sequence number: after the turn containing the proposal, there must be another user message. **Tool approvals may be granted by voice** (decided 2026-09-25): when relaying, state exactly what will run (the command, the files to be written); it is let through only after the user answers explicitly.
 
-**叫停的快路径**：语音路径要经过 STT、LLM 和工具调用，约 3–4 s。面板上的"停止 worker"按钮和快捷键直接调用 `WorkerController.abort`，立即生效。不在本地做"停"字关键词匹配：STT 一旦误识别，就会误杀正在干活的 worker。
+**Fast path for stopping**: the voice path goes through STT, the LLM, and a tool call, about 3–4 s. The "Stop worker" button on the panel and the keyboard shortcut call `WorkerController.abort` directly and take effect immediately. We do not do local keyword matching on "stop": a single STT misrecognition would kill a worker in the middle of its work.
 
-## 7. 输入、上下文与控制循环
+## 7. Input, context, and the control loop
 
-### 7.1 输入分层
+### 7.1 Input layers
 
-语音智能体的输入**不只是转写文本**。按"什么时候进入、以什么方式进入"分为五层：
+The voice agent's input is **not just the transcribed text**. It is split into five layers by "when it enters and how":
 
-| 层 | 内容 | 何时进入 | 方式 | 体量 |
+| Layer | Content | When it enters | How | Size |
 |---|---|---|---|---|
-| L0 身份与规则 | 角色、分工、朗读风格、确认策略 | 启动 | `--system-prompt`（§8） | 固定；保持不变，以利用 prompt 缓存 |
-| L1 项目卡片 | 工作区名和根路径、git 分支、主要语言/框架、`AGENT.md` / README 开头若干行 | 启动 | 首条引导消息（§7.5） | ≤ 约 1.5k token |
-| L2 worker 简报 | 本任务的后端、模型、状态、todo，最近 K 轮的"用户指令 + worker 最终回复摘要" | 语音上下文建立时 | 引导消息（§7.5） | ≤ 约 2k token |
-| L3 每轮附件 | ① 用户转写文本（必有）② 编辑器快照（有变化才发）③ worker 状态行（必有）④ 未消费的 worker 观察 ⑤ `<interrupted>` ⑥ 待回答的 worker 请求、待确认的提案 | 每个轮次 | user message（§7.3） | 通常 < 1k token |
-| L4 按需拉取 | 文件内容、代码搜索、worker 某一轮的完整记录、git diff、诊断 | 模型自己决定 | 工具（§6） | 按需，工具侧截断 |
+| L0 Identity and rules | Role, division of labor, speaking style, confirmation policy | Startup | `--system-prompt` (§8) | Fixed; kept unchanged to benefit from prompt caching |
+| L1 Project card | Workspace name and root path, git branch, main languages/frameworks, the first lines of `AGENT.md` / README | Startup | First bootstrap message (§7.5) | ≤ about 1.5k tokens |
+| L2 Worker brief | This task's backend, model, state, todos, and "user instruction + summary of the worker's final reply" for the last K turns | When the voice context is established | Bootstrap message (§7.5) | ≤ about 2k tokens |
+| L3 Per-turn attachments | ① user transcript (always) ② editor snapshot (only when changed) ③ worker status line (always) ④ unconsumed worker observations ⑤ `<interrupted>` ⑥ pending worker requests and pending proposals | Every turn | user message (§7.3) | Usually < 1k tokens |
+| L4 Pulled on demand | File contents, code search, the full record of a worker turn, git diff, diagnostics | Decided by the model | Tools (§6) | On demand, truncated on the tool side |
 
-原则：**推送结论，按需拉取细节**。L0–L3 由扩展推送，保证语音智能体"知道现在发生了什么"；L4 由模型自己拉取，保证"想看细节时看得到"。
+Principle: **push conclusions, pull details on demand**. L0–L3 are pushed by the extension, so the voice agent "knows what is happening now"; L4 is pulled by the model, so it "can see details when it wants to".
 
-### 7.2 omp 的上下文要不要全部给它：不给
+### 7.2 Should it get omp's entire context? No
 
-| 原因 | 说明 |
+| Reason | Explanation |
 |---|---|
-| 延迟 | 首 token 延迟随输入长度增长。worker 上下文动辄数万 token，每轮对话都背着它，语音就不"实时"了 |
-| 成本 | 语音轮次多且短，每轮都重复带上 worker 上下文，费用随对话轮数成倍增长 |
-| 角色污染 | 大量工具调用和代码 diff 会诱导它"像 worker 一样思考"：念代码、陷入细节、想自己动手 |
-| 播报需要的是结论 | 用户要听的是"改了什么、结果如何、卡在哪"，不是逐条工具输出 |
-| 同步复杂 | worker 会压缩上下文、分支、切换 tab，全量镜像需要持续对齐 |
+| Latency | Time to first token grows with input length. The worker context easily runs to tens of thousands of tokens; carrying it every turn would make the voice no longer "real-time" |
+| Cost | Voice turns are many and short; repeating the worker context each turn multiplies cost with the number of turns |
+| Role contamination | Large amounts of tool calls and code diffs push it to "think like the worker": reading code aloud, getting lost in details, wanting to do the work itself |
+| Narration needs conclusions | The user wants to hear "what changed, what the result is, where it is stuck", not tool output line by line |
+| Synchronization complexity | The worker compacts its context, branches, and switches tabs; a full mirror would need constant realignment |
 
-替代方案：
+Alternatives:
 
-- **进展**：WorkerObserver 的 digest（§5.8），按轮次推送。
-- **结论**：worker 每轮结束时的最终回复（截断）随 `done` 观察推送。
-- **细节**：`worker_transcript` 按需拉取某一轮，`worker_diff` 看改动。
+- **Progress**: the WorkerObserver digest (§5.8), pushed per turn.
+- **Conclusions**: the worker's final reply at the end of each turn (truncated) is pushed with the `done` observation.
+- **Details**: `worker_transcript` pulls a given turn on demand; `worker_diff` shows the changes.
 
-这样语音智能体对 worker 的了解，相当于"一个在旁边看屏幕的人"：知道它在干嘛、干完得出什么结论，想细看时可以翻记录。
+This way the voice agent knows about the worker roughly what "a person watching the screen from the side" would: what it is doing and what it concluded when done, and it can flip through the record for a closer look.
 
-### 7.3 用户轮次 prompt 格式
+### 7.3 User turn prompt format
 
 ```
 <editor file="src/voice/stt.ts" visible="120-180" selection="133-150" lang="typescript">
-…选区文本（截断）…
+…selected text (truncated)…
 </editor>
 <worker status="working" elapsed="42s" queued="1"/>
 <worker-updates>
-[12:03:25] 运行 npm test → 2 失败
+[12:03:25] ran npm test → 2 failed
 </worker-updates>
-<worker-request id="ui_7" method="confirm" timeout="60s">是否覆盖 package-lock.json？</worker-request>
-<proposal id="p3">…待确认的派活指令…</proposal>
-<interrupted>…（仅在上一轮被打断时出现）…</interrupted>
-<user source="stt">这个 SttClient 为什么要自己拼 wav？</user>
+<worker-request id="ui_7" method="confirm" timeout="60s">Overwrite package-lock.json?</worker-request>
+<proposal id="p3">…dispatch instruction pending confirmation…</proposal>
+<interrupted>…(only present when the previous turn was interrupted)…</interrupted>
+<user source="stt">Why does this SttClient build the wav itself?</user>
+Reply in the language of <user>, in one to three short spoken sentences.
 ```
 
-- 各块只在有内容时出现。编辑器快照与上一轮相同时，只写 `<editor unchanged/>`。
-- `<worker>` 状态行每轮都有，模型据此选择 `tell_worker` 的 `when`。
-- `source="stt"` 提醒模型：这是语音转写，可能有错别字和同音词，要宽容理解，拿不准时追问。面板上用键盘输入的文字标为 `source="text"`（§11）。
-- 附件都放在 user message 里，系统提示词保持不变，以最大化 prompt 缓存命中。
+- Each block appears only when it has content. When the editor snapshot is the same as the previous turn, only `<editor unchanged/>` is written.
+- The `<worker>` status line is present every turn; the model uses it to choose `when` for `tell_worker`.
+- The last line closes every user turn (`USER_TURN_REMINDER`): the system prompt says the same, but it sits far above the English context blocks and tool results, and in the evals (2026-09-28, `npm run eval:voice`) the model opened in English before a `read` or `grep` in about a quarter of the runs and answered "what does this do" in five or six sentences without it. Proactive and voice-on turns end with their own line the same way.
+- `source="stt"` reminds the model that this is a speech transcript that may contain typos and homophones; interpret it generously and ask when unsure. Text typed on the panel with the keyboard is marked `source="text"` (§11).
+- Attachments all go in the user message, and the system prompt stays unchanged, to maximize prompt cache hits.
 
-### 7.4 代码库：不预先塞入，按需读取
+### 7.4 Codebase: no preloading, read on demand
 
-- **不预先塞入**代码库内容，也不做向量索引。L1 项目卡片只提供"这是什么项目"的轮廓。
-- 讨论代码时，主要线索是编辑器快照（用户正在看什么），其余由模型用 `read` / `grep` / `glob` 自己去找。
-- **轻量问题自己查**："这个函数谁在调用""这个配置在哪"，一两次工具调用就能回答。
-- **重型阅读交给后台 research**（2026-09-25 决定，方案 C）："把整个鉴权流程讲一遍"需要读十几个文件。语音智能体调用 `research`，扩展在后台起一次性 omp 去读，只把总结交回来。这样文件内容不会进入语音上下文，也不会进入 worker 上下文，调研期间可以继续聊，而且因为是只读的，不需要用户同意。改代码仍然只交给 worker。
-- 为什么不给语音智能体 edit / write / bash：会和 worker 同时写工作区；它的修改不进侧边栏的 checkpoint 和 diff；读过的文件内容会让语音上下文越来越大。方案对比见 2026-09-25 的讨论。
-- 限制（未实现）：单个轮次内，内置读工具最多调用 `maxReadSteps` 次（默认 6）。超出时由扩展发 `steer`："先用已有信息回答用户"。
+- **No preloading** of codebase content, and no vector index. The L1 project card only gives an outline of "what this project is".
+- When discussing code, the main clue is the editor snapshot (what the user is looking at); the model finds the rest itself with `read` / `grep` / `glob`.
+- **Light questions it looks up itself**: "who calls this function", "where is this setting" can be answered with one or two tool calls.
+- **Heavy reading goes to background research** (decided 2026-09-25, option C): "walk me through the whole auth flow" requires reading a dozen files. The voice agent calls `research`, the extension starts a one-off omp in the background to read, and only the summary comes back. File contents therefore enter neither the voice context nor the worker context, the conversation can continue during research, and because it is read-only it needs no user consent. Code changes are still left only to the worker.
+- Why the voice agent gets no edit / write / bash: it would write to the workspace at the same time as the worker; its changes would not appear in the sidebar's checkpoints and diffs; file contents it reads would keep growing the voice context. See the 2026-09-25 discussion for the comparison of options.
+- Limit (not implemented): within a single turn, built-in read tools may be called at most `maxReadSteps` times (default 6). When exceeded, the extension sends a `steer`: "Answer the user with what you have first".
 
-### 7.5 引导轮次
+### 7.5 Bootstrap turn
 
-每个语音上下文建立时（§5.12 规则 2），先发一条**静默引导消息**，内容为 L1 项目卡片和本任务的 L2 worker 简报，并要求模型只回复 `<silent/>`。这样用户第一句话就能直接接上当前的工作。
+Whenever a voice context is established (§5.12 rule 2), a **silent bootstrap message** is sent first, containing the L1 project card and this task's L2 worker brief, and asking the model to reply only `<silent/>`. That way the user's first sentence can pick up the current work directly.
 
-- 引导轮次与用户第一次开口并行进行；用户先开口时，引导内容并入第一轮的附件，不单独发送。
-- 切回一个已有的语音上下文时不重新引导；该任务在后台期间积压的 digest 附在下一轮里（§5.12 规则 5）。
-- 重新启动后续上的语音上下文（§5.12 规则 2）当作重新加入：第一轮再带一次 `<task-history>`。
+- The bootstrap turn runs in parallel with the user first speaking; if the user speaks first, the bootstrap content is merged into the first turn's attachments instead of being sent separately.
+- Switching back to an existing voice context does not re-bootstrap; the digest accumulated while that task was in the background is attached to the next turn (§5.12 rule 5).
+- A voice context resumed after a restart (§5.12 rule 2) is treated as rejoining: the first turn carries `<task-history>` once more.
 
-### 7.6 派活时的上下文交接
+### 7.6 Context handoff when dispatching
 
-worker 看不到语音对话，所以 `tell_worker` 的 `message` **必须自成一体**：
+The worker cannot see the voice conversation, so the `message` of `tell_worker` **must be self-contained**:
 
-- 讨论得出的结论和取舍（"不用 A 方案，改用 B，因为……"）；
-- 涉及的文件和行号；
-- 约束（不要动哪些文件、保持哪些接口不变）；
-- 验收方式（跑什么命令、期望什么结果）。
+- the conclusions and trade-offs reached in discussion ("don't use approach A, use B instead, because…");
+- the files and line numbers involved;
+- constraints (which files not to touch, which interfaces to keep unchanged);
+- how to verify (which command to run, what result to expect).
 
-`tell_worker` 的可选参数 `includeEditorContext: boolean` 为 `true` 时，扩展用 `buildEditorContextFragment` 把当前选区附在指令后面，与聊天面板手动发送时的格式一致。
+When the optional `tell_worker` parameter `includeEditorContext: boolean` is `true`, the extension uses `buildEditorContextFragment` to append the current selection to the instruction, in the same format as a manual send from the chat panel.
 
-### 7.7 控制循环
+### 7.7 Control loop
 
-循环分两层：
+The loop has two layers:
 
-**内层：单个轮次内的 LLM ↔ 工具循环**，由 omp 子进程自己运行（omp 的 agent loop）。扩展只需要：
+**Inner layer: the LLM ↔ tool loop within a single turn**, run by the omp child process itself (omp's agent loop). The extension only needs to:
 
-- 响应 `host_tool_call`；
-- 统计工具调用次数，超出限制时发 `steer`（§7.4）；
-- 首句超时兜底：轮次开始 `fillerAfterSecs`（默认 3 s）内还没有任何 `text_delta` 时，播放一个短提示音，让用户知道它在想，而不是没听见。
+- respond to `host_tool_call`;
+- count tool calls and send a `steer` when the limit is exceeded (§7.4);
+- provide a first-sentence timeout fallback: if there is no `text_delta` within `fillerAfterSecs` (default 3 s) of the turn starting, play a short cue so the user knows it is thinking rather than that it did not hear.
 
-**外层：扩展里的事件驱动编排循环（VoiceOrchestrator）**。它是一个单一事件队列，不是定时轮询：
+**Outer layer: the event-driven orchestration loop in the extension (VoiceOrchestrator)**. It is a single event queue, not a timer poll:
 
 ```
 on event:
-  UserStartedSpeaking   → if turn 运行中 or bot 在说话: interrupt()   # abort + 停止播放
-  UserTurnEnd(text)     → startTurn(kind=user, attachments = 编辑器 + 全部未消费观察 + interrupted)
-  WorkerEvent(e)        → observer[tab].ingest(e)；只有当前任务产生的观察 → arbiter.enqueue(obs)
-  EditorChanged         → 只更新快照，不触发轮次
-  ActiveTaskChanged     → cancelTurn；等 llmEnd 后 switch_session / new_session；换观察队列（§5.12 规则 3）
+  UserStartedSpeaking   → if turn running or bot speaking: interrupt()   # abort + stop playback
+  UserTurnEnd(text)     → startTurn(kind=user, attachments = editor + all unconsumed observations + interrupted)
+  WorkerEvent(e)        → observer[tab].ingest(e); only observations from the current task → arbiter.enqueue(obs)
+  EditorChanged         → only update the snapshot, do not trigger a turn
+  ActiveTaskChanged     → cancelTurn; after llmEnd, switch_session / new_session; swap observation queue (§5.12 rule 3)
   TurnEnded / BotStoppedSpeaking / Tick(1s) → maybeProactive()
 
 maybeProactive():
-  if 用户在说话 or 轮次运行中 or bot 在说话: return
-  obs = arbiter.next()            # 按优先级取出；过期的 progress 丢弃；遵守 minProactiveGapSecs
+  if user speaking or turn running or bot speaking: return
+  obs = arbiter.next()            # take by priority; drop stale progress; respect minProactiveGapSecs
   if obs: startTurn(kind=proactive, attachments = obs)
 ```
 
-**轮次类型**：
+**Turn types**:
 
-| 类型 | 触发 | 允许 `<silent/>` | 可被打断 |
+| Type | Trigger | `<silent/>` allowed | Interruptible |
 |---|---|---|---|
-| `bootstrap` | 语音模式启动 | 必须 | 是（并入用户轮次） |
-| `user` | 用户说完 | 否 | 是 |
-| `proactive` | 仲裁器取出观察（needs_input / error / done / progress） | 是 | 是 |
+| `bootstrap` | Voice mode starts | Required | Yes (merged into the user turn) |
+| `user` | The user finishes speaking | No | Yes |
+| `proactive` | The arbiter takes an observation (needs_input / error / done / progress) | Yes | Yes |
 
-**不变式**：
+**Invariants**:
 
-1. 同一时刻**最多一个**语音智能体轮次在运行。omp 子进程本身也是串行的，外层保证不在轮次运行中发送 `prompt`。
-2. 用户开口的优先级最高：打断会取消当前轮次，丢弃待播放的音频。被打断轮次里已经发出的 host 工具调用**不撤销**，例如已经派出的任务照常执行，并记录在 `<interrupted>` 里告诉模型。
-3. 轮次运行中到达的观察只入队，不 `steer` 进语音智能体，避免它话说到一半改口。
-4. 用户轮次会带走队列里的全部观察；主动轮次一次只取一条（`needs_input` 例外：同一 tab 的多个请求合并成一条）。
-5. `<silent/>` 的回复不送 TTS，但保留在 omp 上下文里，让模型知道自己"看过了"。
-6. 关闭语音模式时：中止当前轮的取消令牌，关闭音频页面和隐藏 Chrome，关闭 omp 子进程的 stdin，保存对话记录（§11.4），再删掉没有对话记录引用的语音会话文件（§5.4）；其余留着，下次续聊（§5.12 规则 2）。
+1. **At most one** voice agent turn runs at any time. The omp child process is itself serial; the outer layer guarantees no `prompt` is sent while a turn is running.
+2. The user speaking has the highest priority: a barge-in cancels the current turn and discards audio waiting to be played. Host tool calls already issued in the interrupted turn are **not undone**; for example, an already dispatched task proceeds as usual and is recorded in `<interrupted>` to tell the model.
+3. Observations arriving while a turn is running are only queued, not `steer`ed into the voice agent, so it does not change course mid-sentence.
+4. A user turn takes all observations in the queue; a proactive turn takes only one at a time (exception: `needs_input` — multiple requests from the same tab are merged into one).
+5. `<silent/>` replies are not sent to TTS but remain in the omp context, so the model knows it "has seen it".
+6. When voice mode is turned off: cancel the current turn's cancellation token, close the audio page and the hidden Chrome, close the omp child process's stdin, save the transcript (§11.4), then delete voice session files not referenced by any transcript (§5.4); the rest are kept for resuming next time (§5.12 rule 2).
 
-## 8. 系统提示词要点
+## 8. System prompt essentials
 
-1. 身份：你是用户的语音结对搭档，旁边有一个程序员智能体（worker）负责动手。
-2. 输出适合朗读：短句、口语；不输出代码块、Markdown、URL、长列表；数字和路径用口语化表达（"stt 点 ts"）。
-   语言：用用户最近一句话（`<user>`）的语言回答。用户换了语言（比如从中文换成英文），就跟着换，并一直用新语言，直到用户再换。只有用户自己的话算数：没人说话的轮次（`<worker-update>`）、调研结果、worker 的英文汇报和工具结果都不改变语言，继续用用户上一次的语言。很短或含糊的一句（比如语音识别可能把一个词错转成另一种语言）不单独触发切换，以用户明确在说的语言为准。
-3. 默认一到三句话，除非用户要求详细讲解。
-4. 分工：默认在结对模式里自己动手；每个任务先判断轻重，小改动自己做，重活自己切到委派（`set_mode auto=true`）交给 worker，做完切回结对（§1.2）。讨论、解释、评审自己来，需要时用 `read` / `grep` / `glob` 查看代码；重型调研先征得同意再交给 worker（§7.4）。
-5. 派活：用 `tell_worker` 把用户意图改写成清楚、可验证的 worker 指令，包括范围和验收方式；worker 忙时按用户的意思选择 `when`（马上插话，还是做完再做）；需要确认时先复述计划，用户回应后再 `confirm_task`（§6）。
-6. 播报：收到 `<worker-update>` 时，只说用户关心的部分；不值得说就回复 `<silent/>`。
-7. 被打断：遵循 `<interrupted>` 提示，不要假设用户听到了没念出的内容。
-8. 调用工具前先说一句过渡语（"好，我让它去改"），以压低首句延迟（§2.1 显示，调用工具的轮次首句约 4 s）。
-9. 你只负责当前这一个任务：看不到也管不了其他 tab。用户问起别的任务时，请他切到那个 tab。
-10. 模式的叫法：提示词和工具里用 `omp` / `pair`，对用户说话时用界面上的名字 Delegate（委派）/ Pair（结对），用户这样说时也照此理解。
+1. Identity: you are the user's voice pairing partner at the keyboard; beside you is a programmer agent (the worker) working on the same task, to which you hand heavy jobs.
+2. Output suitable for reading aloud: short sentences, conversational; no code blocks, Markdown, URLs, or long lists; say numbers and paths conversationally ("stt dot ts").
+   Language: answer in the language of the user's most recent utterance (`<user>`). If the user switches language (e.g. from Chinese to English), switch with them and stay in the new language until the user switches again. Only the user's own words count: turns with no one speaking (`<worker-update>`), research results, the worker's English reports, and tool results do not change the language; keep using the user's last language. A very short or ambiguous utterance (for example, one where speech recognition may have mis-transcribed a word into another language) does not by itself trigger a switch; go by the language the user is clearly speaking.
+3. Default to one to three sentences, unless the user asks for a detailed explanation.
+4. Division of labor: work hands-on yourself; size up each task first — do small changes yourself, and hand heavy work to the worker with `tell_worker` (§1.2); the files the worker's running task is changing are its own until the task ends. Handle discussion, explanation, and review yourself, using `read` / `grep` / `glob` to look at code when needed; for heavy research, get consent first and then hand it to the worker (§7.4).
+5. Dispatching: use `tell_worker` to rewrite the user's intent into a clear, verifiable worker instruction, including scope and how to verify; when the worker is busy, choose `when` according to what the user means (interject now, or after it finishes); when confirmation is needed, restate the plan first and call `confirm_task` after the user responds (§6).
+6. Narration: on receiving `<worker-update>`, say only what the user cares about; if it is not worth saying, reply `<silent/>`.
+7. Interruption: follow the `<interrupted>` hint; do not assume the user heard content that was not spoken.
+8. Before calling a tool, say a transition phrase first ("OK, I'll have it make the change") to reduce first-sentence latency (§2.1 shows the first sentence of a tool-calling turn takes about 4 s).
+9. You are responsible only for the current task: you cannot see or manage other tabs. When the user asks about another task, ask them to switch to that tab.
 
-## 9. 会话状态机
+The prompt lives in `src/voiceAgent/voicePrompt.ts` (`VOICE_SYSTEM_PROMPT`), plain text with no Markdown so it does not prime the spoken replies, and holds policy only (when to do what, what needs the user's yes); how each tool behaves is in its description in `hostTools.ts`, so each fact lives in one place. Behaviour is checked with the scripted evals in `src/test/eval/voicePrompt.eval.ts` (`npm run eval:voice`), which drive the real omp voice process through `VoiceLlm` with a fake worker, fake editor hands and the real `HostToolRouter`, and assert on tool calls, silence, language and reply shape rather than wording; run them after every prompt change, several times (`VOICE_EVAL_REPS`), since a model's behaviour is not deterministic.
+
+## 9. Session state machine
 
 ```mermaid
 stateDiagram-v2
   [*] --> Off
-  Off --> Listening: 开启语音模式\n(启动 omp 子进程 + 录音)
-  Listening --> UserSpeaking: VAD 检测到语音
-  UserSpeaking --> Listening: 误触发(过短)
-  UserSpeaking --> Thinking: 说完判定
-  Thinking --> Speaking: 首句音频就绪
-  Thinking --> Listening: 回复 <silent/> 或纯工具调用
-  Speaking --> Listening: 播放完毕
-  Speaking --> UserSpeaking: 用户打断\n(cancelTurn)
-  Thinking --> UserSpeaking: 用户打断\n(cancelTurn)
-  Listening --> Thinking: 仲裁器发起主动轮次\n(worker 观察)
-  Listening --> Off: 关闭语音模式
+  Off --> Listening: turn on voice mode\n(start omp child process + recording)
+  Listening --> UserSpeaking: VAD detects speech
+  UserSpeaking --> Listening: false trigger (too short)
+  UserSpeaking --> Thinking: end-of-turn detected
+  Thinking --> Speaking: first-sentence audio ready
+  Thinking --> Listening: reply <silent/> or tool calls only
+  Speaking --> Listening: playback finished
+  Speaking --> UserSpeaking: user barge-in\n(cancelTurn)
+  Thinking --> UserSpeaking: user barge-in\n(cancelTurn)
+  Listening --> Thinking: arbiter starts a proactive turn\n(worker observation)
+  Listening --> Off: turn off voice mode
 ```
 
-## 10. 配置项（草案）
+## 10. Settings (draft)
 
-命名空间为 `oh-my-pi-chater.voiceAgent.*`。STT 继续沿用 `oh-my-pi-chater.voice.*`。
+The namespace is `oh-my-pi-chater.voiceAgent.*`. STT keeps using `oh-my-pi-chater.voice.*`.
 
-| 键 | 类型 | 默认 | 说明 |
+| Key | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | `""` | 空表示启动时跟随 worker 当前模型；也可填 `provider/id`（omp 支持模糊匹配） |
-| `thinking` | enum | `off` | 语音智能体的思考等级 |
-| `tts.provider` | `chatterbox` \| `kokoro` \| `openai` | `openai` | 服务类型，决定语言怎么发（§5.6） |
-| `tts.url` | string | `""` | OpenAI 兼容 TTS 端点，本机为 `http://127.0.0.1:8881/v1`（chatterbox-tts） |
-| `tts.model` | string | `""` | 空表示 provider 的默认模型 |
-| `tts.voice` | string | `""` | 空表示 provider 的默认音色 |
-| `tts.speed` | number | `1.0` | 语速 |
-| `turnStopSecs` | number | `1.2` | 静音多久判定用户说完 |
-| `narration` | `off` \| `important` \| `all` | `important` | `important` 播报 needs_input、error、done 和调研完成；`all` 同时播报 progress；`off` 不主动开口 |
-| `narrationIntervalSecs` | number | `30` | progress 播报的最小间隔 |
-| `minProactiveGapSecs` | number | `8` | 任何一轮结束后，至少安静这么久才播报 done、调研结果、progress；needs_input 和 error 不受限（§5.9） |
-| `confirmBeforeDispatch` | boolean | `true` | 派活前口头确认 |
-| `maxReadSteps` | number | `6` | 单个轮次内置读工具的调用上限（§7.4） |
-| `fillerAfterSecs` | number | `3` | 轮次开始多久没有文字时播放提示音 |
-| `historySessions` | number | `20` | 每个工作区保留的语音会话记录数 |
-| `debugTranscript` | boolean | `false` | 语音视图显示调试信息：每轮发给语音模型的附件，以及不出声的 `<silent/>` 主动轮次（§11.2） |
+| `model` | string | `""` | Empty means follow the worker's current model at startup; may also be `provider/id` (omp supports fuzzy matching) |
+| `thinking` | enum | `off` | The voice agent's thinking level |
+| `tts.provider` | `chatterbox` \| `kokoro` \| `openai` | `openai` | Service type; determines how the language is sent (§5.6) |
+| `tts.url` | string | `""` | OpenAI-compatible TTS endpoint; locally `http://127.0.0.1:8881/v1` (chatterbox-tts) |
+| `tts.model` | string | `""` | Empty means the provider's default model |
+| `tts.voice` | string | `""` | Empty means the provider's default voice |
+| `tts.speed` | number | `1.0` | Speaking rate |
+| `turnStopSecs` | number | `1.2` | How long of a silence counts as the user having finished speaking |
+| `narration` | `off` \| `important` \| `all` | `important` | `important` narrates needs_input, error, done, and research completion; `all` also narrates progress; `off` never speaks up proactively |
+| `narrationIntervalSecs` | number | `30` | Minimum interval between progress narrations |
+| `minProactiveGapSecs` | number | `8` | After any turn ends, stay quiet at least this long before narrating done, research results, or progress; needs_input and error are exempt (§5.9) |
+| `confirmBeforeDispatch` | boolean | `true` | Confirm verbally before dispatching a task |
+| `maxReadSteps` | number | `6` | Cap on built-in read tool calls within a single turn (§7.4) |
+| `fillerAfterSecs` | number | `3` | How long after a turn starts with no text before a cue is played |
+| `historySessions` | number | `20` | Number of voice session records kept per workspace |
+| `debugTranscript` | boolean | `false` | Voice view shows debug info: the attachments sent to the voice model each turn, and silent `<silent/>` proactive turns (§11.2) |
 
-## 11. 语音视图
+## 11. Voice view
 
-设计稿：[`mockups/voice-panel.html`](./mockups/voice-panel.html)（早先的独立视图方案；现在的布局见 §11.1）。
+The earlier standalone-view design was dropped; for the current layout see §11.1.
 
-### 11.1 放在哪里：输入框里的控制，会话 tab 里的 Bot 视图（2026-09-26 改）
+### 11.1 Where it lives: controls in the composer, Bot view in the session tab (changed 2026-09-26)
 
-之前的方案（2026-09-25）是：状态栏右下的 `$(mic) Voice` 项加一个 ▴ 开关，面板盖在会话输入框的位置上，或者移到底部面板。后来一度放在底部面板的 Bot 标签里（同日删除）。现在改成：
+The previous design (2026-09-25) was: a `$(mic) Voice` item at the bottom right of the VS Code status bar plus a ▴ toggle, with the panel covering the session composer or moved into the bottom panel. For a while it lived in a Bot tab in the bottom panel (removed the same day). It is now:
 
-| 位置 | 内容 |
+| Location | Content |
 |---|---|
-| 输入框顶部的机器人工具条（`src/webview/voiceBar.ts`） | 输入框卡片的头部：在最上面，横跨整个卡片，带浅底色和分隔线，文件上下文、附件、编辑横幅都排在它下面；在线时底色和分隔线带状态色。语音智能体离线时只有机器人按钮和 “Voice agent” 字样，机器人和旁边的状态文字是同一个按钮：离线时点它上线，在线时点它下线（启动中不响应）；工具条其余空白处不响应点击。STT 或 TTS 没通过检查（`GET {base}/models` 返回 200；TTS 还要求列表里有请求会用的模型）不妨碍上线（§5.13）：机器人照常可点，状态文字旁边多一个和 “Muted” 一样的灰色标签，STT 不能用是 “Can't hear”，TTS 不能用是 “No voice”，都不能用就两个都显示；悬停显示原因（`explainVoiceError` 的说法），点标签打开 Settings → Voice。离线时标签跟随检查结果（检查中不显示），在线时显示语音模式启动时缺的服务（`VoiceStatus.unavailable`）。听不见时空闲状态显示 “Online” 而不是 “Listening”，也不会出现 Hearing you / Transcribing；没有声音时不会出现 Synthesizing / Speaking，Thinking 之后回复以文字出现在 Bot 视图，状态回到空闲。在线时机器人和状态文字按状态着色：Listening / Hearing you / Transcribing（蓝）、Thinking（黄）、Synthesizing（语音橙）、Speaking（绿）、Standby（灰），启动中显示 “Starting…”。静音不算一种状态：机器人保持在线的颜色，旁边多一个灰色的 “Muted” 标签；静音且空闲时状态文字是 “Online”，静音时机器人照样会显示 Thinking、Speaking。点机器人下线。右边依次是模式按钮（委派模式显示委派图标：人把活交给 worker；结对模式显示握手图标，两个图标同色同大小；点击切换）、停止发言按钮（只在合成中和说话时出现）、日志按钮（把当前 tab 的正文在 worker 会话和语音智能体的对话之间切换，和 tab 图标同一个开关；显示 Bot 视图时变成橙色的聊天气泡，点它回到 worker 会话） |
-| 输入框里的麦克风（`src/webview/dictation.ts`） | 离线时是听写：说话转成文字插入输入框，和以前一样；STT 没通过检查时是红底，悬停显示原因，点击提示原因并打开 Settings → Voice。在线时语音智能体占着麦克风，按钮显示麦克风的输入电平（5 根条，规则同听写），点击静音或取消静音（Ctrl+Alt+M 同样）；静音时显示带斜线的麦克风、不显示电平条；启动中和待命时置灰。Bot 视图且语音智能体离线时（输入框锁定）麦克风也禁用，Ctrl+Alt+M 不开始听写；正在听写时切过去会自动停止 |
-| 输入框 | 发给哪边由当前 tab 显示的视图决定：显示会话时发给 omp worker；显示 Bot 视图时发给语音智能体，占位文字是 “Talk to the voice agent…”，效果和说话一样（会打断正在播的回复），记录只进 Bot 视图，不进会话。Bot 视图里只发文字：附件按钮置灰、不粘贴图片、不弹斜杠菜单，Ctrl+Enter 插队按钮隐藏，发送按钮不会打断 omp（输入框为空且 worker 在跑时仍是停止按钮）。语音智能体不在线时 Bot 视图的输入框置灰禁用，占位文字 “The voice agent must be online to send messages”；上线或切回会话后自动恢复。扩展端同样按 `TabState.botView` 路由（`SidebarProvider._routeComposerSend`），离线时拒收 |
-| 会话 tab 的 **Bot** 视图（前端 `src/webview/voicePanel.ts`，挂在 `main.ts` 的 `.bot-host` 里） | tab 标题左边的图标是按钮：聊天气泡 = 显示会话，点一下变成（语音橙的）机器人，tab 正文从会话记录换成 Bot 视图，再点换回来。每个 tab 各自记住（`TabState.botView`，经 `TabInfo.botView` 同步），点没激活 tab 的图标会同时切过去；机器人工具条上的日志按钮切换当前 tab。`botView` 不存盘：重启后恢复的 tab 若只有语音对话、没有 worker 消息就打开 Bot 视图，否则显示会话。只显示：上面是引擎和 token 用量，摘要行右边是历史按钮，下面是卡片和对话记录（§11.2） |
+| Bot toolbar at the top of the composer (`src/webview/voiceBar.ts`) | The header of the composer card: at the very top, spanning the whole card, with a light background and a divider; file context, attachments, and the edit banner all sit below it; when online, the background and divider take the state color. When the voice agent is offline there is only the bot button and the words “Voice agent”; the bot and the status text next to it are one button: offline, clicking it goes online; online, clicking it goes offline (no start/stop while starting); every click also switches the tab to the Bot view if it is not already showing it; the rest of the toolbar's empty space does not respond to clicks. STT or TTS failing its check (`GET {base}/models` returns 200; TTS additionally requires the model to be requested to be in the list) does not prevent going online (§5.13): the bot is still clickable, and a gray tag like “Muted” appears next to the status text — “Can't hear” when STT is unusable, “No voice” when TTS is unusable, both when neither works; hovering shows the reason (as worded by `explainVoiceError`), and clicking the tag opens Settings → Voice. Offline, the tags follow the check results (not shown while checking); online, they show the services missing when voice mode started (`VoiceStatus.unavailable`). When it cannot hear, the idle state shows “Online” instead of “Listening”, and Hearing you / Transcribing never appear; without a voice, Synthesizing / Speaking never appear — after Thinking, the reply appears as text in the Bot view and the state returns to idle. Online, the bot and status text are colored by state: Listening / Hearing you / Transcribing (blue), Thinking (yellow), Synthesizing (voice orange), Speaking (green), Standby (gray); while starting it shows “Starting…”. Muted is not a state: the bot keeps its online color, and a gray “Muted” tag appears next to it; when muted and idle the status text is “Online”, and while muted the bot still shows Thinking and Speaking. Click the bot to go offline. On the right, in order: the stop-talking button (only shown while synthesizing and speaking), and the log button (switches the current tab's body between the worker session and the voice agent conversation, the same toggle as the tab icon; while the Bot view is shown it becomes an orange chat bubble, click it to go back to the worker session) |
+| Microphone in the composer (`src/webview/dictation.ts`) | Offline it is dictation: speech is transcribed and inserted into the composer, as before; when STT fails its check it has a red background, hovering shows the reason, and clicking shows the reason and opens Settings → Voice. Online, the voice agent holds the microphone; the button shows the microphone input level (5 bars, same rules as dictation), and clicking mutes or unmutes (Ctrl+Alt+M does the same); when muted it shows a microphone with a slash and no level bars; it is grayed out while starting and on standby. In the Bot view with the voice agent offline (composer locked), the microphone is also disabled and Ctrl+Alt+M does not start dictation; switching over while dictating stops dictation automatically |
+| Composer | Where input goes is decided by the view the current tab is showing: when showing the session, it goes to the omp worker; when showing the Bot view, it goes to the voice agent, with placeholder text “Talk to the voice agent…”, with the same effect as speaking (it interrupts the reply being played), and the record goes only into the Bot view, not the session. The Bot view sends text only: the attachment button is grayed out, images are not pasted, the slash menu does not pop up, the Ctrl+Enter jump-the-queue button is hidden, and the send button never interrupts omp (when the composer is empty and the worker is running it is still the stop button). When the voice agent is not online, the Bot view composer is grayed out and disabled, with placeholder text “The voice agent must be online to send messages”; it recovers automatically when going online or switching back to the session. The extension side routes by `TabState.botView` as well (`SidebarProvider._routeComposerSend`) and rejects input while offline |
+| The **Bot** view of the session tab (frontend `src/webview/voicePanel.ts`, mounted in `.bot-host` in `main.ts`) | The icon to the left of the tab title is a button: chat bubble = showing the session; one click turns it into a (voice orange) bot and the tab body switches from the session transcript to the Bot view; click again to switch back. Each tab remembers its own (`TabState.botView`, synced via `TabInfo.botView`); clicking the icon of an inactive tab also switches to it; the log button on the bot toolbar toggles the current tab. `botView` is not persisted: after a restart, a restored tab that has only a voice conversation and no worker messages opens the Bot view, otherwise it shows the session. Display only: engine and token usage at the top, with the history button on the right of the summary line, then cards and the transcript below (§11.2) |
 
-实现要点：
+Implementation notes:
 
-- 状态栏项、`media/voice-level.ttf` 图标字体和生成它的脚本、播放电平都删掉了。原先会话 webview 里的面板位置（`VoicePanelPlace`、`move` / `hide` 消息、拖动调高度、`voicePanelInBottom` / `voiceViewVisible` 上下文键）也删了。
-- 宿主：`registerVoiceAgentCommands` 通过 `VoiceChatControls`（`SidebarProvider` 实现）和会话通信：`setVoiceStatus({ phase, starting, muted, mode })` 发 `voiceStatus` 消息，并放进 stateSync 的 `voice` 字段，供 webview 重载时恢复；`postVoiceLevel` 发 `voiceLevel`（电平 0..1，加上这段声音的波形点：每 64 ms 96 个、-1..1，按桶取离零最远的采样；麦克风和机器人一样；状态条按每毫秒 1.5 个点滚动画出真实波形，收不到波形点时退回按电平画的正弦）；会话发回来的 `voiceAgent` 消息（`start`、`stop`、`mute`、`hush`、`mode`、`send`）经 `onVoiceAction` 处理。语音模式开着或正在启动时，`SidebarProvider` 暂停听写（`voiceInput.setBlocked`）。
-- `VoicePanel`（`src/voiceAgent/voicePanel.ts`）画在 `BotViewSurface` 上（`VoiceChatControls` 继承它，`SidebarProvider` 实现）：侧边栏可见、不在 TUI 模式、当前 tab 开着 Bot 视图时才算可见，可见性变化（切 tab、切换、侧边栏显示/隐藏）时发快照（隐藏的 webview 会丢消息）。视图的消息只有 `ready`、卡片按钮的 `proposal` 和历史按钮的 `history`。命令：`oh-my-pi-chater.voiceView.show`（在当前 tab 打开 Bot 视图并显示侧边栏）、`history`、`state`（脚本读快照）。
-- 对话用 VS Code 界面字号（`--vscode-font-size`，和会话消息差不多），行高 1.6；标签、提示、工具标签小 1.5px。每句话单独一行：左边一条颜色竖线和角色标签（你 = 蓝紫、语音 = 橙、主动汇报 = 黄、系统 = 灰），正文也按说话人上色，不用底色区分；深色主题用浅色字，浅色主题用深色字（`voice.css` 按 `body.vscode-light` / 高对比度各给一组）。时间放在标签的悬停提示里。
-- 卡片区只留“待确认的任务”和“后台研究”，各占一行；worker 卡片和 worker 的请求不重复显示，会话本身就有。
-- Bot 视图顶边有一条状态色细线，思考、合成、说话时流动。
-- Bot 视图的节点在 `render()` 重建的骨架之外（同 TUI 终端），切 tab 时记录、滚动位置和展开状态不丢；会话 webview 用 `retainContextWhenHidden`。按宽度（container query）收掉次要内容：≤360px 卡片不显示标题，≤260px 角色标签和正文改成上下排。
+- The status bar item, the `media/voice-level.ttf` icon font and the script that generated it, and the playback level have all been removed. The panel placement in the old session webview (`VoicePanelPlace`, the `move` / `hide` messages, drag-to-resize, the `voicePanelInBottom` / `voiceViewVisible` context keys) has also been removed.
+- Host: `registerVoiceAgentCommands` communicates with the session through `VoiceChatControls` (implemented by `SidebarProvider`): `setVoiceStatus({ phase, starting, muted, mode })` sends a `voiceStatus` message and puts it in stateSync's `voice` field so the webview can restore it on reload; `postVoiceLevel` sends `voiceLevel` (level 0..1, plus the waveform points for that stretch of sound: 96 per 64 ms, -1..1, taking the sample farthest from zero per bucket; the microphone works the same way as the bot; the status bar scrolls and draws the real waveform at 1.5 points per millisecond, and falls back to a sine drawn from the level when no waveform points arrive); `voiceAgent` messages sent back from the session (`start`, `stop`, `mute`, `hush`, `mode`, `send`) are handled by `onVoiceAction`. While voice mode is on or starting, `SidebarProvider` pauses dictation (`voiceInput.setBlocked`).
+- `VoicePanel` (`src/voiceAgent/voicePanel.ts`) draws on `BotViewSurface` (which `VoiceChatControls` extends and `SidebarProvider` implements): it counts as visible only when the sidebar is visible and the current tab has the Bot view open (in a TUI tab it covers the terminal); on visibility changes (switching tabs, toggling, showing/hiding the sidebar) it sends a snapshot (a hidden webview drops messages). The view's only messages are `ready`, the card buttons' `proposal`, and the history button's `history`. Commands: `oh-my-pi-chater.voiceView.show` (opens the Bot view in the current tab and shows the sidebar), `history`, `state` (reads a snapshot for scripts).
+- The conversation uses the VS Code UI font size (`--vscode-font-size`, about the same as session messages), line height 1.6; labels, hints, and tool tags are 1.5px smaller. Each utterance is on its own line: on the left, a colored vertical bar and a role label (you = blue-violet, voice = orange, proactive report = yellow, system = gray); the body text is also colored by speaker, with no background color to distinguish them; dark themes use light text, light themes use dark text (`voice.css` provides a set for each of `body.vscode-light` / high contrast). The time is in the label's hover tooltip.
+- The card area keeps only "pending task" and "background research", one line each; worker cards and worker requests are not duplicated, as the session already shows them.
+- The Bot view has a thin state-colored line along its top edge that flows while thinking, synthesizing, and speaking.
+- The Bot view's nodes live outside the skeleton rebuilt by `render()` (like the TUI terminal), so the transcript, scroll position, and expanded state survive tab switches; the session webview uses `retainContextWhenHidden`. Secondary content collapses by width (container query): at ≤360px cards show no title, at ≤260px role labels and body text stack vertically.
 
-### 11.2 Bot 视图内容
+### 11.2 Bot view content
 
-- **引擎**（最上面，每项一行，等宽字体）：
-  - `LLM`：语音模型（进程启动后是实际用的 `provider/id`；之前是配置值，或当前 tab 的模型）、thinking 级别、当前模式（Delegate / Pair）。
-  - `STT`：服务地址、模型（语音模式运行时是实际用的，配置为空时取服务 `/models` 列出的第一个）、语言提示（空为 auto）。
-  - `TTS`：provider、地址、模型和声音（为空时填各 provider 的默认值 `TTS_PROVIDER_DEFAULTS`）、语速、语言怎么传（`TTS_LANGUAGE_HANDLING`：chatterbox 每句按内容传 zh 或 en；Kokoro 中文段用 `lang_code z`；openai 不传）。
-  - 语音模式关着时这几行变灰，悬停提示“这是它将使用的设置”。
-  - `Context`：当前任务的语音上下文占了多少上下文窗口，进度条 + 百分比 + tokens / 窗口大小（omp `get_session_stats` 的 `contextUsage`）。
-  - `Tokens`：这个语音上下文的累计 in / out / cache read / write / 费用（`get_session_stats`，每轮结束和切换上下文后读一次）。点开是**每次 LLM 调用的明细**（新的在上，最多 50 条）：时间、为了什么（回复 / 主动播报及类型）、in、cache read、cache write、out、费用。明细来自 omp 的 `message_end` 里助手消息的 `usage`，一轮用了工具就有几次调用；被打断的调用也算，因为 token 已经花了。明细存在对话记录里，回看过去的会话时也有。
-- **待办卡片**：
-  - 待确认的任务（`confirm_task`）和后台调研，各压成一行，放在对话流上方。
-  - 卡片上的按钮和用语音回答效果相同，并在对话流里留一条记录。
-- **对话流**：
-  - 每句话单独一行，用户的话显示 STT 转写，并标注来源（说话 / 打字 / 点按钮）；插嘴的轮次加“插嘴”标记。
-  - 助手的话**逐句显示朗读进度**：已念出正常显示，未念出变淡；正在念的句子里，**正在念的词**加高亮底色（英文按词，中日文按字）。时间来自页面回报的实际播放（`sentencePlaying` 的 `at` 和 `durationMs` → `VoiceSentence.playback`，只在播放中保留），面板按每个词的粗略发音长度把时长分给各词，用 CSS 动画的延迟对齐起点，所以快照晚到或重绘也不会错位。被打断时，未念出的部分以删除线显示并标注“被打断 · 未念出”。这正是模型上下文与用户实际听到内容的差别（§5.4）。
-  - 工具调用显示为可展开的标签：派发内容、提案、确认、回答 worker、调研、读取了哪些文件。
-  - 语音模式下每条回复还有一个默认收起的 **Timing** 标签，标题是“x.xx s to the first sound”，展开后是：Speech-to-text、LLM first text、LLM whole reply、TTS to first sound、Stopped talking → heard the reply（打字的轮次从发出 prompt 算起）。
-  - 主动播报标注为“播报”，带观察类型（`needs_input` / `error` / `done` / `research` / `progress`）；`<silent/>` 轮次只在调试记录打开时显示。
-- **调试记录**（设置项 `oh-my-pi-chater.voiceAgent.debugTranscript`，默认关）：
-  - 打开后，每轮上方展开实际发给语音智能体的附件（L3 的编辑器快照、观察、interrupted），并显示不出声的 `<silent/>` 主动轮次。
-  - 用来排查“它为什么这么说”“它为什么没提醒我”。
-- 没有输入框：所有打字都在会话的输入框里（§11.1）。
+- **Engine** (at the top, one item per line, monospace font):
+  - `LLM`: the voice model (after the process starts, the actual `provider/id` in use; before that, the configured value or the current tab's model), thinking level.
+  - `STT`: service address, model (while voice mode is running, the one actually in use; if configured empty, the first listed by the service's `/models`), language hint (empty means auto).
+  - `TTS`: provider, address, model and voice (when empty, filled with each provider's defaults `TTS_PROVIDER_DEFAULTS`), speed, how the language is passed (`TTS_LANGUAGE_HANDLING`: chatterbox passes zh or en per sentence based on content; Kokoro uses `lang_code z` for Chinese segments; openai passes nothing).
+  - When voice mode is off these lines are grayed out, with the hover hint "These are the settings it will use".
+  - `Context`: how much of the context window the current task's voice context uses: progress bar + percentage + tokens / window size (`contextUsage` from omp `get_session_stats`).
+  - `Tokens`: this voice context's cumulative in / out / cache read / write / cost (`get_session_stats`, read once after each turn ends and after switching context). Expanding it shows **a breakdown per LLM call** (newest first, at most 50 entries): time, purpose (reply / proactive narration and its type), in, cache read, cache write, out, cost. The breakdown comes from the `usage` of the assistant message in omp's `message_end`; a turn that used tools has several calls; interrupted calls count too, because the tokens were already spent. The breakdown is stored in the transcript, so it is also available when reviewing past sessions.
+- **Pending cards**:
+  - Tasks pending confirmation (`confirm_task`) and background research, each compressed to one line, placed above the conversation stream.
+  - The buttons on the cards have the same effect as answering by voice, and leave an entry in the conversation stream.
+- **Conversation stream**:
+  - Each utterance is on its own line; the user's utterances show the STT transcript and are labeled with their source (spoken / typed / button click); barge-in turns carry a "barge-in" tag.
+  - The assistant's utterances **show reading progress sentence by sentence**: spoken parts are displayed normally, unspoken parts are faded; within the sentence being read, **the word being spoken** gets a highlighted background (by word for English, by character for Chinese and Japanese). Timing comes from the actual playback reported by the page (`at` and `durationMs` of `sentencePlaying` → `VoiceSentence.playback`, kept only while playing); the panel divides the duration among words by each word's rough pronunciation length and aligns the start with CSS animation delays, so a late snapshot or a redraw does not misalign it. When interrupted, the unspoken part is shown with strikethrough and labeled "interrupted · not spoken". This is exactly the difference between the model's context and what the user actually heard (§5.4).
+  - Tool calls appear as expandable tags: dispatch contents, proposals, confirmations, answers to the worker, research, which files were read.
+  - In voice mode each reply also has a **Timing** tag, collapsed by default, titled "x.xx s to the first sound"; expanded, it shows: Speech-to-text, LLM first text, LLM whole reply, TTS to first sound, Stopped talking → heard the reply (for typed turns, measured from when the prompt was sent).
+  - Proactive narrations are labeled "narration", with the observation type (`needs_input` / `error` / `done` / `research` / `progress`); `<silent/>` turns are shown only when the debug transcript is on.
+- **Debug transcript** (setting `oh-my-pi-chater.voiceAgent.debugTranscript`, off by default):
+  - When on, each turn expands, above it, the attachments actually sent to the voice agent (L3 editor snapshot, observations, interrupted), and silent `<silent/>` proactive turns are shown.
+  - Used to investigate "why did it say that" and "why didn't it remind me".
+- No composer: all typing happens in the session's composer (§11.1).
 
-### 11.3 与会话视图的关系
+### 11.3 Relationship to the session view
 
-- 会话输入框上方的机器人状态条是语音模式的开关和状态显示；语音模式开着时，输入框里的麦克风从听写变成语音智能体麦克风的电平和静音按钮（§11.1）。
-- worker 的聊天流里不混入语音对话。由语音派发的用户消息加一个小标记"🎙 来自语音"，让用户分清这条指令是谁发的。
-- 语音面板里确认的提案、语音回答的 worker 请求，会话视图里的审批弹窗同步关闭（已有 `rpcExtensionUi` 的先到先得逻辑）。
+- The bot status bar above the session composer is the voice mode switch and status display; while voice mode is on, the microphone in the composer changes from dictation into the voice agent microphone's level meter and mute button (§11.1).
+- Voice conversation is not mixed into the worker's chat stream. User messages dispatched by voice get a small "🎙 From voice" marker, so the user can tell who issued the instruction.
+- When a proposal is confirmed in the voice panel or a worker request is answered by voice, the approval dialog in the session view closes accordingly (the existing first-come-first-served logic in `rpcExtensionUi`).
 
-### 11.4 对话记录的存储
+### 11.4 Transcript storage
 
-- 面板显示的记录由扩展维护（`VoiceTranscriptStore`），按语音上下文（即 worker 会话）分组，键和语音上下文相同（`taskKey`：worker 会话文件，tab 还没有会话文件时用 `tab:<tabId>`）。一条对话记录对应一个语音上下文，记下它的 omp 语音会话文件（`voiceSessionFile`）；omp 的会话文件只是上下文载体，回看用对话记录。
-- Bot 视图只显示当前 worker 任务的记录，切换 tab 或会话时跟着切换：语音模式开着时显示该任务正在进行的对话，还没说话时显示会续上的那条（没有就是空的）；关着时显示该任务最近一次记录（只读）。其他任务的记录留在历史里。tab 拿到会话文件后，本次扩展运行里以 `tab:<tabId>` 记下的记录改挂到会话文件上；以前窗口存下的 `tab:` 记录不属于任何 tab（tab id 每次启动重新编号），只在历史里能看到。
-- 没有一条内容的对话记录（加载了语音上下文，主动播报最后又没说话）在语音模式关闭时丢弃，它的语音会话文件随后删除。
-- 按工作区存入 `workspaceState`，保留最近 `historySessions` 次语音会话，每次记录都有条数上限。Bot 视图标题栏的“历史”按钮可以切换查看过去的会话，当前任务的排在前面。
-- **续聊与只读回看**：每个任务最近一次对话在语音智能体重新启动后自动续上（§5.12 规则 2），记录接着往下写；更早的对话只读，不恢复语音上下文。
-- **只跟语音智能体说过话的会话（2026-09-27）**：worker 在 tab 建立时就报告会话文件路径，所以对话记录一开始就挂在会话文件上，关掉 tab、重启扩展后仍然对得上。但 worker 没有消息时 pi 不写会话文件（omp 只写文件头），聊天侧栏的恢复列表因此把有语音对话记录的会话也算作有内容：列表合并 `VoiceTranscriptStore.voiceSessions()`，磁盘上没有文件的直接补一行，标题用语音对话起的名字，没有名字时用用户说的第一句，元信息显示语音轮数。恢复时照常 `switch_session` 到那个路径（pi 和 omp 都保留显式路径），Bot 视图随之接上原来的语音记录；会话没有名字时把语音对话起的名字交给 worker（`set_session_name`）。在列表里删除会话时一并删掉它的语音对话记录；重命名没有文件的会话时只改语音对话记录上的名字。别的 tab 正开着的会话，恢复时切到那个 tab，避免两个 worker 进程同时持有一个会话文件。
-- **自动起名**：一个会话的语音对话里用户说到第 `TITLE_AFTER_TURNS`（2）句、而 worker 会话还没有名字（用户起的，或 omp 自己生成的标题）时，用语音智能体的模型跑一次无工具的 `-p`，按用户说的语言起一个 2～6 个词的标题；模型失败就用用户说的第一句截短。名字记在对话记录上（`named: 'auto' | 'user'`，之后的对话继承它），同时通过 `WorkerController.nameTask` 设为 worker 会话名；自动起的名字不会覆盖用户起的。
-- 快捷键：Ctrl+Alt+M 在语音模式下静音 / 取消静音（关着时是听写）。
+- The transcript shown in the panel is maintained by the extension (`VoiceTranscriptStore`), grouped by voice context (i.e. worker session), with the same key as the voice context (`taskKey`: the worker session file, or `tab:<tabId>` when the tab has no session file yet). One transcript corresponds to one voice context and records its omp voice session file (`voiceSessionFile`); omp's session file is only the context carrier — reviewing uses the transcript.
+- The Bot view shows only the current worker task's transcript and follows tab or session switches: with voice mode on, it shows that task's ongoing conversation, or, before anything has been said, the one that will be resumed (empty if none); with voice mode off, it shows that task's most recent transcript (read-only). Other tasks' transcripts stay in the history. Once a tab gets a session file, transcripts recorded under `tab:<tabId>` during this extension run are re-attached to the session file; `tab:` transcripts saved by earlier windows belong to no tab (tab ids are renumbered at each startup) and are visible only in the history.
+- A transcript with no entries at all (a voice context was loaded, but proactive narration ended up saying nothing) is discarded when voice mode closes, and its voice session file is deleted afterwards.
+- Stored per workspace in `workspaceState`, keeping the most recent `historySessions` voice sessions, with an entry limit per transcript. The "History" button in the Bot view title bar switches to viewing past sessions, with the current task's listed first.
+- **Resuming and read-only review**: each task's most recent conversation is resumed automatically after the voice agent restarts (§5.12 rule 2), and the transcript continues from there; earlier conversations are read-only and do not restore the voice context.
+- **Sessions that only talked to the voice agent (2026-09-27)**: the worker reports the session file path as soon as the tab is created, so the transcript is attached to the session file from the start and still matches after closing the tab or restarting the extension. But pi does not write the session file when the worker has no messages (omp writes only the file header), so the chat sidebar's resume list also counts sessions with a voice transcript as having content: the list merges `VoiceTranscriptStore.voiceSessions()`, adds a row directly for those with no file on disk, titles it with the name given by the voice conversation or, if none, the user's first utterance, and shows the number of voice turns as metadata. Resuming does the usual `switch_session` to that path (both pi and omp keep an explicit path), and the Bot view picks up the original voice transcript; if the session has no name, the name from the voice conversation is given to the worker (`set_session_name`). Deleting a session in the list also deletes its voice transcript; renaming a session with no file only changes the name on the voice transcript. For a session currently open in another tab, resuming switches to that tab, so two worker processes never hold the same session file.
+- **Auto-naming**: when the user reaches utterance number `TITLE_AFTER_TURNS` (2) in a session's voice conversation and the worker session has no name yet (user-given, or a title generated by omp itself), the voice agent's model runs a tool-less `-p` once to produce a 2–6 word title in the user's language; if the model fails, the user's first utterance is truncated instead. The name is recorded on the transcript (`named: 'auto' | 'user'`, inherited by later conversations) and also set as the worker session name via `WorkerController.nameTask`; an auto-generated name never overwrites a user-given one.
+- Shortcut: Ctrl+Alt+M mutes / unmutes in voice mode (dictation when voice mode is off).
 
-## 12. 延迟预算（估算，尚未整体实测）
+## 12. Latency budget (estimated, not yet measured end to end)
 
-| 环节 | 估计 | 依据 |
+| Stage | Estimate | Basis |
 |---|---|---|
-| 说完判定 | 1.2 s | `turnStopSecs` 默认值 |
-| STT | 0.3–1 s | 取决于服务，未测 |
-| LLM 首句 | 0.7 s（闲聊）/ ≤1 s（工具轮次，前提是提示词要求先说过渡语） | §2.1 实测 0.7 s；过渡语的效果未测 |
-| TTS 首句 | 0.2–0.5 s | 取决于服务，未测 |
-| **合计** | **约 2.5–3.5 s** | 讨论场景可接受；Smart Turn 可以把说完判定压到 0.3–0.5 s |
+| End-of-turn detection | 1.2 s | `turnStopSecs` default |
+| STT | 0.3–1 s | Depends on the service, not measured |
+| LLM first sentence | 0.7 s (chat) / ≤1 s (tool turns, provided the prompt requires a transition phrase first) | §2.1 measured 0.7 s; effect of the transition phrase not measured |
+| TTS first sentence | 0.2–0.5 s | Depends on the service, not measured |
+| **Total** | **about 2.5–3.5 s** | Acceptable for discussion; Smart Turn could cut end-of-turn detection to 0.3–0.5 s |
 
-## 13. 风险与待决问题
+## 13. Risks and open questions
 
-| # | 问题 | 影响 | 当前决策 / 待办 |
+| # | Issue | Impact | Current decision / to do |
 |---|---|---|---|
-| R1 | 回声：外放时麦克风收到 bot 自己的声音，导致误打断甚至自言自语 | 高 | **已解决**：隐藏 Chrome 的 AEC3，加上插嘴需 STT 确认 + 回声比对。原型实测外放不再被自己打断；PipeWire `echo-cancel` 效果明显更差，已放弃（原型文档 §8 P1、P10）。"按住说话"（半双工兜底）暂不做（2026-09-25）；以后如果在嘈杂环境里确实需要，做成键盘快捷键，不在视图里放按钮 |
-| R2 | `omp say` 没有中文音色、不能流式输出 | 中 | 默认使用 OpenAI 兼容 TTS；`omp say` 作为可选后端。待验证：omp 的 `modelRoles.speech`（云端 Kokoro）能否被外部复用 |
-| R3 | 被打断后，omp 上下文里保留了未念出的文字 | 中 | 用 `<interrupted>` 补偿（§5.4） |
-| R4 | 两个 omp 进程共享同一账号的额度 | 低–中 | 语音轮次短；可以配置更便宜的模型 |
-| R5 | pi 用户没有 omp | 中 | **已解决（2026-09-26）**：语音进程跟随当前后端，pi 上由扩展自带的 Pi 扩展模拟 host tools（§2.1） |
-| R6 | STT 转写错误导致派错活 | 中 | 默认派活前确认（§6） |
-| R7 | worker 触发的 `extension_ui_request` 有超时 | 中 | 转述时说明时限；超时后告知用户"已按默认处理" |
-| R8 | 录音进程冲突（听写与语音模式） | 低 | **已解决（2026-09-25）**：语音模式开着时听写停用，麦克风按钮隐藏，见 §5.1 |
-| Q1 | omp 配置里的 `live.voice`（sol / arbor / …）是否对应一套现成的实时语音能力？ | — | 未调研；如果它可以通过 RPC 使用，可作为"端到端语音"路线的备选 |
-| Q2 | 是否支持多个 worker（多个并行会话）？ | — | 已决定：每个 worker 会话一个语音上下文，跟随当前 tab 切换；后台任务不发声，见 §5.12 |
-| R9 | 多个 VS Code 窗口同时开启语音模式，会争用同一个麦克风并同时应答 | 中 | **已解决（2026-09-25）**：同一时刻只有一个窗口的语音模式在听、在说，就是开着语音模式的窗口里最后获得焦点的那个；其余窗口待命（状态栏 "Standby"）。焦点落到没开语音模式的窗口不改变归属；在用的窗口关掉语音模式或关闭时，交给之前最近获得焦点的语音窗口。实现 `activeWindow.ts`：`globalStorage/voice-windows/` 下每个语音窗口一个 `<id>.json`（`pid`、`focusedAt`），获得焦点时重写，各窗口监视目录并重新判定；进程已不存在的条目忽略并删除。待命窗口：音频页关掉麦克风轨道，扩展侧也丢弃麦克风帧；正在说的回复被打断（`<interrupted>` 记下听到了哪些）；听到一半的话丢弃，已送去识别的话回来后不回答；主动播报等到重新获得语音再说。没有用最初设想的 `proper-lockfile` 锁加"接管"提示：切焦点就切语音，不需要确认 |
-| R10 | 语音智能体在单个轮次里用读工具查太久，用户干等 | 中 | `maxReadSteps` 上限 + 过渡语 + `fillerAfterSecs` 提示音（§7.4、§7.7） |
-| R11 | 派出的指令缺少讨论中的关键结论，导致 worker 做偏 | 中 | 提示词要求指令自成一体（§7.6）；面板展示派发内容，用户可以随时看到并用语音纠正 |
-| R12 | 模型决定和工具执行之间 worker 状态变化；语音与打字同时发消息；语音与 webview 同时回答同一个请求 | 中 | 宿主在执行时路由（§6）；与打字共用发送路径；请求先到先得（§5.11） |
-| R13 | pi 的 `prompt` + `streamingBehavior` 语义 | — | **已验证**：pi 和 omp 都支持（§2.4）。差异：omp 插话会截断正在执行的命令并多跑一轮；pi 等命令执行完再处理 |
-| R14 | 语音批准工具审批时，STT 误识别导致误放行 | 中 | 转述时说清具体命令或文件；审批出现后必须有用户轮次；面板同时显示审批卡片，可点击拒绝 |
+| R1 | Echo: with speakers, the microphone picks up the bot's own voice, causing false interruptions or even talking to itself | High | **Resolved**: AEC3 in the hidden Chrome, plus barge-in requiring STT confirmation + echo comparison. In the prototype, speakers no longer caused self-interruption; PipeWire `echo-cancel` was clearly worse and was abandoned (prototype doc §8 P1, P10). "Push to talk" (half-duplex fallback) is not planned for now (2026-09-25); if it is ever really needed in noisy environments, it will be a keyboard shortcut, not a button in the view |
+| R2 | `omp say` has no Chinese voice and cannot stream | Medium | Default to OpenAI-compatible TTS; `omp say` as an optional backend. To verify: whether omp's `modelRoles.speech` (cloud Kokoro) can be reused externally |
+| R3 | After an interruption, the omp context retains unspoken text | Medium | Compensated with `<interrupted>` (§5.4) |
+| R4 | Two omp processes share the same account's quota | Low–Medium | Voice turns are short; a cheaper model can be configured |
+| R5 | pi users don't have omp | Medium | **Resolved (2026-09-26)**: the voice process follows the current backend; on pi, host tools are emulated by a Pi extension bundled with the extension (§2.1) |
+| R6 | STT transcription errors lead to dispatching the wrong task | Medium | Confirm before dispatching by default (§6) |
+| R7 | `extension_ui_request` triggered by the worker has a timeout | Medium | Mention the time limit when relaying; after a timeout tell the user "it went with the default" |
+| R8 | Recording process conflict (dictation vs. voice mode) | Low | **Resolved (2026-09-25)**: dictation is disabled while voice mode is on and the microphone button is hidden, see §5.1 |
+| Q1 | Does `live.voice` (sol / arbor / …) in the omp config correspond to a ready-made real-time voice capability? | — | Not investigated; if it is usable over RPC, it could be an alternative "end-to-end voice" route |
+| Q2 | Support multiple workers (multiple parallel sessions)? | — | Decided: one voice context per worker session, following the current tab; background tasks stay silent, see §5.12 |
+| R9 | Multiple VS Code windows with voice mode on compete for the same microphone and answer at the same time | Medium | **Resolved (2026-09-25)**: at any time only one window's voice mode listens and speaks — the most recently focused among windows with voice mode on; the other windows are on standby (status bar "Standby"). Focusing a window without voice mode does not change ownership; when the active window turns voice mode off or closes, ownership passes to the voice window that was most recently focused before it. Implementation `activeWindow.ts`: one `<id>.json` (`pid`, `focusedAt`) per voice window under `globalStorage/voice-windows/`, rewritten on focus; every window watches the directory and re-evaluates; entries whose process no longer exists are ignored and deleted. A standby window: the audio page turns off the microphone track and the extension side also drops microphone frames; the reply being spoken is interrupted (`<interrupted>` records what was heard); half-heard speech is discarded, and speech already sent for recognition is not answered when it comes back; proactive narration waits until voice is regained. The originally planned `proper-lockfile` lock plus a "take over" prompt was not used: switching focus switches voice, with no confirmation needed |
+| R10 | The voice agent spends too long looking things up with read tools in a single turn, leaving the user waiting | Medium | `maxReadSteps` cap + transition phrase + `fillerAfterSecs` cue (§7.4, §7.7) |
+| R11 | The dispatched instruction lacks key conclusions from the discussion, so the worker goes off track | Medium | The prompt requires self-contained instructions (§7.6); the panel shows what was dispatched, so the user can see it at any time and correct it by voice |
+| R12 | Worker state changes between the model's decision and tool execution; voice and typing send messages at the same time; voice and the webview answer the same request at the same time | Medium | The host routes at execution time (§6); shares the send path with typing; requests are first come, first served (§5.11) |
+| R13 | Semantics of pi's `prompt` + `streamingBehavior` | — | **Verified**: both pi and omp support it (§2.4). Difference: an omp interjection cuts off the running command and runs an extra turn; pi waits for the command to finish before handling it |
+| R14 | When approving a tool approval by voice, an STT misrecognition lets it through by mistake | Medium | State the exact command or files when relaying; a user turn is required after the approval appears; the panel also shows an approval card that can be clicked to reject |
 
-## 14. 分阶段计划与验收
+## 14. Phased plan and acceptance
 
-| 阶段 | 内容 | 验收 |
+| Phase | Content | Acceptance |
 |---|---|---|
-| **P0 语音对话底座** | 接口层（AudioIO/隐藏 Chrome、Vad、Stt、Tts、VoiceLlm）；中心状态机 + 执行器 + 每轮取消令牌（§4）；TTS（openai + omp 两种后端）；VoiceLlm 子进程（只闲聊，无工具）；打断与 `<interrupted>` 补偿；语音面板（状态条 + 对话流 + 记录存储）和状态栏项 | 外放（不戴耳机）可以连续多轮中文闲聊；插嘴后 bot 在约 1 s 内停下（原型按参数推算约 0.75 s）；被打断后下一轮不会接着"刚才没说完的话"；面板正确显示已念出和被打断的部分 |
-| **P1 指挥 worker** | WorkerController（SidebarProvider 实现）；HostToolRouter；`tell_worker` / `confirm_task` / `stop_worker` / `answer_worker` / `worker_status` / `worker_transcript` / `worker_diff` 工具；WorkerObserver；FloorArbiter；每个 worker 会话一个语音上下文（`switch_session`）；引导轮次；完成总结；两阶段确认；面板 worker 卡片 | 口头派一个任务，确认后 worker 在侧边栏执行；过程中听到关键进展，完成后听到总结；worker 忙时说"顺便把……也改了"，会按意思插话或排队；中途说"停"能叫停；worker 的确认框和工具审批可以用语音回答；切到另一个 tab 后，语音只谈那个任务，切回来能接上之前的讨论 |
-| **P2 结对编程** | EditorWatcher；omp 内置 read / grep / glob；diagnostics 工具；重型调研转交 worker；调试记录设置项（`debugTranscript`） | 选中一段代码问"这段在干嘛"，能正确讲解；能主动去读相关文件；大问题会先征求同意再派 worker 调研 |
-| **P3 体验增强** | Smart Turn v3；浏览器回报实际播放进度；延迟埋点与调优；按住说话（仅在确有需要时，做成快捷键） | 端到端延迟有埋点数据；停顿思考时不会被抢话 |
+| **P0 Voice conversation foundation** | Interface layer (AudioIO/hidden Chrome, Vad, Stt, Tts, VoiceLlm); central state machine + executor + per-turn cancellation token (§4); TTS (openai + omp backends); VoiceLlm child process (chat only, no tools); barge-in and `<interrupted>` compensation; voice panel (status bar + conversation stream + transcript storage) and VS Code status bar item | Multiple consecutive turns of Chinese small talk over speakers (no headphones); after a barge-in the bot stops within about 1 s (the prototype estimates about 0.75 s from its parameters); after an interruption the next turn does not continue "what it hadn't finished saying"; the panel correctly shows spoken and interrupted parts |
+| **P1 Directing the worker** | WorkerController (implemented by SidebarProvider); HostToolRouter; `tell_worker` / `confirm_task` / `stop_worker` / `answer_worker` / `worker_status` / `worker_transcript` / `worker_diff` tools; WorkerObserver; FloorArbiter; one voice context per worker session (`switch_session`); bootstrap turn; completion summaries; two-phase confirmation; panel worker card | Dispatch a task verbally; after confirmation the worker runs it in the sidebar; hear key progress along the way and a summary when done; while the worker is busy, saying "also change … while you're at it" interjects or queues as meant; saying "stop" midway stops it; the worker's confirmation dialogs and tool approvals can be answered by voice; after switching to another tab, voice only discusses that task, and switching back resumes the earlier discussion |
+| **P2 Pair programming** | EditorWatcher; omp built-in read / grep / glob; diagnostics tool; heavy research handed to the worker; debug transcript setting (`debugTranscript`) | Select a piece of code and ask "what does this do", and it explains correctly; it proactively reads related files; for big questions it asks for consent before dispatching the worker to research |
+| **P3 Experience improvements** | Smart Turn v3; browser reports actual playback progress; latency instrumentation and tuning; push to talk (only if really needed, as a keyboard shortcut) | End-to-end latency has instrumentation data; pausing to think does not get talked over |
 
-### 14.1 实施进度
+### 14.1 Implementation progress
 
-| 步骤 | 内容 | 状态与验证 |
+| Step | Content | Status and verification |
 |---|---|---|
-| 1 | WorkerController（侧边栏实现）+ 调试命令 | 完成。VS Code 实测（omp worker）：派活、插话、排队顺序正确；拒绝斜杠命令和空指令；叫停后 87 ms 回到空闲；代答审批框，先到先得 |
-| 2 | 语音 omp 进程 + HostToolRouter + 工作日志 + 按任务切换语音上下文，用打字对话 | 完成。VS Code 实测两组脚本对话，共 19 项检查全部通过：闲聊不调用工具；worker 空闲时派活先形成提案，用户同意后才发出；worker 运行中问"它在干嘛"，能根据日志说出正在跑的命令和已用时间；worker 忙时"做完再做"进入排队，A、B 按顺序执行；新消息打断回复；`/new` 之后语音上下文不带旧任务；转述工具审批且不擅自回答，用户说"批准"后代答，并报告命令输出。单元测试 10 个（确认规则、回答时序、日志格式） |
-| 2.1 | 语音智能体自己查代码（read、grep、glob）；只读任务派给 worker 时不确认 | 完成。VS Code 实测 7 项检查全部通过：问某个函数是干嘛的，由它自己读代码回答；"让 worker 跑一下测试"直接派出（`readOnly: true`），之后能说出哪个测试失败以及原因；"把 average 的问题修好"仍然先形成提案 |
-| 2.2 | 后台 research（一次性只读 omp） | 完成。VS Code 实测 5 项检查全部通过："调研每个函数的测试覆盖"4.5 s 内派出，不等调研完成；马上问"调研完了吗"答"还在进行"，也没有重复派出；做完后按函数讲清了哪些情况已测、哪些没测，还指出空列表那个测试会失败；全程没有经过 worker。单元测试 11 个 |
-| 3a | 主动播报（FloorArbiter，打字模式） | 完成（§5.9 "实现"）。VS Code 实测两组脚本，16 项检查全部通过：worker 弹出工具审批后约 5 s，语音智能体主动转述"Worker 想执行 npm test，在等你批准。要批准还是拒绝？"，不擅自回答；用户说"批准"后代答；worker 做完约 10 s 主动报告测试结果，只报一次，之后没有多余的主动发言；调研结果做完后主动讲出，只讲一次；调研进行中用户插话时没有主动轮次插进来；主动轮次没有调用任何派活类工具。单元测试 25 个（新增仲裁规则、主动轮次工具限制、`<silent/>` 拦截） |
-| 3b | 音频环路（原型迁入 `src/voiceAgent/`） | 完成（§5.6、§5.7 "实现"）。入口：状态栏 "Voice"、命令 "Voice Agent — Start Voice Mode"（原来聊天视图标题栏的麦克风按钮已删除，见 §11.1）。VS Code 实测（隐藏 Chrome 的假麦克风播放合成的用户语音，`--mute-audio`），两组脚本 8 项检查全部通过：用户请求被识别；回复逐句合成并播出，停嘴到听到回答 2.24 s（说完判定 1.20 s、STT 0.21 s、首字 0.73 s、首句 0.10 s）；在故事念到一半时说"停一下，我换个问题，一加一等于几"，插嘴经 STT 确认、故事被打断、新问题得到回答；静音不产生多余轮次；语音模式下 worker 做完，主动播报拿到话语权、完整播出；Stop 后隐藏 Chrome 退出、临时 profile 删除。单元测试 42 个（新增状态机、切句、回声判定、TTS 分段与各 provider 的请求字段）。之后换成 chatterbox-tts（`tts.provider: chatterbox`，:8881）重跑第一组，6 项全部通过，停嘴到听到回答 2.78 s（首句 0.56 s）。**真人对着麦克风说话、外放回声下的插嘴还没验证** |
-| 3b.1 | 多窗口：只有最后获得焦点的语音窗口在听、在说（§13 R9） | 完成。单元测试 6 个（多个实例共用一个目录模拟多个窗口：焦点顺序、非语音窗口不抢、退出后回落、崩溃窗口不占用；状态机的待命行为）。VS Code 实测 6 项检查全部通过：另一个语音窗口获得焦点时，正在讲的故事立即被打断、音频页麦克风关闭；这期间假麦克风里说的第二个问题没有被听到；那个窗口退出语音模式后，语音和麦克风回到本窗口；Stop 后注册条目删除 |
-| 3c | 语音视图（§11） | 完成。`VoiceTranscriptStore`（按任务分组的对话记录，逐句朗读状态，存 `workspaceState`）、`VoiceViewProvider`（单独的 `WebviewView`，`voiceViewVisible` 上下文键，历史 QuickPick）、`src/webview/voiceView.ts`（2026-09-25 之后改为会话视图里盖住输入框的面板：`VoicePanel`、`src/webview/voicePanel.ts`，见 §11.1）；状态栏电平条 + ▴；静音（`VoiceMode.setMuted`）和闭嘴（状态机新增 `hush` 事件）；视图里确认提案、回答 worker 请求；会话里语音派发的消息标"From voice"；麦克风电平抽成 `MicLevelMeter`，听写共用。VS Code 实测两组脚本 15 项检查全部通过：语音问题录成 stt 条目；故事朗读时句子依次 pending → playing → played；插嘴后故事显示已念的和没念的（played ×3、cut ×3），下一句标"插嘴"；静音显示 muted、取消后回到 listening；语音模式下打字、再按闭嘴，回答被切断；停止后最近的对话保留为只读；不开语音模式时打字对话进视图（只有文字、带派活标签），派给 worker 的消息在会话里带"From voice"标记；worker 做完后的主动播报进视图；隐藏和再显示视图正常。截图确认视图在会话下方渲染正常。单元测试新增 8 个（对话记录 7 个、状态机 hush 1 个） |
-| 3d | 控制挪进输入框、Bot 视图、页面回报播放、合成中状态（§5.7、§11） | 完成（2026-09-26）。状态栏项和图标字体删除；输入框上方机器人状态条、麦克风两种状态、输入框默认发给语音智能体（“To worker” 勾选框）；底部面板 Bot 视图显示引擎、上下文占比、token 明细和每轮 Timing。单元测试：`conversation.test.ts` 新增“bot status”一组（首句出声前是合成中；句间空隙保持说话；3 s 兜底后回到思考；打断清空两个标志；`lastMetrics` 带新时间点）。VS Code 实测（假麦克风、chatterbox、真实 omp）：状态依次为 listening → userSpeaking → transcribing → thinking → synthesizing（约 0.6 s）→ speaking，长回复的句子之间一直是 speaking；插嘴后同样的顺序再走一遍；在输入框打字发出的消息进了 Bot 视图（`source: text`），会话里没有；Bot 视图显示实际 STT 模型、上下文 1%（12.3k / 1.0M）、token 汇总和每轮 Timing（STT 0.19 s、首字 0.86 s、TTS 首音 0.52 s、合计 2.77 s）；静音后麦克风变成斜线图标；勾选 “To worker” 或输入斜杠命令时发送按钮恢复为发给 omp |
-| 3e | 语音服务不可用时退回文字（§5.13） | 完成（2026-09-28）。单元测试：`conversation.test.ts` “without text-to-speech”一组（不送 TTS、thinking 后回到 listening、打断说明）；`voiceModeTextOnly.test.ts`（两者都缺时不开音频页、打字得到文字回复；STT 检查失败不抛错；只有 TTS 时音频页 `capture=0`、麦克风始终关）；`webview/voiceBar.test.ts`（检查失败时机器人仍可启动、两个标签及原因、点标签开设置、在线时的 Online 与 Thinking 提示）。实测：`capture=0` 的音频页在 Chromium 里只播放，片段 started/ended 照常回报，没有麦克风数据 |
+| 1 | WorkerController (sidebar implementation) + debug commands | Done. Tested in VS Code (omp worker): dispatching, interjecting, and queueing in the correct order; slash commands and empty instructions rejected; back to idle 87 ms after stopping; answering approval dialogs on the user's behalf, first come, first served |
+| 2 | Voice omp process + HostToolRouter + work log + voice context switching per task, conversing by typing | Done. Two scripted conversations tested in VS Code, all 19 checks passed: small talk calls no tools; with the worker idle, a dispatch first forms a proposal and is sent only after the user agrees; asking "what is it doing" while the worker runs, it states the running command and elapsed time from the log; with the worker busy, "do it after" goes into the queue and A, B run in order; a new message interrupts the reply; after `/new` the voice context carries no old task; it relays tool approvals without answering on its own, answers after the user says "approve", and reports the command output. 10 unit tests (confirmation rules, answer timing, log format) |
+| 2.1 | Voice agent looks up code itself (read, grep, glob); read-only tasks dispatched to the worker without confirmation | Done. All 7 checks passed in VS Code: asked what a function does, it reads the code itself to answer; "have the worker run the tests" is dispatched directly (`readOnly: true`), after which it can say which test failed and why; "fix the average problem" still forms a proposal first |
+| 2.2 | Background research (one-off read-only omp) | Done. All 5 checks passed in VS Code: "research the test coverage of each function" dispatched within 4.5 s without waiting for the research to finish; immediately asking "is the research done" got "still in progress", with no duplicate dispatch; when done it explained per function which cases are tested and which are not, and pointed out that the empty-list test would fail; the worker was never involved. 11 unit tests |
+| 3a | Proactive narration (FloorArbiter, typing mode) | Done (§5.9 "Implementation"). Two scripts tested in VS Code, all 16 checks passed: about 5 s after the worker raised a tool approval, the voice agent proactively relayed "The worker wants to run npm test and is waiting for your approval. Approve or reject?" without answering on its own; after the user said "approve" it answered on their behalf; about 10 s after the worker finished it proactively reported the test results, only once, with no extra proactive speech afterwards; research results were proactively reported when done, only once; no proactive turn cut in while the user interjected during research; proactive turns called no dispatch-type tools. 25 unit tests (new: arbitration rules, proactive-turn tool restrictions, `<silent/>` interception) |
+| 3b | Audio loop (prototype moved into `src/voiceAgent/`) | Done (§5.6, §5.7 "Implementation"). Entry points: status bar "Voice", command "Voice Agent — Start Voice Mode" (the microphone button formerly in the chat view title bar has been removed, see §11.1). Tested in VS Code (the hidden Chrome's fake microphone plays synthesized user speech, `--mute-audio`), two scripts, all 8 checks passed: the user's request is recognized; the reply is synthesized and played sentence by sentence, 2.24 s from stopping talking to hearing the answer (end-of-turn detection 1.20 s, STT 0.21 s, first token 0.73 s, first sentence 0.10 s); saying "hold on, let me ask something else, what is one plus one" halfway through a story, the barge-in is confirmed by STT, the story is interrupted, and the new question is answered; silence produces no extra turns; when the worker finishes in voice mode, proactive narration gets the floor and plays in full; after Stop, the hidden Chrome exits and the temporary profile is deleted. 42 unit tests (new: state machine, sentence splitting, echo detection, TTS chunking, and each provider's request fields). Later the first script was rerun with chatterbox-tts (`tts.provider: chatterbox`, :8881): all 6 passed, 2.78 s from stopping talking to hearing the answer (first sentence 0.56 s). **Barge-in with a real person speaking into the microphone under speaker echo has not been verified yet** |
+| 3b.1 | Multiple windows: only the most recently focused voice window listens and speaks (§13 R9) | Done. 6 unit tests (multiple instances sharing one directory to simulate multiple windows: focus order, non-voice windows don't take over, fallback after exit, crashed windows don't hold ownership; the state machine's standby behavior). All 6 checks passed in VS Code: when another voice window gains focus, the story being told is interrupted immediately and the audio page's microphone closes; a second question spoken into the fake microphone meanwhile is not heard; after that window leaves voice mode, voice and microphone return to this window; after Stop the registration entry is deleted |
+| 3c | Voice view (§11) | Done. `VoiceTranscriptStore` (transcripts grouped by task, per-sentence reading state, stored in `workspaceState`), `VoiceViewProvider` (a separate `WebviewView`, `voiceViewVisible` context key, history QuickPick), `src/webview/voiceView.ts` (changed after 2026-09-25 into a panel covering the composer in the session view: `VoicePanel`, `src/webview/voicePanel.ts`, see §11.1); VS Code status bar level meter + ▴; mute (`VoiceMode.setMuted`) and hush (new `hush` event in the state machine); confirming proposals and answering worker requests in the view; voice-dispatched messages in the session marked "From voice"; microphone level extracted into `MicLevelMeter`, shared with dictation. Two scripts tested in VS Code, all 15 checks passed: a spoken question is recorded as an stt entry; while a story is read, sentences go pending → playing → played; after a barge-in the story shows what was and wasn't spoken (played ×3, cut ×3), and the next utterance is tagged "barge-in"; mute shows muted, and unmuting returns to listening; typing in voice mode and then pressing hush cuts off the answer; after stopping, the latest conversation is kept read-only; typed conversation without voice mode goes into the view (text only, with dispatch tags), and messages dispatched to the worker carry the "From voice" marker in the session; proactive narration after the worker finishes goes into the view; hiding and re-showing the view works. Screenshots confirm the view renders correctly below the session. 8 new unit tests (7 for transcripts, 1 for state machine hush) |
+| 3d | Controls moved into the composer, Bot view, page-reported playback, synthesizing state (§5.7, §11) | Done (2026-09-26). VS Code status bar item and icon font removed; bot status bar above the composer, two microphone states, composer sends to the voice agent by default (“To worker” checkbox); bottom-panel Bot view shows the engine, context share, token breakdown, and per-turn Timing. Unit tests: new "bot status" group in `conversation.test.ts` (synthesizing before the first sentence is audible; gaps between sentences stay speaking; back to thinking after the 3 s fallback; barge-in clears both flags; `lastMetrics` carries the new timestamps). Tested in VS Code (fake microphone, chatterbox, real omp): the state goes listening → userSpeaking → transcribing → thinking → synthesizing (about 0.6 s) → speaking, staying speaking between sentences of a long reply; the same sequence repeats after a barge-in; messages typed in the composer go into the Bot view (`source: text`) and not the session; the Bot view shows the actual STT model, context 1% (12.3k / 1.0M), token totals, and per-turn Timing (STT 0.19 s, first token 0.86 s, TTS first sound 0.52 s, total 2.77 s); after muting, the microphone becomes the slashed icon; checking “To worker” or typing a slash command makes the send button go back to sending to omp |
+| 3e | Fall back to text when voice services are unavailable (§5.13) | Done (2026-09-28). Unit tests: "without text-to-speech" group in `conversation.test.ts` (nothing sent to TTS, back to listening after thinking, interruption note); `voiceModeTextOnly.test.ts` (with both missing, no audio page is opened and typing gets a text reply; a failed STT check does not throw; with TTS only, the audio page has `capture=0` and the microphone stays off); `webview/voiceBar.test.ts` (the bot can still start when checks fail, both tags and their reasons, clicking a tag opens settings, the Online and Thinking hints when online). Tested: an audio page with `capture=0` in Chromium only plays, clip started/ended are reported as usual, and there is no microphone data |
+| 4 | System prompt cut to policy, host-side return to pair mode after an automatic switch, behavioural evals (2026-09-28) | Done. `VOICE_SYSTEM_PROMPT` went from 3040 to about 2150 words and from about 90 to 48 rules, plain text, no Markdown; how each tool behaves is now said only in its description in `hostTools.ts`. The rule that the model switches back to pair after its own auto switch was unfulfillable (proactive turns refuse state changes), so the host does it: `HostToolRouter.returnFromAutoDelegate` on the `done` observation, 4 router tests; every user turn now ends with `USER_TURN_REMINDER`, 2 turn-message tests. `npm run eval:voice` (`src/test/eval/`): 13 scripted cases against the real omp process on anthropic/claude-opus-5-5, 12 pass in every run (voice-on in one sentence, silence on a plain progress update, a finished task reported in the user's language without acting, a small edit made at once without running anything, open_file after a glob for a spoken name, the delete_file handshake, an automatic switch and hand-over for a heavy job, proposal then confirm_task only on the later yes, a read-only dispatch for tests, the user's approval relayed, language switching). The evals caught two things in the first draft that the fixes cured: a whole reply in English after ten edit_file calls (0 of 8 runs since the Never rule and the closing line) and five-to-six-sentence answers to "what does this method do" (three to four since the one-marker rule). Still open: asked what a method does, the model opens with one English sentence before its `read` in about half the runs, then continues in Chinese; next to try are a closing line written in the user's language, or `voiceAgent.extraPrompt` for a single-language user. |
+| 5 | Delegate mode removed; worker file lock (2026-09-29) | Done. Delegate/omp mode, `set_mode`, the automatic return to pair mode, the per-turn `<mode>` block, and the mode button are gone; the voice agent always edits and runs commands itself and hands heavy work to the worker (§1.2, §8 rule 4). Lock: `modifiedPaths` / `editPaths` in `src/pi/permissionPolicy.ts`; `recordEdits` in `src/piExtension/permissionGate.ts` appends each file-changing worker call's paths to the edits file before the tool runs; `PermissionGateFile` (`src/pi/permissionGate.ts`) owns that edits file and reads it into `WorkerEditLocks` (`src/pi/workerEdits.ts`), cleared when the task ends; `SidebarWorker.lockedPaths` returns overlaps; `HostToolRouter._workerLock` refuses the voice agent's file tools on them. Tests: `permissionGate.test.ts`, `workerEdits.test.ts`, `hostTools.test.ts`. Known gaps: bash `rm` / `mv` / `sed -i` are not reported; TUI tabs do not load the gate, so while a TUI task runs all voice file changes are refused |
 
-## 15. 现有代码的复用与改动面（预估）
+## 15. Reuse of existing code and scope of changes (estimated)
 
-| 现有模块 | 用法 |
+| Existing module | Use |
 |---|---|
-| `src/voice/dictation.ts` | 拆出录音器探测和分帧，成为共享模块 |
-| `src/voice/sileroVad.ts`、`speechSegmenter.ts` | 直接复用 |
-| `src/voice/stt.ts` | 直接复用；TTS 客户端仿照它新建 |
-| `src/voice/voiceSettings.ts` | 扩展 TTS 和语音智能体配置 |
-| `src/pi/piRpcBridge.ts` | 语音智能体侧复用进程与 JSON 行协议部分，增加 host tool 处理；worker 侧不直接使用，一律经过 `WorkerController` |
-| `src/pi/rpcExtensionUi.ts` | 提供按 id 回答的入口给 `WorkerController`；语音回答后通知 webview 关闭对话框 |
-| `src/shared/editorContext.ts` | 复用片段格式 |
-| `src/providers/sidebar.ts`、webview | 实现 `WorkerController`；语音模式开关、状态和转写条带；语音派发的消息加"来自语音"标记 |
-| `package.json` | 新增 panel 视图容器、语音视图、状态栏项、`voiceAgent.*` 配置 |
-| 新增 `src/providers/voice-panel.ts` + `src/webview/voicePanel.ts` | 语音面板（沿用现有 webview provider 模式） |
-| `src/providers/settings-panel.ts`、`src/webview/settings.ts` | 设置页的语音标签页 |
+| `src/voice/dictation.ts` | Extract recorder detection and framing into a shared module |
+| `src/voice/sileroVad.ts`, `speechSegmenter.ts` | Reuse directly |
+| `src/voice/stt.ts` | Reuse directly; model the new TTS client on it |
+| `src/voice/voiceSettings.ts` | Extend with TTS and voice agent settings |
+| `src/pi/piRpcBridge.ts` | The voice agent side reuses the process and JSON-lines protocol parts, adding host tool handling; the worker side does not use it directly and always goes through `WorkerController` |
+| `src/pi/rpcExtensionUi.ts` | Provide an answer-by-id entry point for `WorkerController`; notify the webview to close the dialog after a voice answer |
+| `src/shared/editorContext.ts` | Reuse the fragment format |
+| `src/providers/sidebar.ts`, webview | Implement `WorkerController`; voice mode toggle, status, and transcript strip; voice-dispatched messages get a "From voice" marker |
+| `package.json` | Add a panel view container, the voice view, the status bar item, and `voiceAgent.*` settings |
+| New `src/providers/voice-panel.ts` + `src/webview/voicePanel.ts` | Voice panel (following the existing webview provider pattern) |
+| `src/providers/settings-panel.ts`, `src/webview/settings.ts` | Voice tab in the settings panel |
 
-新增目录：`src/voiceAgent/`，包含 io（AudioIO 与隐藏 Chrome）、conversation（中心状态机）、executor（取消令牌）、observer、tools。
+New directory: `src/voiceAgent/`, containing io (AudioIO and the hidden Chrome), conversation (central state machine), executor (cancellation tokens), observer, tools.

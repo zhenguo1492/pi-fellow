@@ -3,7 +3,7 @@ import type { TabInfo } from '../../../../shared/protocol';
 
 vi.mock('../../../../webview/vscodeApi', () => ({ vscode: { postMessage: vi.fn() } }));
 
-import { tabsForVisibleCapacity } from '../../../../webview/chat/tabs';
+import { tabIconTitle, tabView, tabsForVisibleCapacity } from '../../../../webview/chat/tabs';
 
 function makeTabs(count: number): TabInfo[] {
     return Array.from({ length: count }, (_, i) => ({
@@ -48,5 +48,21 @@ describe('tabsForVisibleCapacity', () => {
 
     it('treats an unknown active tab as the first one', () => {
         expect(ids(tabsForVisibleCapacity(makeTabs(5), 'missing', 2))).toEqual(['t0', 't1']);
+    });
+});
+
+describe('tabView and the tab icon', () => {
+    it('shows the Bot view over a conversation or a TUI, else what the tab is in', () => {
+        expect(tabView({ botView: false, tuiMode: false })).toBe('chat');
+        expect(tabView({ botView: false, tuiMode: true })).toBe('terminal');
+        expect(tabView({ botView: true, tuiMode: true })).toBe('bot');
+        expect(tabView({ botView: true, tuiMode: false })).toBe('bot');
+        expect(tabView(undefined)).toBe('chat');
+    });
+
+    it('says what a click brings: the Bot view, or back to the conversation or the still-running terminal', () => {
+        expect(tabIconTitle({ botView: false, tuiMode: true })).toBe('Show the Bot view (voice agent conversation)');
+        expect(tabIconTitle({ botView: true, tuiMode: true })).toBe('Show the terminal (TUI); it kept running');
+        expect(tabIconTitle({ botView: true, tuiMode: false })).toBe('Show the conversation');
     });
 });

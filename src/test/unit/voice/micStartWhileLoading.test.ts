@@ -33,6 +33,7 @@ vi.mock('../../../voice/sileroVad', () => ({
 
 vi.mock('../../../voice/dictation', () => ({
     dictationSegmenterParams: () => ({}),
+    transcribeUtterance: () => async () => undefined,
     DictationSession: class {
         recording = false;
         constructor(

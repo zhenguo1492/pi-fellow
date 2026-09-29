@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { changedLines, editPaths, findName, readTarget } from '../../../voiceAgent/piFocus';
+import { changedLines, findName, readTarget } from '../../../voiceAgent/piFocus';
 
 describe('Pi focus: what a tool call looks at', () => {
     it("reads omp's line selectors and pi's offset/limit", () => {
@@ -9,12 +9,6 @@ describe('Pi focus: what a tool call looks at', () => {
         expect(readTarget({ path: 'src/a.ts:raw' })).toEqual({ path: 'src/a.ts' });
         expect(readTarget({ file_path: '/abs/b.py', offset: 10, limit: 5 })).toEqual({ path: '/abs/b.py', startLine: 10, endLine: 14 });
         expect(readTarget({ path: 'https://example.com/' })).toBeUndefined();
-    });
-
-    it('finds every file an omp patch touches, once each', () => {
-        const input = '[src/a.ts#1A2B]\nPUT 3.=4:\n+x\n[src/b.ts#3C4D]\nCUT 1.=1\n[src/a.ts#1A2B]\nPUT >9:\n+y\n';
-        expect(editPaths({ input })).toEqual(['src/a.ts', 'src/b.ts']);
-        expect(editPaths({ path: 'c.ts', content: '[not.a#header]' })).toEqual(['c.ts']);
     });
 });
 

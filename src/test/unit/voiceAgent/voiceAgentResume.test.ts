@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceEntry } from '../../../shared/voiceViewProtocol';
 import { VoiceTranscriptStore, type TranscriptMemento, type VoiceSessionRecord } from '../../../voiceAgent/transcriptStore';
 import { VoiceAgent } from '../../../voiceAgent/voiceAgent';
+import { VOICE_SYSTEM_PROMPT } from '../../../voiceAgent/voicePrompt';
 import type { WorkerController, WorkerEvent, WorkerStatus, WorkerTask } from '../../../voiceAgent/workerController';
 
 /** The omp voice process, faked: session files are real files in `dir`. */
@@ -16,6 +17,9 @@ const omp = vi.hoisted(() => ({
     failSwitch: false,
     /** Set: VoiceLlm.start rejects with it, like pi exiting on an unknown model. */
     failStart: '',
+    /** The system prompt of each process started. */
+    systemPrompts: [] as string[],
+    stopped: 0,
 }));
 
 vi.mock('../../../voiceAgent/voiceLlm', async () => {
@@ -45,11 +49,14 @@ vi.mock('../../../voiceAgent/voiceLlm', async () => {
         async usage() {
             return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
         },
-        async stop() {},
+        async stop() {
+            omp.stopped++;
+        },
     };
     return {
         VoiceLlm: {
-            start: async () => {
+            start: async (options: { systemPrompt: string }) => {
+                omp.systemPrompts.push(options.systemPrompt);
                 if (omp.failStart) {
                     throw new Error(omp.failStart);
                 }
@@ -116,6 +123,15 @@ class FakeWorker implements WorkerController {
     async requestToolApproval() {
         return true;
     }
+    lockedPaths(): string[] {
+        return [];
+    }
+    async readTuiScreen(): Promise<string> {
+        throw new Error('Not a TUI tab.');
+    }
+    async typeIntoTui(): Promise<string> {
+        throw new Error('Not a TUI tab.');
+    }
 }
 
 function memento() {
@@ -129,7 +145,7 @@ function memento() {
 }
 
 /** One VS Code window: the store lives as long as it, a voice agent per voice run. */
-function openWindow(worker: FakeWorker, state: TranscriptMemento) {
+function openWindow(worker: FakeWorker, state: TranscriptMemento, extraPrompt = () => '') {
     const store = new VoiceTranscriptStore(state, { sessions: () => 20, entries: 300 }, () => worker.activeTask());
     let agent: VoiceAgent | undefined;
     /** Voice starts: the agent watches the worker from now on. */
@@ -142,6 +158,7 @@ function openWindow(worker: FakeWorker, state: TranscriptMemento) {
             model: '',
             thinking: 'off',
             confirmBeforeDispatch: () => true,
+            extraPrompt,
             arbiter: () => ({ narration: 'off', minProactiveGapMs: 8000, narrationIntervalMs: 30000 }),
             log: () => {},
         }));
@@ -171,6 +188,8 @@ beforeEach(() => {
     omp.switched = [];
     omp.failSwitch = false;
     omp.failStart = '';
+    omp.systemPrompts = [];
+    omp.stopped = 0;
 });
 
 afterEach(() => {
@@ -284,6 +303,35 @@ describe('VoiceAgent: resuming a task’s voice conversation', () => {
         await window.store.pruneContexts(omp.dir);
         expect(existsSync(omp.created[0])).toBe(true);
         expect(existsSync(unused)).toBe(false);
+    });
+});
+
+describe('VoiceAgent: the user’s extra prompt', () => {
+    it('restarts the process with it between turns, carrying on the same conversation', async () => {
+        const worker = new FakeWorker();
+        let extra = '   ';
+        const window = openWindow(worker, memento(), () => extra);
+        await window.say('What is it doing?');
+        expect(omp.systemPrompts).toEqual([VOICE_SYSTEM_PROMPT]);
+
+        extra = '\n  Call me Captain.\n';
+        await window.startVoice().restartProcess();
+        expect(omp.stopped).toBe(1);
+        expect(omp.systemPrompts[1]).toBe(`${VOICE_SYSTEM_PROMPT}\n\nAdditional instructions from the user:\nCall me Captain.`);
+
+        await window.say('And now?');
+        expect(omp.systemPrompts).toHaveLength(2);
+        expect(omp.created).toHaveLength(1);
+        expect(omp.switched).toEqual([omp.created[0]]);
+        expect(said(window.store.current())).toEqual(['What is it doing?', '> Sure.', 'And now?', '> Sure.']);
+        await window.stopVoice();
+    });
+
+    it('starts nothing when voice has not started a process yet', async () => {
+        const window = openWindow(new FakeWorker(), memento(), () => 'Be brief.');
+        await window.startVoice().restartProcess();
+        expect([omp.systemPrompts, omp.stopped]).toEqual([[], 0]);
+        await window.stopVoice();
     });
 });
 

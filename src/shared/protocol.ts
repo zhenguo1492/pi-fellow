@@ -1,4 +1,5 @@
 import type { EditorContextInfo } from './editorContext';
+import type { VoiceprintRunEvent, VoiceprintStatus } from './voiceprint';
 import type { VoiceAgentAction, VoiceStatus, VoiceViewClientMessage, VoiceViewHostMessage } from './voiceViewProtocol';
 import type { VoiceAvatar, VoiceSpeakerId } from './voiceSpeakers';
 import type { TtsConfig } from '../voiceAgent/tts';
@@ -74,7 +75,7 @@ export interface PiCommandInfo {
     source?: string;
 }
 
-import type { ExtensionUiRequestPayload } from './extensionUi';
+import type { ExtensionUiCard } from './extensionUi';
 
 /**
  * An mcp.json the backend reads. Both: `global` (agent dir mcp.json), `project` (workspace .mcp.json),
@@ -186,11 +187,17 @@ export interface SettingsData {
     voiceMessageButtons: boolean;
     /** `voiceAgent.translateTo`: the language those translations are in. */
     voiceTranslateTo: string;
+    /** `voiceAgent.extraPrompt`: the user's instructions appended to the voice agent's system prompt. */
+    voiceExtraPrompt: string;
+    /** The voice agent's built-in system prompt (`VOICE_SYSTEM_PROMPT`), shown read-only. */
+    voiceDefaultPrompt: string;
     /**
      * `voiceAgent.userName` / `userAvatar` and `botName` / `botAvatar` as set, with the avatar as the
      * Bot view shows it (`resolved`; a picture read into a data URI) or why it shows the default (`error`).
      */
     voiceSpeakers: Record<VoiceSpeakerId, { name: string; avatar: string; resolved?: VoiceAvatar; error?: string }>;
+    /** Only your voice reaches voice input: the voiceprint, its settings, and whether its check works. */
+    voiceprint: VoiceprintStatus;
 }
 
 /** Your own servers' fields (settings field key → value) by part, remembered in globalState. */
@@ -515,6 +522,8 @@ export type ClientMessage =
     | { type: 'switchTab'; tabId: string }
     /** The tab icon or the robot status line's log button; no `tabId`: the active tab. Switches to the tab. */
     | { type: 'toggleBotView'; tabId?: string }
+    /** A fallback dialog card's button: show the tab's terminal (not the Bot view over it), switching to the tab. */
+    | { type: 'showTui'; tabId: string }
     /** `section`: scroll the settings to it (`voice`, `mcp`, …). */
     | { type: 'openSettings'; section?: string }
     | { type: 'getSkills' }
@@ -606,6 +615,12 @@ export type SettingsClientMessage =
     /** Asks for `builtinVoiceStatus`; `prepareBuiltinVoice` downloads the models and starts the engine first. */
     | { type: 'getBuiltinVoiceStatus' }
     | { type: 'prepareBuiltinVoice' }
+    /**
+     * Records your voice: `enroll` reads the prompts and saves a new voiceprint, `test` compares each
+     * utterance with the saved one. `run` tags its events; `stopSttDryRun` stops it too.
+     */
+    | { type: 'startVoiceprint'; run: number; mode: 'enroll' | 'test' }
+    | { type: 'deleteVoiceprint' }
     /** The Voice tab has unsaved changes (or not): closing the panel then warns. */
     | { type: 'voiceDirty'; dirty: boolean };
 
@@ -633,7 +648,7 @@ export type ServerMessage =
     | { type: 'skills'; skills: SkillInfo[] }
     | { type: 'slashCommands'; commands: SlashCommandListItem[] }
     | { type: 'error'; message: string }
-    | { type: 'extensionUiRequest'; request: ExtensionUiRequestPayload }
+    | { type: 'extensionUiRequest'; request: ExtensionUiCard }
     | { type: 'extensionUiDismiss'; id: string }
     | { type: 'piExtensionChrome'; chrome: PiExtensionChromeSnapshot }
     | { type: 'setComposerText'; text: string }
@@ -693,6 +708,7 @@ export type SettingsServerMessage =
      */
     | { type: 'voiceTestResult'; service: 'stt' | 'tts'; ok: boolean; message: string; check: VoiceServiceCheck; models?: string[]; detectedModel?: string }
     | { type: 'sttDryRun'; run: number; event: SttDryRunEvent }
+    | { type: 'voiceprintRun'; run: number; event: VoiceprintRunEvent }
     | { type: 'ttsDryRunResult'; ok: true; audio: string; seconds: number; elapsedMs: number }
     | { type: 'ttsDryRunResult'; ok: false; message: string }
     /**

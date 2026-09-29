@@ -1,12 +1,12 @@
 /**
- * One dictation run: microphone → Silero VAD → speech segments → STT → text.
+ * One dictation run: microphone → Silero VAD → speech segments → a handler (STT) → results.
  *
  * VS Code webviews cannot open the microphone, so audio is captured in the
  * extension host by a command-line recorder (ALSA `arecord`, PulseAudio
  * `parecord`, sox `rec`) writing raw 16 kHz mono s16le to stdout — the same
  * fallback Claude Code's extension uses. The VAD cuts the recording into utterances; each is
- * transcribed as soon as it ends (`asSpoken`: the settings dry run) or all of them once the
- * recording stops (`onStop`: the composer mic). Transcripts are delivered in speaking order.
+ * handled as soon as it ends (`asSpoken`: the settings dry run and voiceprint recordings) or all of
+ * them once the recording stops (`onStop`: the composer mic). Results are delivered in speaking order.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -14,16 +14,32 @@ import * as path from 'node:path';
 import type { DictationStatus, VoiceSettings } from '../shared/protocol';
 import { MicLevelMeter, frameDb } from './micLevel';
 import { describeError } from './modelsProbe';
+import { transcribeChecked, type SpeechGate } from './speakerGate';
 import { SpeechSegmenter, type SegmenterParams } from './speechSegmenter';
 import { VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE, type SileroVad } from './sileroVad';
 import type { SttClient } from './stt';
 
-export interface DictationEvents {
+export interface DictationEvents<T> {
     status(status: DictationStatus): void;
-    text(text: string): void;
+    /** What the handler made of an utterance, in speaking order. */
+    result(result: T): void;
     /** Microphone level 0..1 and its waveform ({@link wavePoints}), ~16 times a second while recording. */
     level(level: number, wave: number[]): void;
     error(message: string): void;
+}
+
+/** Turns an utterance (16 kHz) into what the session delivers; undefined delivers nothing. */
+export type SegmentHandler<T> = (pcm: Int16Array) => Promise<T | undefined>;
+
+/**
+ * Dictation's handler: the transcript of each utterance, noise-reduced and checked against your
+ * voiceprint by `gate` while it is transcribed. Someone else's voice, or silence, delivers nothing.
+ */
+export function transcribeUtterance(stt: SttClient, gate: SpeechGate | undefined): SegmentHandler<string> {
+    return async (pcm) => {
+        const { text, verdict } = await transcribeChecked((audio, rate) => stt.transcribe(audio, rate), gate, pcm, VAD_SAMPLE_RATE);
+        return verdict.accepted && text ? text : undefined;
+    };
 }
 
 const FRAME_BYTES = VAD_FRAME_SAMPLES * 2;
@@ -64,7 +80,7 @@ export function dictationSegmenterParams(s: VoiceSettings): SegmenterParams {
     return { confidence: s.vadConfidence, startSecs: 0.15, stopSecs: s.vadStopSecs, preRollSecs: 0.3, maxSegmentSecs: 28 };
 }
 
-export class DictationSession {
+export class DictationSession<T = string> {
     private proc: ChildProcess | undefined;
     private draining: Promise<void> | undefined;
     private buffered: Buffer = Buffer.alloc(0);
@@ -73,7 +89,7 @@ export class DictationSession {
     private pending = 0;
     private readonly level: MicLevelMeter;
     private stderr = '';
-    /** Chains transcript delivery so text arrives in speaking order. */
+    /** Chains result delivery so results arrive in speaking order. */
     private delivery: Promise<void> = Promise.resolve();
     /** Utterances waiting for `stop` (`onStop`), in speaking order. */
     private held: Int16Array[] = [];
@@ -82,9 +98,9 @@ export class DictationSession {
 
     constructor(
         private readonly vad: SileroVad,
-        private readonly stt: SttClient,
+        private readonly handle: SegmentHandler<T>,
         private readonly vadParams: SegmenterParams,
-        private readonly events: DictationEvents,
+        private readonly events: DictationEvents<T>,
         private readonly when: TranscribeWhen,
     ) {
         this.segmenter = new SpeechSegmenter(vadParams, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE);
@@ -95,7 +111,7 @@ export class DictationSession {
         return this.recording;
     }
 
-    /** Resolves once every transcription requested so far has been delivered. */
+    /** Resolves once every result requested so far has been delivered. */
     get settled(): Promise<void> {
         return this.delivery;
     }
@@ -233,9 +249,9 @@ export class DictationSession {
     private transcribe(pcm: Int16Array): void {
         this.pending++;
         this.emitStatus();
-        // Requests run concurrently; only delivery is serialized.
-        const result = this.stt.transcribe(pcm, VAD_SAMPLE_RATE).then(
-            (text) => ({ text }),
+        // Utterances are handled concurrently; only delivery is serialized.
+        const result = this.handle(pcm).then(
+            (value) => ({ value }),
             (error: unknown) => ({ error: describeError(error) }),
         );
         this.delivery = this.delivery.then(async () => {
@@ -243,8 +259,8 @@ export class DictationSession {
             this.pending--;
             if ('error' in outcome) {
                 this.events.error(outcome.error);
-            } else if (outcome.text) {
-                this.events.text(outcome.text);
+            } else if (outcome.value !== undefined) {
+                this.events.result(outcome.value);
             }
             this.emitStatus();
         });

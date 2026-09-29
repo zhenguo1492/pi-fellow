@@ -2,11 +2,16 @@ import * as vscode from 'vscode';
 import { SessionActivityWatcher } from '../pi/sessionActivity';
 import { TuiProcess } from '../pi/tuiTerminal';
 import type { AgentBackend, TuiAuthCommand } from '../shared/protocol';
+import { TUI_RUN_END, TUI_RUN_START, type WorkerEvent } from '../voiceAgent/workerController';
 import type { SidebarHost } from './sidebarHost';
 import type { MessageHandlers } from './sidebarMessageHandlers';
 import { updateTabName } from './sidebarTabs';
 import { resetTabUiState, tabReady, type TabState } from './sidebarTabState';
 import { TabTuis } from './sidebarTui';
+import { TuiDialogs } from './sidebarTuiDialogs';
+
+/** Lines of the screen a stopped TUI run's notification carries: its last reply or the question it asks. */
+const RUN_END_SCREEN_LINES = 15;
 
 /** Per-tab TUI mode (`TabState.tuiMode`): a tab shows its CLI's TUI instead of the chat UI; plus the /login and /logout banner that switches there. */
 export class SidebarTuiMode {
@@ -19,14 +24,29 @@ export class SidebarTuiMode {
         busyChanged: (tabId, busy) => {
             const tab = this._host.tabs.get(tabId);
             if (tab) this._setTuiBusy(tab, busy);
+            this._reportRun(tabId, busy);
         },
+        screenChanged: (tabId) =>
+            void this.dialogs.check(tabId).catch((err: unknown) =>
+                this._host.outputChannel.appendLine(`Reading the TUI dialog failed: ${err instanceof Error ? err.message : String(err)}`),
+            ),
+    });
+    /** The dialog cards of the TUIs, answered by typing into them. */
+    readonly dialogs = new TuiDialogs({
+        tui: (tabId) => this.tuis.get(tabId),
+        post: (message) => this._host.post(message),
+        log: (line) => this._host.outputChannel.appendLine(line),
     });
     /** /login or /logout waiting on the chat banner that switches to the TUI to run it. */
     private _authPrompt: TuiAuthCommand | undefined;
     /** Tabs whose TUI was sent to /login or /logout: the RPC process caches credentials, so it restarts on return. */
     private readonly _authTabs = new Set<string>();
 
-    constructor(private readonly _host: SidebarHost) {}
+    constructor(
+        private readonly _host: SidebarHost,
+        /** The provider's worker events (`WorkerController.onTabEvent`), where the voice agent hears of TUI runs. */
+        private readonly _onTabEvent: (tabId: string, event: WorkerEvent) => void,
+    ) {}
 
     get authPrompt(): TuiAuthCommand | undefined {
         return this._authPrompt;
@@ -40,6 +60,29 @@ export class SidebarTuiMode {
             tab.hasNotification = true;
         }
         this._host.sendStateSync();
+    }
+
+    /**
+     * Tells the voice agent a TUI run started or stopped. A stop carries the screen's last lines and, when
+     * the TUI waits on a dialog a card can answer, its question: the TUI may be done, or asking something
+     * such as a tool approval. A TUI stopped or exited with the run on has nothing to show, and the run
+     * did not end on its own: no notice.
+     */
+    private _reportRun(tabId: string, busy: boolean): void {
+        if (busy) {
+            this._onTabEvent(tabId, { type: TUI_RUN_START });
+            return;
+        }
+        const tui = this.tuis.get(tabId);
+        if (!tui || tui.exited) return;
+        void (async () => {
+            const screen = await tui.screen().tail(RUN_END_SCREEN_LINES);
+            await this.dialogs.check(tabId);
+            const question = this.dialogs.question(tabId);
+            this._onTabEvent(tabId, { type: TUI_RUN_END, screen, ...(question ? { question } : {}) });
+        })().catch((err: unknown) =>
+            this._host.outputChannel.appendLine(`Reading the TUI screen failed: ${err instanceof Error ? err.message : String(err)}`),
+        );
     }
 
     /** Neither CLI logs in over RPC: show a chat banner that switches to the TUI and runs the command. */
@@ -81,7 +124,7 @@ export class SidebarTuiMode {
         tab.tuiMode = !tab.tuiMode;
         if (tab.tuiMode) {
             this._authPrompt = undefined;
-            tab.botView = false; // a TUI tab has no Bot view; switching back shows the conversation
+            tab.botView = false; // entering TUI shows the terminal; the Bot view is a click away
             this._host.sendStateSync();
             return;
         }
@@ -149,6 +192,9 @@ export class SidebarTuiMode {
                 await this.start(msg.tabId, msg.cols, msg.rows);
             },
             tuiInput: (msg) => {
+                const tab = this._host.tabs.get(msg.tabId);
+                // The user submitted something themselves: what the TUI does next is theirs.
+                if (tab && msg.data.includes('\r')) tab.tuiPromptFromVoice = false;
                 this.tuis.get(msg.tabId)?.write(msg.data);
             },
             tuiResize: (msg) => {

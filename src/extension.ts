@@ -18,7 +18,8 @@ import { SettingsPanel } from './providers/settings-panel';
 import { clearExtensionApiKeySecrets, getPiAgentDir, isSyncWithPiCli } from './pi/piCliSync';
 import { verifyPiCliAvailable, resolvePiCliInvocation, initWindowBackend, getAvailableBackends } from './pi/piCliPaths';
 import { canLoadPiNativeModules } from './pi/piExtensionCompat';
-import { initVoiceApiKeys, initVoiceMemory, migrateTtsSettings, probeStt, probeTts } from './voice/voiceSettings';
+import { builtinEngineFeatures, initVoiceApiKeys, initVoiceMemory, migrateTtsSettings, probeStt, probeTts } from './voice/voiceSettings';
+import { initVoiceprint } from './voice/voiceprint';
 import { activateBuiltinVoiceEngine } from './voice/builtinEngine/engine';
 import { maybePromptForRecommendedPackages } from './pi/recommendedPackagesPrompt';
 import { setPiExtensionPath } from './pi/extensionPath';
@@ -290,11 +291,12 @@ export function activate(context: vscode.ExtensionContext): void {
             }),
         );
 
-        // Built-in STT/TTS: starts on first use (dictation, voice mode, a settings Test), not here.
+        // Built-in STT/TTS, voiceprint and noise reduction: starts on first use (dictation, voice mode, a settings Test), not here.
         context.subscriptions.push(
             activateBuiltinVoiceEngine({
                 serverPath: path.join(context.extensionPath, 'out', 'voice-engine', 'server.js'),
                 modelRoot: path.join(context.globalStorageUri.fsPath, 'voice-models'),
+                features: builtinEngineFeatures,
                 log: (line) => outputChannel.appendLine(`[voice engine] ${line}`),
                 withDownloadProgress: (totalBytes, download) =>
                     vscode.window.withProgress(
@@ -342,6 +344,8 @@ export function activate(context: vscode.ExtensionContext): void {
         context.subscriptions.push(initVoiceApiKeys(context.secrets));
         // Your own voice servers' settings, kept when a Cloud or Built-in save overwrites them.
         initVoiceMemory(context.globalState);
+        // Your voiceprint (the vector in globalState, never settings.json): voice input takes only your voice.
+        initVoiceprint(context.globalState, (line) => outputChannel.appendLine(line));
         // The mic needs a verified STT server, the voice agent STT and TTS; check the configured ones at startup.
         void probeStt();
         void probeTts();

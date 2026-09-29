@@ -1,4 +1,5 @@
 import type { AgentBackend } from '../pi/agentBackend';
+import type { TerminalScreen } from '../pi/terminalScreen';
 import type { TuiProcessOptions } from '../pi/tuiTerminal';
 import type { ServerMessage } from '../shared/protocol';
 
@@ -9,10 +10,14 @@ export interface TabTui {
     readonly backend: AgentBackend;
     readonly sessionFile: string | undefined;
     readonly exited: boolean;
+    /** The terminal title the TUI last set (omp: `π ! …` while it waits on the user). */
+    readonly title: string;
     write(data: string): void;
     resize(cols: number, rows: number): void;
     typeWhenReady(text: string): Promise<void>;
     snapshot(): Promise<string>;
+    /** The voice agent's view of the screen; throws once the TUI has exited. */
+    screen(): TerminalScreen;
     dispose(): Promise<void>;
 }
 
@@ -38,11 +43,32 @@ export interface TabTuisHost {
     watchSession(sessionFile: string, onBusy: (busy: boolean) => void): { dispose(): void };
     /** The agent in the tab's TUI started or stopped working. */
     busyChanged(tabId: string, busy: boolean): void;
+    /**
+     * Look at the tab's screen again for a dialog: at most every DIALOG_CHECK_MS while the TUI draws or
+     * sets its title (always after the last change), and at once when it stops or exits.
+     */
+    screenChanged(tabId: string): void;
+}
+
+/** Both CLIs' TUIs interrupt a running turn on Escape (omp's vim mode takes a first Escape to leave insert mode). */
+export const TUI_INTERRUPT = '\x1b';
+
+/**
+ * What to type into a CLI TUI to send `text` as a prompt: pasted (bracketed, so its newlines stay in the
+ * editor instead of each submitting a line), then submitted. Enter starts a turn, or steers the running
+ * one; `queue` asks for a follow-up after it instead: Ctrl+Q in omp, Alt+Enter in pi (Ctrl+Q on
+ * Windows and WSL, where the terminal takes Alt+Enter).
+ */
+export function tuiPromptKeys(text: string, backend: AgentBackend, queue: boolean, windows: boolean): string {
+    // A paste end marker inside the text would end the paste early and type the rest as keys.
+    const paste = `\x1b[200~${text.replace(/\x1b\[20[01]~/g, '')}\x1b[201~`;
+    return paste + (!queue ? '\r' : backend === 'omp' || windows ? '\x11' : '\x1b\r');
 }
 
 /**
- * A working TUI redraws its spinner many times a second and an idle one draws nothing, so this much
- * silence ends a run the session file still shows as on.
+ * A working TUI changes its screen's text many times a second (a spinner, an elapsed timer); an idle
+ * one, or one waiting on a dialog, only restyles it at most. This long without new text ends a run the
+ * session file still shows as on.
  */
 const TUI_QUIET_MS = 3000;
 
@@ -52,9 +78,13 @@ interface TuiActivity {
     fileBusy: boolean;
     /** Last state reported to the host. */
     busy: boolean;
-    lastOutputAt: number;
+    /** When the TUI last drew new text (`onScreenChange`), not merely more bytes. */
+    lastDrawAt: number;
     quietTimer?: NodeJS.Timeout;
 }
+
+/** How often the dialog check runs at most while the screen changes: it runs once after the last change. */
+export const DIALOG_CHECK_MS = 500;
 
 /**
  * One CLI TUI per chat tab in TUI mode. Streams their output to the webview, re-attaches new terminal
@@ -72,6 +102,8 @@ export class TabTuis {
     private readonly _pendingInput = new Map<string, string>();
     /** Working state of the running TUIs. */
     private readonly _activity = new Map<string, TuiActivity>();
+    /** A dialog check due for the tab (see `screenChanged`). */
+    private readonly _checks = new Map<string, NodeJS.Timeout>();
 
     constructor(private readonly _host: TabTuisHost) {}
 
@@ -102,6 +134,8 @@ export class TabTuis {
                 cols: launch.cols,
                 rows: launch.rows,
                 onData: (data) => this._queueOutput(tabId, data),
+                onScreenChange: () => this._drew(tabId),
+                onTitleChange: () => this._scheduleCheck(tabId),
                 onExit: (exitCode) => {
                     this._flushOutput();
                     // Stopped on purpose (mode off, tab closed) → already unregistered, nothing to report.
@@ -110,6 +144,7 @@ export class TabTuis {
                     this._endActivity(tabId);
                     this._exitCodes.set(tabId, exitCode);
                     this._host.post({ type: 'tuiExit', tabId, exitCode });
+                    this._checkNow(tabId);
                 },
             });
             if (!this._host.wanted(tabId)) {
@@ -118,7 +153,7 @@ export class TabTuis {
             }
             this._processes.set(tabId, proc);
             if (proc.sessionFile) {
-                const activity: TuiActivity = { fileBusy: false, busy: false, lastOutputAt: 0 };
+                const activity: TuiActivity = { fileBusy: false, busy: false, lastDrawAt: 0 };
                 activity.watch = this._host.watchSession(proc.sessionFile, (busy) => {
                     activity.fileBusy = busy;
                     this._refreshBusy(tabId);
@@ -145,6 +180,7 @@ export class TabTuis {
         if (!proc) return;
         this._processes.delete(tabId);
         this._endActivity(tabId);
+        this._checkNow(tabId);
         await proc.dispose();
     }
 
@@ -187,24 +223,46 @@ export class TabTuis {
     private _queueOutput(tabId: string, data: string): void {
         this._output.set(tabId, (this._output.get(tabId) ?? '') + data);
         this._flushTimer ??= setTimeout(() => this._flushOutput(), 4);
+    }
+
+    private _drew(tabId: string): void {
+        this._scheduleCheck(tabId);
         const activity = this._activity.get(tabId);
-        if (activity) {
-            activity.lastOutputAt = Date.now();
-            // Redrawing again after a quiet spell (an answered prompt): working again if the file still says so.
-            if (activity.fileBusy && !activity.busy) this._refreshBusy(tabId);
-        }
+        if (!activity) return;
+        activity.lastDrawAt = Date.now();
+        // Drawing again after a quiet spell (an answered prompt): working again if the file still says so.
+        if (activity.fileBusy && !activity.busy) this._refreshBusy(tabId);
+    }
+
+    /** A check at the end of the window this change opened, or the one already open: never more often, never before the last change. */
+    private _scheduleCheck(tabId: string): void {
+        if (this._checks.has(tabId)) return;
+        this._checks.set(
+            tabId,
+            setTimeout(() => {
+                this._checks.delete(tabId);
+                this._host.screenChanged(tabId);
+            }, DIALOG_CHECK_MS),
+        );
+    }
+
+    private _checkNow(tabId: string): void {
+        clearTimeout(this._checks.get(tabId));
+        this._checks.delete(tabId);
+        this._host.screenChanged(tabId);
     }
 
     /**
-     * Working = the session file says a run is on AND the TUI is redrawing (its spinner). An interrupted
-     * run does not always end with an entry in the file; the TUI going quiet ends it then.
+     * Working = the session file says a run is on AND the TUI keeps drawing new text (its spinner). An
+     * interrupted run does not always end with an entry in the file, and a run waiting on the user (a tool
+     * approval dialog) still shows as on there: the TUI going still ends it then.
      */
     private _refreshBusy(tabId: string): void {
         const activity = this._activity.get(tabId);
         if (!activity) return;
         clearTimeout(activity.quietTimer);
         activity.quietTimer = undefined;
-        const quietFor = Date.now() - activity.lastOutputAt;
+        const quietFor = Date.now() - activity.lastDrawAt;
         const busy = activity.fileBusy && quietFor < TUI_QUIET_MS;
         if (busy) {
             activity.quietTimer = setTimeout(() => this._refreshBusy(tabId), TUI_QUIET_MS - quietFor);

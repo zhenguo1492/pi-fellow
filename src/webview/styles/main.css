@@ -341,6 +341,28 @@ body {
     line-height: 1.35;
 }
 
+.extension-ui-message {
+    margin: 4px 0 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* A TUI dialog no card can answer: its screen text, as is. */
+.extension-ui-screen {
+    margin: 0 0 8px;
+    max-height: 16em;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--fg);
+    white-space: pre;
+}
+
 .extension-ui-options {
     display: flex;
     flex-direction: column;
@@ -2591,6 +2613,7 @@ button.tab-icon:focus-visible {
 }
 
 .voice-bar[data-state='listening'],
+.voice-bar[data-state='soundDetected'],
 .voice-bar[data-state='userSpeaking'],
 .voice-bar[data-state='transcribing'] {
     --vb-state: var(--link);
@@ -2684,6 +2707,52 @@ button.tab-icon:focus-visible {
 
 .voice-bar[data-state='starting'] .voice-bar-robot {
     animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+/*
+ * The avatar comes alive (src/webview/avatarMotion.ts). While the reply plays it talks with the sound
+ * (--talk, 0..1, how open the mouth is): the robot's mouth drops open with it, a pixel-art preset
+ * shows its half or wide open frame (swapped in script), every avatar bounces and its box glows.
+ * While the voice agent thinks it tilts its head, and the robot's antenna light blinks.
+ */
+.voice-bar-robot > * {
+    transform-origin: 50% 85%;
+}
+
+.voice-bar-robot.talking {
+    box-shadow: 0 0 0 calc(var(--talk, 0) * 3px) color-mix(in srgb, var(--vb-state) 35%, transparent);
+}
+
+.voice-bar-robot.talking > * {
+    transform: translateY(calc(var(--talk, 0) * -1.5px)) scale(calc(1 + var(--talk, 0) * 0.12));
+}
+
+.voice-bar-robot.talking .av-mouth {
+    opacity: 1;
+    transform-box: fill-box;
+    transform-origin: top;
+    transform: scaleY(calc(0.2 + 0.8 * var(--talk, 0)));
+}
+
+.voice-bar[data-state='thinking'] .voice-bar-robot > * {
+    animation: avatar-ponder 2.4s ease-in-out infinite;
+}
+
+.voice-bar[data-state='thinking'] .av-antenna {
+    animation: pulse-dot 0.9s ease-in-out infinite;
+}
+
+@keyframes avatar-ponder {
+    0%, 100% { transform: rotate(0); }
+    25% { transform: translateY(-0.5px) rotate(-9deg); }
+    75% { transform: translateY(-0.5px) rotate(9deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .voice-bar[data-state='thinking'] .voice-bar-robot > *,
+    .voice-bar[data-state='thinking'] .av-antenna {
+        animation: none;
+    }
 }
 
 .voice-bar-dot {
@@ -4581,19 +4650,15 @@ html.tree-panel-open .input-container {
     display: none;
 }
 
-/* The terminal is the composer; the input box keeps only the voice agent's bar and its approval cards. */
-#app.tui-mode .input-container > :not(.voice-bar, .tool-approval-host) {
+/* The terminal is the composer; the input box keeps only the voice agent's bar, its approval cards, and
+   the cards for the TUI's own dialogs. */
+#app.tui-mode .input-container > :not(.voice-bar, .tool-approval-host, .extension-ui-host) {
     display: none !important;
 }
 
 #app.tui-mode .voice-bar {
     border-bottom: 0;
     border-radius: calc(var(--radius-lg) - 1px);
-}
-
-/* A TUI tab has no Bot view. */
-#app.tui-mode .voice-bar [data-act='panel'] {
-    display: none;
 }
 
 #app.tui-mode .tool-approval-host .tool-approval-card {

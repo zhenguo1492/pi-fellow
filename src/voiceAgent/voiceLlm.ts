@@ -33,14 +33,16 @@ export interface VoiceLlmOptions {
     model?: string;
     thinking: string;
     tools: RpcHostToolDefinition[];
-    /** Skills the user chose for the voice agent (`voiceAgent.skills`); none loads no skills. */
+    /** Skills to load: the built-ins, then those the user chose (`voiceAgent.skills`); none loads no skills. */
     skills: VoiceSkill[];
 }
 
-/** A skill chosen for the voice agent: omp loads it by name, pi by its SKILL.md file (unknown: not loaded). */
+/** A skill for the voice agent: omp loads it by name, pi by its SKILL.md file (unknown: not loaded). */
 export interface VoiceSkill {
     name: string;
     filePath?: string;
+    /** A built-in skill's folder, laid out as an omp plugin (`skills/<name>/SKILL.md`): omp only discovers it with `--plugin-dir`. */
+    pluginDir?: string;
 }
 
 /** extension_ui_request methods that block the run until answered. */
@@ -343,7 +345,12 @@ export function voiceLlmArgs(backend: AgentBackend, options: Omit<VoiceLlmOption
         // Rules (AGENTS.md / CLAUDE.md) stay on: they tell the agent where things live. The prompt says
         // their reply-format instructions are for the coding agent, not for speech.
         args.push('--tools', builtins.join(','), '--no-extensions', '--no-lsp', '--no-title');
-        // Only the chosen skills: omp's --skills filters discovery by name (glob patterns, comma-separated).
+        // Built-in skills ship as an omp plugin folder; --plugin-dir adds it to discovery without touching
+        // the user's own skill directories (a same-named skill of theirs in .omp or .claude wins, per omp's precedence).
+        for (const dir of new Set(options.skills.flatMap((skill) => (skill.pluginDir ? [skill.pluginDir] : [])))) {
+            args.push('--plugin-dir', dir);
+        }
+        // Only these skills: omp's --skills filters discovery by name (glob patterns, comma-separated).
         args.push(...(options.skills.length > 0 ? [`--skills=${options.skills.map((skill) => skill.name).join(',')}`] : ['--no-skills']));
         // Its tools only read or go through HostToolRouter, which enforces its own rules. A project or
         // user approvalMode of always-ask would otherwise gate host tools behind a dialog nobody can answer.

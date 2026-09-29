@@ -101,8 +101,23 @@ export function initTabLayoutObserver(): void {
     scheduleTabCapacityUpdate();
 }
 
+/**
+ * What a tab shows: its conversation, its CLI's TUI, or the Bot view. The Bot view goes over either;
+ * a TUI under it keeps running, its terminal hidden.
+ */
+export function tabView(tab: Pick<TabInfo, 'botView' | 'tuiMode'> | undefined): 'chat' | 'terminal' | 'bot' {
+    return tab?.botView ? 'bot' : tab?.tuiMode ? 'terminal' : 'chat';
+}
+
+/** The tab icon's tooltip: what clicking it shows. */
+export function tabIconTitle(tab: Pick<TabInfo, 'botView' | 'tuiMode'>): string {
+    if (!tab.botView) {
+        return 'Show the Bot view (voice agent conversation)';
+    }
+    return tab.tuiMode ? 'Show the terminal (TUI); it kept running' : 'Show the conversation';
+}
+
 function tabIconHtml(tab: TabInfo): string {
-    // Host keeps `botView` off for TUI tabs.
     if (tab.botView) {
         return `<span class="tab-icon-robot">${ICON_ROBOT}</span>`;
     }
@@ -127,17 +142,12 @@ export function updateTabs(): void {
         const tabEl = el('div', `tab${tab.isActive ? ' tab-active' : ''}${tab.isStreaming ? ' tab-streaming' : ''}`);
         tabEl.dataset.tabId = tab.id;
 
-        // The icon toggles what the tab shows: its conversation (chat bubble) or the Bot view (robot).
-        // A tab showing its TUI has no Bot view: the icon marks the terminal and only selects the tab.
+        // The icon toggles what the tab shows: its conversation or TUI, or the Bot view (robot).
         const icon = el('button', 'tab-icon');
         icon.type = 'button';
         icon.dataset.tabId = tab.id;
-        if (tab.tuiMode) {
-            icon.title = 'Terminal (TUI) view — switch it back to chat to open the Bot view';
-        } else {
-            icon.title = tab.botView ? 'Show the conversation' : 'Show the Bot view (voice agent conversation)';
-            icon.setAttribute('aria-pressed', String(tab.botView));
-        }
+        icon.title = tabIconTitle(tab);
+        icon.setAttribute('aria-pressed', String(tab.botView));
         icon.innerHTML = tabIconHtml(tab);
 
         const name = el('span', 'tab-name');

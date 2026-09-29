@@ -1,5 +1,7 @@
+import * as path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { HostToolRouter, type EditorHands, type ToolTurn } from '../../../voiceAgent/hostTools';
+import { WorkerEditLocks } from '../../../pi/workerEdits';
+import { HostToolRouter, terminalKeys, type EditorHands, type ToolTurn } from '../../../voiceAgent/hostTools';
 import { findViewers, type ExtensionManifest } from '../../../voiceAgent/viewers';
 import type {
     WorkerAnswer,
@@ -9,6 +11,9 @@ import type {
     WorkerStatus,
 } from '../../../voiceAgent/workerController';
 import type { PermissionLevel } from '../../../shared/protocol';
+
+/** The workspace the voice agent's relative paths are in. */
+const ROOT = path.resolve('/ws');
 
 class FakeWorker implements WorkerController {
     phase: WorkerStatus['phase'] = 'idle';
@@ -20,6 +25,14 @@ class FakeWorker implements WorkerController {
     /** Approvals asked for (Manual, or commands and deletions in Edit automatically), answered by `approve`. */
     approvals: Array<{ tabId: string; toolName: string; args: Record<string, unknown> }> = [];
     approve: () => Promise<boolean> = async () => true;
+    /** The tab shows the CLI's TUI: its screen, what was typed into it, and the reads asked for. */
+    tui = false;
+    screen = 'omp TUI';
+    typed: string[] = [];
+    screenReads: number[] = [];
+    aborts = 0;
+    /** What the permission gate reported the running task changes (absolute paths). */
+    readonly gate = new WorkerEditLocks();
 
     activeTask() {
         return { tabId: 'tab-1', name: 'Task', backend: 'omp' as const };
@@ -40,9 +53,11 @@ class FakeWorker implements WorkerController {
         this.sends.push({ tabId, text, options });
         return this.phase === 'idle' ? ('started' as const) : options.when === 'now' ? ('steered' as const) : ('queued' as const);
     }
-    async abort() {}
+    async abort() {
+        this.aborts++;
+    }
     status(): WorkerStatus {
-        return { phase: this.phase, queued: 0 };
+        return { phase: this.phase, queued: 0, ...(this.tui ? { tui: true } : {}) };
     }
     pendingRequests() {
         return this.requests;
@@ -63,6 +78,21 @@ class FakeWorker implements WorkerController {
     requestToolApproval(tabId: string, toolName: string, args: Record<string, unknown>) {
         this.approvals.push({ tabId, toolName, args });
         return this.approve();
+    }
+    /** As SidebarWorker: nothing while idle or in a TUI tab; otherwise what the gate reported, workspace-relative. */
+    lockedPaths(_tabId: string, paths: string[]) {
+        if (this.tui || this.phase === 'idle') {
+            return [];
+        }
+        return this.gate.overlapping(paths.map((p) => path.resolve(ROOT, p))).map((p) => path.relative(ROOT, p) || '.');
+    }
+    async readTuiScreen(_tabId: string, pagesBack: number) {
+        this.screenReads.push(pagesBack);
+        return this.screen;
+    }
+    async typeIntoTui(_tabId: string, keys: string) {
+        this.typed.push(keys);
+        return this.screen;
     }
 }
 
@@ -136,7 +166,7 @@ function setup(confirm = true) {
             commands.push(`type ${JSON.stringify(input)}`);
             return 'Typed a line.';
         },
-        readTerminal: async (terminal) => `read ${terminal ?? 'latest'}`,
+        readTerminal: async (terminal, pagesBack) => `read ${terminal ?? 'latest'}${pagesBack ? ` ${pagesBack} pages back` : ''}`,
         readOutput: async (source) => `output of ${source ?? 'all'}`,
         startDebugging: async (configuration) => {
             commands.push(`debug ${configuration}`);
@@ -159,8 +189,6 @@ function setup(confirm = true) {
         (_tabId, question) => ({ id: 'r1', question, startedAt: 0, status: 'running' as const }),
         hands,
     );
-    // A new router starts in pair mode; most tests here direct the worker, which is omp mode's job.
-    router.setMode('omp');
     const turn = (seq: number, userAt = seq * 1000, tabId = 'tab-1'): ToolTurn => ({ tabId, seq, userAt });
     return { worker, router, turn, edits, commands, opened, settings };
 }
@@ -337,123 +365,98 @@ describe('HostToolRouter: proactive turns', () => {
     });
 });
 
-describe('HostToolRouter: omp and pair modes', () => {
+describe('HostToolRouter: working itself and directing the worker', () => {
     const edit = { path: 'a.ts', oldText: 'x', newText: 'y' };
 
-    it('starts in pair mode: edits at once, and switches to omp and back on its own for a heavy job', async () => {
-        const worker = new FakeWorker();
-        const edited: string[] = [];
-        const hands = {
-            editFile: async (e: { path: string }) => {
-                edited.push(e.path);
-                return 'edited';
-            },
-        } as unknown as EditorHands;
-        const router = new HostToolRouter(worker, () => undefined, () => false, () => ({ id: 'r1', question: '', startedAt: 0, status: 'running' as const }), hands);
-        const turn = { tabId: 'tab-1', seq: 1, userAt: 1000 };
-        expect(router.mode).toBe('pair');
-        expect((await router.execute('edit_file', edit, turn)).isError).toBe(false);
-        expect(edited).toEqual(['a.ts']);
-        await router.execute('set_mode', { mode: 'omp', auto: true }, turn);
-        expect((await router.execute('tell_worker', { message: 'refactor the parser', when: 'now' }, turn)).isError).toBe(false);
-        expect(worker.sends.map((s) => s.text)).toEqual(['refactor the parser']);
-        await router.execute('set_mode', { mode: 'pair' }, turn);
-        expect(router.mode).toBe('pair');
-    });
-
-    it('enters pair mode only when a later user turn confirms, and leaves it at once', async () => {
-        const { router, turn } = setup();
-        expect(router.mode).toBe('omp');
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(1))).text).toMatch(/Not switched yet/);
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(1))).text).toMatch(/Not switched yet/);
-        expect(router.mode).toBe('omp');
-        await router.execute('set_mode', { mode: 'pair' }, turn(2));
-        expect(router.mode).toBe('pair');
-        await router.execute('set_mode', { mode: 'omp' }, turn(3));
-        expect(router.mode).toBe('omp');
-        // The old request does not carry over: pair needs asking and confirming again.
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(4))).text).toMatch(/Not switched yet/);
-    });
-
-    it('switches pair -> omp on its own for a heavy job, and back to pair without confirmation', async () => {
-        const { router, turn } = setup();
-        router.setMode('pair');
-        const auto = await router.execute('set_mode', { mode: 'omp', auto: true }, turn(1));
-        expect([auto.isError, router.mode]).toEqual([false, 'omp']);
-        // A redundant omp call keeps the auto switch.
-        await router.execute('set_mode', { mode: 'omp' }, turn(2));
-        await router.execute('set_mode', { mode: 'pair' }, turn(2));
-        expect(router.mode).toBe('pair');
-        // Only once: the next time omp was the user's idea, pair needs confirming again.
-        await router.execute('set_mode', { mode: 'omp' }, turn(3));
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(4))).text).toMatch(/Not switched yet/);
-        expect(router.mode).toBe('omp');
-    });
-
-    it('needs confirmation for pair after the user switched to omp, even following an auto switch', async () => {
-        const { router, turn } = setup();
-        router.setMode('pair');
-        router.setMode('omp');
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(1))).text).toMatch(/Not switched yet/);
-        router.setMode('pair');
-        await router.execute('set_mode', { mode: 'omp', auto: true }, turn(2));
-        router.setMode('omp');
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(3))).text).toMatch(/Not switched yet/);
-        // auto means nothing outside pair mode: there is no switch from pair to remember.
-        await router.execute('set_mode', { mode: 'omp', auto: true }, turn(4));
-        expect((await router.execute('set_mode', { mode: 'pair' }, turn(4))).text).toMatch(/Not switched yet/);
-        expect(router.mode).toBe('omp');
-    });
-
-    it('in omp mode refuses to change files, run commands or debug itself, but reads output', async () => {
-        const { router, turn, edits, commands } = setup();
-        expect((await router.execute('edit_file', edit, turn(1))).isError).toBe(true);
-        expect((await router.execute('create_file', { path: 'b.ts', content: 'x' }, turn(1))).isError).toBe(true);
-        expect((await router.execute('delete_file', { path: 'a.ts' }, turn(1))).isError).toBe(true);
-        expect((await router.execute('run_in_terminal', { command: 'ls' }, turn(1))).isError).toBe(true);
-        expect((await router.execute('terminal_send', { text: 'select 1;' }, turn(1))).isError).toBe(true);
-        expect((await router.execute('terminal_read', {}, turn(1))).isError).toBe(true);
-        expect((await router.execute('debug_start', {}, turn(1))).isError).toBe(true);
-        expect((await router.execute('set_breakpoint', { path: 'a.ts', line: 3 }, turn(1))).isError).toBe(true);
-        expect((await router.execute('read_output', { source: 'Tasks' }, turn(1))).isError).toBe(false);
-        expect([edits, commands]).toEqual([[], []]);
-    });
-
-    it('in pair mode works itself and does not direct the worker', async () => {
+    it('edits, runs commands and directs the worker in the same conversation', async () => {
         const { worker, router, turn, edits, commands } = setup(false);
-        router.setMode('pair');
-        worker.requests = [{ id: 'r1', method: 'select', options: ['Approve', 'Deny'], receivedAt: 500 }];
-        const refused = await Promise.all([
-            router.execute('tell_worker', { message: 'run the tests', when: 'now' }, turn(1)),
-            router.execute('answer_worker', { requestId: 'r1', value: 'Approve' }, turn(1)),
-            router.execute('stop_worker', {}, turn(1)),
-        ]);
-        expect(refused.map((r) => r.isError)).toEqual([true, true, true]);
-        expect([worker.sends, worker.answers]).toEqual([[], []]);
         expect((await router.execute('edit_file', edit, turn(1))).isError).toBe(false);
         expect((await router.execute('run_in_terminal', { command: 'npm test' }, turn(1))).isError).toBe(false);
-        expect([edits, commands]).toEqual([['a.ts'], ['npm test']]);
+        expect((await router.execute('tell_worker', { message: 'refactor the parser', when: 'now' }, turn(1))).isError).toBe(false);
+        expect([edits, commands, worker.sends.map((s) => s.text)]).toEqual([['a.ts'], ['npm test'], ['refactor the parser']]);
     });
 
-    it('does not edit while the worker is still writing, nor on its own in a proactive turn', async () => {
-        const { worker, router, turn, edits, commands } = setup();
-        router.setMode('pair');
-        worker.phase = 'working';
-        expect((await router.execute('edit_file', edit, turn(1))).isError).toBe(true);
-        expect((await router.execute('delete_file', { path: 'a.ts' }, turn(1))).isError).toBe(true);
-        worker.phase = 'idle';
+    it('does not change files or run commands on its own in a proactive turn', async () => {
+        const { router, edits, commands } = setup();
         const proactive = { tabId: 'tab-1', seq: 1, userAt: 1000, proactive: true };
         expect((await router.execute('edit_file', edit, proactive)).isError).toBe(true);
         expect((await router.execute('run_in_terminal', { command: 'ls' }, proactive)).isError).toBe(true);
-        expect((await router.execute('set_mode', { mode: 'omp' }, proactive)).isError).toBe(true);
-        expect([edits, commands, router.mode]).toEqual([[], [], 'pair']);
+        expect([edits, commands]).toEqual([[], []]);
+    });
+});
+
+describe("HostToolRouter: the worker's file lock", () => {
+    const edit = { path: 'src/a.ts', oldText: 'x', newText: 'y' };
+
+    /** The permission gate's report: the running task is about to change these (workspace-relative here). */
+    function report(worker: FakeWorker, ...paths: string[]): void {
+        worker.gate.ingest(`${JSON.stringify({ paths: paths.map((p) => path.join(ROOT, p)) })}\n`);
+    }
+
+    it('refuses every change to a file the running task is changing, naming it, before asking anything', async () => {
+        const { worker, router, turn, edits } = setup();
+        worker.phase = 'working';
+        report(worker, 'src/a.ts');
+        const refused = await Promise.all([
+            router.execute('edit_file', edit, turn(1)),
+            router.execute('create_file', { path: 'src/a.ts', content: 'x' }, turn(1)),
+            router.execute('rename_file', { from: 'src/a.ts', to: 'src/b.ts' }, turn(1)),
+            router.execute('rename_file', { from: 'src/b.ts', to: './src/a.ts' }, turn(1)),
+            router.execute('delete_file', { path: 'src/a.ts' }, turn(1)),
+            router.execute('save_file', { path: 'src/a.ts' }, turn(1)),
+            // Saving every open file could save over it too.
+            router.execute('save_file', {}, turn(1)),
+        ]);
+        for (const result of refused) {
+            expect(result).toEqual({ text: expect.stringMatching(/worker's running task is changing src\/a\.ts/), isError: true });
+        }
+        expect([edits, router.pendingDelete]).toEqual([[], undefined]);
+    });
+
+    it('lets the voice agent change other files while the worker works', async () => {
+        const { worker, router, turn, edits } = setup();
+        worker.phase = 'working';
+        report(worker, 'src/a.ts');
+        expect((await router.execute('edit_file', { ...edit, path: 'src/b.ts' }, turn(1))).isError).toBe(false);
+        expect((await router.execute('create_file', { path: 'src/a.test.ts', content: 'x' }, turn(1))).isError).toBe(false);
+        expect(edits).toEqual(['src/b.ts', 'create src/a.test.ts']);
+    });
+
+    it('locks what lies in a folder the task changes, and a folder holding a file it changes', async () => {
+        const { worker, router, turn, edits } = setup();
+        worker.phase = 'working';
+        // ast_edit over src/gen/**, and an edit of lib/util.ts.
+        report(worker, 'src/gen', 'lib/util.ts');
+        expect((await router.execute('edit_file', { ...edit, path: 'src/gen/model.ts' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('rename_file', { from: 'lib', to: 'lib2' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('delete_file', { path: 'lib', recursive: true }, turn(1))).isError).toBe(true);
+        // A name that only starts the same is another file.
+        expect((await router.execute('edit_file', { ...edit, path: 'src/generate.ts' }, turn(1))).isError).toBe(false);
+        expect(edits).toEqual(['src/generate.ts']);
+    });
+
+    it('checks again when an approval card is answered: the task may have taken the file meanwhile', async () => {
+        const { worker, router, turn, edits } = setup();
+        worker.level = 'ask';
+        let decide: (approved: boolean) => void = () => {};
+        worker.approve = () => new Promise<boolean>((resolve) => (decide = resolve));
+        expect((await router.execute('edit_file', edit, turn(1))).text).toMatch(/Waiting for the user's approval/);
+        worker.phase = 'working';
+        report(worker, 'src/a.ts');
+        const { promise, resolve } = Promise.withResolvers<void>();
+        router.onApprovalSettled = resolve;
+        decide(true);
+        await promise;
+        expect(router.takeSettledApprovals('tab-1')).toMatchObject([
+            { toolName: 'edit_file', outcome: 'failed', result: expect.stringMatching(/^Not done: The worker's running task is changing src\/a\.ts/) },
+        ]);
+        expect(edits).toEqual([]);
     });
 });
 
 describe('HostToolRouter: terminal_send / terminal_read', () => {
     it('types into the program left running, pressing Enter and waiting 2s unless told otherwise', async () => {
         const { router, turn, commands } = setup();
-        router.setMode('pair');
         expect(await router.execute('terminal_send', { text: 'select 1;' }, turn(1))).toEqual({ text: 'Typed a line.', isError: false });
         await router.execute('terminal_send', { terminal: 'Pi (2)', text: 'q', enter: false, waitSecs: 300 }, turn(1));
         // Just Enter: accepting a prompt's default.
@@ -469,18 +472,49 @@ describe('HostToolRouter: terminal_send / terminal_read', () => {
 
     it('sends nothing without text, or with nothing to type and no Enter', async () => {
         const { router, turn, commands } = setup();
-        router.setMode('pair');
         expect(await router.execute('terminal_send', {}, turn(1))).toEqual({ text: 'Missing text.', isError: true });
         expect((await router.execute('terminal_send', { text: 42 }, turn(1))).isError).toBe(true);
         expect(await router.execute('terminal_send', { text: '', enter: false }, turn(1))).toEqual({ text: expect.stringMatching(/Nothing to send/), isError: true });
         expect(commands).toEqual([]);
+    });
+
+    it('presses named keys after the text, without Enter unless asked', async () => {
+        const { router, turn, commands } = setup();
+        await router.execute('terminal_send', { text: '', keys: ['down', 'Down'] }, turn(1));
+        await router.execute('terminal_send', { text: 'ab', keys: ['tab'], enter: true }, turn(1));
+        await router.execute('terminal_send', { text: '', keys: ['esc', 'ctrl-c', 'Ctrl+D'] }, turn(1));
+        expect(commands).toEqual([
+            `type ${JSON.stringify({ text: '\x1b[B\x1b[B', enter: false, waitMs: 2000 })}`,
+            `type ${JSON.stringify({ text: 'ab\t', enter: true, waitMs: 2000 })}`,
+            `type ${JSON.stringify({ text: '\x1b\x03\x04', enter: false, waitMs: 2000 })}`,
+        ]);
+    });
+
+    it('refuses unknown keys and sends nothing', async () => {
+        const { router, turn, commands } = setup();
+        expect(await router.execute('terminal_send', { text: '', keys: ['hyper'] }, turn(1))).toEqual({ text: expect.stringMatching(/Unknown key "hyper"/), isError: true });
+        expect((await router.execute('terminal_send', { text: '', keys: 'down' }, turn(1))).isError).toBe(true);
+        expect((await router.execute('terminal_send', { text: '', keys: ['ctrl-1'] }, turn(1))).isError).toBe(true);
+        expect(commands).toEqual([]);
+    });
+});
+
+describe('terminalKeys', () => {
+    it('turns key names into what a terminal gets', () => {
+        expect(terminalKeys(undefined)).toBe('');
+        expect(terminalKeys(['up', 'down', 'right', 'left'])).toBe('\x1b[A\x1b[B\x1b[C\x1b[D');
+        expect(terminalKeys(['space', 'enter', 'backspace', 'escape'])).toBe(' \r\x7f\x1b');
+        expect(terminalKeys(['ctrl-a', 'control-z', 'CTRL + L'])).toBe('\x01\x1a\x0c');
+    });
+
+    it('does not take names from the object prototype', () => {
+        expect(() => terminalKeys(['constructor'])).toThrow(/Unknown key/);
     });
 });
 
 describe('HostToolRouter: deleting files', () => {
     it('deletes only when the same request comes again in a later user turn', async () => {
         const { router, turn, edits } = setup();
-        router.setMode('pair');
         expect((await router.execute('delete_file', { path: 'a.ts' }, turn(1))).text).toMatch(/Not deleted yet.*the file a.ts/);
         expect((await router.execute('delete_file', { path: './a.ts' }, turn(1))).text).toMatch(/Not deleted yet/);
         expect(router.pendingDelete).toEqual({ path: 'a.ts', recursive: false });
@@ -489,31 +523,24 @@ describe('HostToolRouter: deleting files', () => {
         expect([edits, router.pendingDelete]).toEqual([['delete a.ts'], undefined]);
     });
 
-    it('starts over for another path, another recursive, or after a mode switch', async () => {
+    it('starts over for another path or another recursive', async () => {
         const { router, turn, edits } = setup();
-        router.setMode('pair');
         await router.execute('delete_file', { path: 'a.ts' }, turn(1));
         expect((await router.execute('delete_file', { path: 'b.ts' }, turn(2))).text).toMatch(/Not deleted yet/);
         expect((await router.execute('delete_file', { path: 'b.ts', recursive: true }, turn(3))).text).toMatch(/Not deleted yet/);
-        router.setMode('omp');
-        router.setMode('pair');
-        expect((await router.execute('delete_file', { path: 'b.ts', recursive: true }, turn(4))).text).toMatch(/Not deleted yet/);
         expect(edits).toEqual([]);
     });
 });
 
 describe('HostToolRouter: list_viewers / open_with', () => {
-    it('lists and opens editors in omp and in pair mode, without touching files or running commands', async () => {
+    it('lists and opens editors without touching files or running commands', async () => {
         const { router, turn, edits, commands, opened } = setup();
-        for (const mode of ['omp', 'pair'] as const) {
-            router.setMode(mode);
-            const listed = await router.execute('list_viewers', { path: 'docs/flow.drawio' }, turn(1));
-            expect(listed.isError).toBe(false);
-            expect(listed.text).toMatch(/- diagrams\.editor: Diagram \[someone\.diagrams, default\]/);
-            expect(listed.text).toMatch(/- default: Text Editor/);
-            expect((await router.execute('open_with', { path: 'docs/flow.drawio', viewer: 'diagrams.editor', toSide: true }, turn(1))).isError).toBe(false);
-        }
-        expect(opened).toEqual(['editor diagrams.editor docs/flow.drawio side', 'editor diagrams.editor docs/flow.drawio side']);
+        const listed = await router.execute('list_viewers', { path: 'docs/flow.drawio' }, turn(1));
+        expect(listed.isError).toBe(false);
+        expect(listed.text).toMatch(/- diagrams\.editor: Diagram \[someone\.diagrams, default\]/);
+        expect(listed.text).toMatch(/- default: Text Editor/);
+        expect((await router.execute('open_with', { path: 'docs/flow.drawio', viewer: 'diagrams.editor', toSide: true }, turn(1))).isError).toBe(false);
+        expect(opened).toEqual(['editor diagrams.editor docs/flow.drawio side']);
         expect([edits, commands]).toEqual([[], []]);
     });
 
@@ -560,7 +587,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('in Plan refuses every change and command with a read-only message, but still reads and opens', async () => {
         const { worker, router, turn, edits, commands } = setup();
-        router.setMode('pair');
         worker.level = 'plan';
         const refused = await Promise.all([
             router.execute('edit_file', edit, turn(1)),
@@ -592,7 +618,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('in Manual returns at once so it can tell the user, and acts only once the card is approved', async () => {
         const { worker, router, turn, edits } = setup();
-        router.setMode('pair');
         worker.level = 'ask';
         let decide: (approved: boolean) => void = () => {};
         worker.approve = () => new Promise<boolean>((resolve) => (decide = resolve));
@@ -616,7 +641,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('in Manual does nothing when the card is rejected, or when the task went to Plan before it was approved', async () => {
         const { worker, router, turn, edits, commands } = setup();
-        router.setMode('pair');
         worker.level = 'ask';
         worker.approve = async () => false;
         const rejected = settled(router);
@@ -637,7 +661,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('in Manual keeps the two-turn delete confirmation and puts up the card only when it would delete', async () => {
         const { worker, router, turn, edits } = setup();
-        router.setMode('pair');
         worker.level = 'ask';
         worker.approve = async () => false;
         expect((await router.execute('delete_file', { path: 'a.ts' }, turn(1))).text).toMatch(/Not deleted yet/);
@@ -661,7 +684,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('in Auto acts at once without asking', async () => {
         const { worker, router, turn, edits, commands } = setup();
-        router.setMode('pair');
         worker.level = 'auto';
         await router.execute('edit_file', edit, turn(1));
         await router.execute('run_in_terminal', { command: 'ls' }, turn(1));
@@ -670,7 +692,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('in Edit automatically changes files at once, but holds commands, deletions and moves for approval', async () => {
         const { worker, router, turn, edits, commands } = setup();
-        router.setMode('pair');
         worker.level = 'edit';
         worker.approve = async () => false;
         expect((await router.execute('edit_file', edit, turn(1))).text).toBe('edited a.ts');
@@ -693,7 +714,6 @@ describe('HostToolRouter: permission levels', () => {
 
     it('typing counts as running a command, reading does not', async () => {
         const { worker, router, turn, commands } = setup();
-        router.setMode('pair');
         worker.level = 'edit';
         worker.approve = async () => false;
         const rejected = settled(router);
@@ -709,5 +729,88 @@ describe('HostToolRouter: permission levels', () => {
         worker.level = 'auto';
         expect((await router.execute('terminal_send', { text: 'select 1;' }, proactive)).isError).toBe(true);
         expect(commands).toEqual([]);
+    });
+});
+
+describe('HostToolRouter: a tab showing the CLI TUI', () => {
+    function tuiSetup() {
+        const context = setup();
+        context.worker.tui = true;
+        return context;
+    }
+
+    it('keeps every file change out while its task runs: the TUI does not report which files it changes', async () => {
+        const { worker, router, turn, edits } = tuiSetup();
+        worker.phase = 'working';
+        const refused = await router.execute('edit_file', { path: 'a.ts', oldText: 'x', newText: 'y' }, turn(1));
+        expect(refused).toEqual({ text: expect.stringMatching(/still running a task and may be writing files/), isError: true });
+        worker.phase = 'idle';
+        expect((await router.execute('edit_file', { path: 'a.ts', oldText: 'x', newText: 'y' }, turn(1))).isError).toBe(false);
+        expect(edits).toEqual(['a.ts']);
+    });
+
+    it('worker_status returns the state and the screen, reading as far back as asked, within bounds', async () => {
+        const { worker, router, turn } = tuiSetup();
+        worker.phase = 'working';
+        const status = await router.execute('worker_status', {}, turn(1));
+        expect(status.text).toBe("State: working. This tab shows the CLI's own TUI; its screen:\nomp TUI");
+        await router.execute('worker_status', { pagesBack: 3 }, turn(1));
+        await router.execute('worker_status', { pagesBack: 500 }, turn(1));
+        await router.execute('worker_status', { pagesBack: -2 }, turn(1));
+        expect(worker.screenReads).toEqual([0, 3, 20, 0]);
+    });
+
+    it('worker_status stays the activity report in a chat tab', async () => {
+        const { worker, router, turn } = setup();
+        expect((await router.execute('worker_status', {}, turn(1))).text).toMatch(/^State: idle\./);
+        expect(worker.screenReads).toEqual([]);
+    });
+
+    it("answer_worker types the user's text and named keys, needs no request, and returns the screen", async () => {
+        const { worker, router, turn } = tuiSetup();
+        const answered = await router.execute('answer_worker', { value: 'y', keys: ['down', 'enter'] }, turn(2));
+        expect(answered).toEqual({ text: 'Typed into the TUI. Its screen now:\nomp TUI', isError: false });
+        expect(worker.typed).toEqual(['y\x1b[B\r']);
+        expect(worker.answers).toEqual([]);
+    });
+
+    it('answer_worker refuses an empty answer and an unknown key, typing nothing', async () => {
+        const { worker, router, turn } = tuiSetup();
+        expect((await router.execute('answer_worker', {}, turn(2))).isError).toBe(true);
+        expect((await router.execute('answer_worker', { keys: ['hyperspace'] }, turn(2))).isError).toBe(true);
+        expect(worker.typed).toEqual([]);
+    });
+
+    it('answer_worker cannot answer for the user in a turn nobody started', async () => {
+        const { worker, router } = tuiSetup();
+        const result = await router.execute('answer_worker', { keys: ['enter'] }, { tabId: 'tab-1', seq: 1, userAt: 1000, proactive: true });
+        expect(result.isError).toBe(true);
+        expect(worker.typed).toEqual([]);
+    });
+
+    it('stop_worker presses the interrupt of a working TUI and says so, and leaves an idle one alone', async () => {
+        const { worker, router, turn } = tuiSetup();
+        expect((await router.execute('stop_worker', {}, turn(1))).text).toBe('The worker was already idle.');
+        worker.phase = 'working';
+        expect((await router.execute('stop_worker', {}, turn(1))).text).toContain('Pressed Escape');
+        expect(worker.aborts).toBe(1);
+    });
+
+    it('tell_worker keeps the go-ahead for a new task in an idle TUI', async () => {
+        const { worker, router, turn } = tuiSetup();
+        await router.execute('tell_worker', { message: 'add a test', when: 'now' }, turn(1));
+        expect(worker.sends).toEqual([]);
+        const [proposal] = router.proposals('tab-1');
+        await router.execute('confirm_task', { proposalId: proposal.id }, turn(2));
+        expect(worker.sends.map((s) => s.text)).toEqual(['add a test']);
+    });
+});
+
+describe('HostToolRouter: terminal_read', () => {
+    it('passes how many screens back to read, within bounds', async () => {
+        const { router, turn } = setup();
+        expect((await router.execute('terminal_read', { pagesBack: 2 }, turn(1))).text).toBe('read latest 2 pages back');
+        expect((await router.execute('terminal_read', { pagesBack: 99 }, turn(1))).text).toBe('read latest 20 pages back');
+        expect((await router.execute('terminal_read', {}, turn(1))).text).toBe('read latest');
     });
 });

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from './rpcTypes';
-import type { ExtensionUiMethod, ExtensionUiRequestPayload } from '../shared/extensionUi';
+import type { ExtensionUiAnswerer, ExtensionUiMethod, ExtensionUiRequestPayload, ExtensionUiResponsePayload } from '../shared/extensionUi';
 import type { ServerMessage } from '../shared/protocol';
 import type { PiRpcBridge } from './piRpcBridge';
 import type { PiExtensionChrome } from './piExtensionChrome';
@@ -19,9 +19,10 @@ type PendingDialog = {
 
 /**
  * Answers pi RPC extension_ui_request lines on stdin so the CLI subprocess
- * does not block (select / confirm / input / editor).
+ * does not block (select / confirm / input / editor). The cards' RPC answer path; a tab showing its
+ * TUI has the other (`TuiDialogs`).
  */
-export class RpcExtensionUiHandler {
+export class RpcExtensionUiHandler implements ExtensionUiAnswerer {
     private readonly _pending = new Map<string, PendingDialog>();
     private readonly _pendingListeners = new Set<() => void>();
     private _post: ((msg: ServerMessage) => void) | undefined;
@@ -70,7 +71,7 @@ export class RpcExtensionUiHandler {
      * Answer a pending dialog from the webview or voice control; the first answer wins.
      * Returns false when the request was already answered, timed out, or never existed.
      */
-    respond(payload: { id: string; cancelled?: boolean; value?: string; confirmed?: boolean }): boolean {
+    respond(payload: ExtensionUiResponsePayload): boolean {
         const pending = this._pending.get(payload.id);
         if (!pending) {
             return false;

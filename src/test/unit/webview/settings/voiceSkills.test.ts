@@ -18,7 +18,10 @@ const data = {
     voiceReadiness: { stt: { ok: true }, tts: { ok: true } },
     voiceApiKeys: { openai: false, groq: false },
     voiceSkills: ['grill-with-docs'],
+    voiceExtraPrompt: '',
+    voiceDefaultPrompt: 'You are the voice agent.',
     voiceSpeakers: { user: { name: 'User', avatar: '' }, bot: { name: 'Bot', avatar: '' } },
+    voiceprint: { enabled: false, threshold: 0.5, shortSpeech: 'stricter', denoise: false },
 } as unknown as SettingsData;
 
 /** The Voice tab with the skills dropdown open and the filter focused, as clicking it leaves it. */

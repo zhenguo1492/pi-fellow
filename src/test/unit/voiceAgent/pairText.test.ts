@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { cleanTerminalOutput, insideFolder, locateEdit, pickName } from '../../../voiceAgent/pairText';
 
-describe('pair mode: where an edit goes', () => {
+describe('pair: where an edit goes', () => {
     const text = 'a\nreturn x;\nb\nreturn x;\nc\n';
 
     it('places a unique match, and a repeated one only by nearLine', () => {
@@ -18,7 +18,7 @@ describe('pair mode: where an edit goes', () => {
     });
 });
 
-describe('pair mode: terminal output', () => {
+describe('pair: terminal output', () => {
     it('drops colours and prompts escapes, and keeps a progress line as it ended', () => {
         const raw = '\x1b]633;C\x07\x1b[32m✓ passes\x1b[0m\r\n 10%\r 50%\r100%\r\n\x1b[1mdone\x1b[22m\r\n\r\n';
         expect(cleanTerminalOutput(raw)).toBe('✓ passes\n100%\ndone');
@@ -31,7 +31,7 @@ describe('pair mode: terminal output', () => {
     });
 });
 
-describe('pair mode: which output', () => {
+describe('pair: which output', () => {
     const names = ['Git', 'GitHub', 'Tasks', 'Terminal: bash', 'Terminal: Pi'];
 
     it('prefers the exact name over names containing it, case aside', () => {
@@ -45,7 +45,7 @@ describe('pair mode: which output', () => {
     });
 });
 
-describe('pair mode: paths stay in the workspace', () => {
+describe('pair: paths stay in the workspace', () => {
     it('takes the folder and what is under it, including names that start with dots', () => {
         expect(insideFolder('/ws', '/ws')).toBe(true);
         expect(insideFolder('/ws', '/ws/src/a.ts')).toBe(true);

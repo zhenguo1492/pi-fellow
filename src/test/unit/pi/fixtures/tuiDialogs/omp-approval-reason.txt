@@ -1,0 +1,30 @@
+│                          │ No recent sessions                                                  │
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+╰──────────────────────────┴─────────────────────────────────────────────────────────────────────╯
+ Tip: Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics
+      and fixes them with parallel subagents — esc cancels
+
+
+ MCP server failed to connect: expo:expo [config:
+ ~/.claude/plugins/cache/claude-plugins-official/expo/1.13.6/.mcp.json]: HTTP 401:
+ {"error":"invalid_token","error_description":"Missing Authorization h…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.4.3 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+╭─ Allow tool: bash ───────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ Reason: prompt                                                                                   │
+│ Command: rm -rf out                                                                              │
+│                                                                                                  │
+│  ❯ Approve                                                                                       │
+│    Deny                                                                                          │
+│                                                                                                  │
+│ up/down navigate  enter select  esc cancel                                                       │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

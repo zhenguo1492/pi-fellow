@@ -1,8 +1,9 @@
 import { escapeHtml } from '../../shared/html';
 import type { SettingsData, VoiceSettings } from '../../shared/protocol';
 import { TRANSLATION_LANGUAGES, translationLanguage } from '../../shared/translationLanguages';
-import { AVATAR_PRESETS, AVATAR_PRESET_PREFIX, avatarPresetSrc } from '../../shared/avatarPresets';
+import { AVATAR_PRESETS, AVATAR_PRESET_PREFIX, ICON_PRESETS, avatarPresetSrc } from '../../shared/avatarPresets';
 import { DEFAULT_SPEAKER_NAMES, type VoiceSpeakerId } from '../../shared/voiceSpeakers';
+import { BUILTIN_VOICE_SKILLS } from '../../shared/builtinVoiceSkills';
 import { TTS_LANGUAGE_FIELDS, type TtsConfig } from '../../voiceAgent/tts';
 import { DEFAULT_AVATAR, avatarMarkup } from '../avatar';
 import { vscode } from './api';
@@ -236,66 +237,123 @@ export function buildSentenceActionsRow(enabled: boolean, translateTo: string): 
     return row;
 }
 
+/** Arrow into a tray: the Upload tile of the avatar picker. */
+const ICON_UPLOAD =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3"/><path d="M2.5 10v2.25c0 .7.55 1.25 1.25 1.25h8.5c.7 0 1.25-.55 1.25-1.25V10"/></svg>';
+
+/** Closes the open avatar picker on a press outside it or Escape; replaced by each build of the row. */
+let avatarMenuListeners: AbortController | undefined;
+
 /**
- * The names and avatars in the Bot view, you and the voice agent: a preview of the avatar as the
- * Bot view shows it, the name, the avatar setting (an emoji, a few letters or a picture's path)
- * with "Choose picture…", and the pixel-art presets to click. Saved at once, the fields by the
- * page's generic `[data-key]` handlers.
+ * The names and avatars in the Bot view, you and the voice agent: the avatar, as the Bot view shows
+ * it, beside the name. Clicking the avatar opens a picker under it: the two default icons, the
+ * pixel-art presets, and Upload (a picture of your own). Saved at once: the name by the page's
+ * generic `[data-key]` handler, an avatar on click.
  */
 export function buildSpeakersRow(speakers: SettingsData['voiceSpeakers']): HTMLElement {
     const row = el('div', 'setting-row voice-speakers');
     const who: Record<VoiceSpeakerId, string> = { user: 'You', bot: 'Voice agent' };
+    // Each tile's setting value: the speaker's own default icon is the empty setting.
+    const choices = (id: VoiceSpeakerId) => [
+        ...ICON_PRESETS.map((p) => ({ value: p.icon === id ? '' : AVATAR_PRESET_PREFIX + p.id, label: p.label, html: DEFAULT_AVATAR[p.icon] })),
+        ...AVATAR_PRESETS.map((p) => ({ value: AVATAR_PRESET_PREFIX + p.id, label: p.label, html: `<img src="${avatarPresetSrc(p.id)}" alt="">` })),
+    ];
     row.innerHTML = `
         <div class="setting-label-row"><label>Names and avatars</label></div>
         ${(['user', 'bot'] as const)
             .map((id) => {
                 const { name, avatar, error } = speakers[id];
+                const own = AVATAR_PRESET_PREFIX + ICON_PRESETS.find((p) => p.icon === id)!.id;
+                const current = avatar.trim() === own ? '' : avatar.trim();
+                const tiles = choices(id);
+                // Anything else set (a picture, or text from settings.json) counts as uploaded.
+                const uploaded = !tiles.some((c) => c.value === current);
                 return `
-        <div class="voice-speaker" data-speaker="${id}">
-            <div class="voice-speaker-avatar voice-speaker-avatar--${id}" aria-hidden="true">${DEFAULT_AVATAR[id]}</div>
-            <div class="voice-speaker-fields">
-                <span class="voice-speaker-who">${who[id]}</span>
-                <input type="text" id="setting-voiceAgent.${id}Name" class="setting-input voice-speaker-name" data-key="voiceAgent.${id}Name" value="${escapeHtml(name)}" placeholder="${DEFAULT_SPEAKER_NAMES[id]}" maxlength="40" aria-label="${who[id]}: name">
-                <div class="setting-input-wrapper">
-                    <input type="text" id="setting-voiceAgent.${id}Avatar" class="setting-input" data-key="voiceAgent.${id}Avatar" value="${escapeHtml(avatar)}" placeholder="Emoji, letters, or a picture's path" aria-label="${who[id]}: avatar">
-                    <button type="button" class="setting-btn secondary" data-pick-avatar="${id}">Choose picture…</button>
+        <div class="voice-speaker voice-speaker--${id}" data-speaker="${id}">
+            <label class="voice-speaker-who" for="setting-voiceAgent.${id}Name">${who[id]}</label>
+            <div class="voice-speaker-line">
+                <button type="button" class="voice-speaker-avatar" aria-haspopup="true" aria-expanded="false" title="Change the avatar" aria-label="${who[id]}: change the avatar">${DEFAULT_AVATAR[id]}</button>
+                <input type="text" id="setting-voiceAgent.${id}Name" class="setting-input voice-speaker-name" data-key="voiceAgent.${id}Name" value="${escapeHtml(name)}" placeholder="${DEFAULT_SPEAKER_NAMES[id]}" maxlength="40">
+                <div class="voice-avatar-menu" role="group" aria-label="${who[id]}: avatars" hidden>
+                    ${tiles
+                        .map(
+                            (c) =>
+                                `<button type="button" class="voice-avatar-preset" data-avatar-value="${escapeHtml(c.value)}" title="${escapeHtml(c.label)}" aria-label="${escapeHtml(c.label)}" aria-pressed="${c.value === current}">${c.html}</button>`,
+                        )
+                        .join('')}
+                    <button type="button" class="voice-avatar-preset voice-avatar-upload" data-pick-avatar="${id}" title="Upload a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB)" aria-label="Upload a picture" aria-pressed="${uploaded}">${ICON_UPLOAD}</button>
                 </div>
-                <div class="voice-avatar-presets voice-avatar-presets--${id}" role="group" aria-label="${who[id]}: preset avatars">
-                    ${AVATAR_PRESETS.map(
-                        (preset) =>
-                            `<button type="button" class="voice-avatar-preset" data-avatar-preset="${preset.id}" title="${escapeHtml(preset.label)}" aria-label="${escapeHtml(preset.label)}" aria-pressed="${avatar.trim() === AVATAR_PRESET_PREFIX + preset.id}"><img src="${avatarPresetSrc(preset.id)}" alt=""></button>`,
-                    ).join('')}
-                </div>
-                ${error ? `<p class="setting-description voice-speaker-error">${escapeHtml(error)}</p>` : ''}
             </div>
+            ${error ? `<p class="setting-description voice-speaker-error">${escapeHtml(error)}</p>` : ''}
         </div>`;
             })
             .join('')}
-        <p class="setting-description">Shown on each turn in the Bot view; empty fields go back to User, Bot and their icons. An avatar is one of the pixel-art presets, an emoji, up to two letters, or a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB). The voice agent is told both names and answers to its own.</p>
+        <p class="setting-description">Shown on each turn in the Bot view; an empty name goes back to User or Bot. Click an avatar to change it: pick one, or upload a picture. The voice agent is told both names and answers to its own.</p>
     `;
-    for (const id of ['user', 'bot'] as const) {
-        const preview = row.querySelector<HTMLElement>(`[data-speaker="${id}"] .voice-speaker-avatar`)!;
+
+    const menus = [...row.querySelectorAll<HTMLElement>('.voice-speaker')].map((speaker) => ({
+        speaker,
+        id: speaker.dataset.speaker === 'bot' ? ('bot' as const) : ('user' as const),
+        toggle: speaker.querySelector<HTMLButtonElement>('.voice-speaker-avatar')!,
+        menu: speaker.querySelector<HTMLElement>('.voice-avatar-menu')!,
+    }));
+    const close = () => {
+        for (const { toggle, menu } of menus) {
+            menu.hidden = true;
+            toggle.setAttribute('aria-expanded', 'false');
+        }
+    };
+    for (const { speaker, id, toggle, menu } of menus) {
         void avatarMarkup(speakers[id].resolved, DEFAULT_AVATAR[id]).then((html) => {
-            preview.innerHTML = html;
+            toggle.innerHTML = html;
         });
-    }
-    row.querySelectorAll<HTMLButtonElement>('[data-pick-avatar]').forEach((button) => {
-        button.addEventListener('click', () => {
-            vscode.postMessage({ type: 'pickAvatar', speaker: button.dataset.pickAvatar === 'bot' ? 'bot' : 'user' });
+        toggle.addEventListener('click', () => {
+            const open = menu.hidden;
+            close();
+            menu.hidden = !open;
+            toggle.setAttribute('aria-expanded', String(open));
+            if (open) {
+                menu.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
+            }
         });
-    });
-    row.querySelectorAll<HTMLElement>('.voice-speaker').forEach((speaker) => {
-        const id = speaker.dataset.speaker === 'bot' ? 'bot' : 'user';
-        const buttons = speaker.querySelectorAll<HTMLButtonElement>('[data-avatar-preset]');
-        buttons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const value = AVATAR_PRESET_PREFIX + button.dataset.avatarPreset;
-                speaker.querySelector<HTMLInputElement>(`[data-key="voiceAgent.${id}Avatar"]`)!.value = value;
-                buttons.forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
-                vscode.postMessage({ type: 'updateSetting', key: `voiceAgent.${id}Avatar`, value });
+        const tiles = speaker.querySelectorAll<HTMLButtonElement>('.voice-avatar-preset');
+        tiles.forEach((tile) => {
+            tile.addEventListener('click', () => {
+                close();
+                toggle.focus();
+                if (tile.dataset.pickAvatar) {
+                    vscode.postMessage({ type: 'pickAvatar', speaker: id });
+                    return;
+                }
+                tiles.forEach((t) => t.setAttribute('aria-pressed', String(t === tile)));
+                toggle.innerHTML = tile.innerHTML;
+                vscode.postMessage({ type: 'updateSetting', key: `voiceAgent.${id}Avatar`, value: tile.dataset.avatarValue ?? '' });
             });
         });
-    });
+    }
+    avatarMenuListeners?.abort();
+    avatarMenuListeners = new AbortController();
+    const { signal } = avatarMenuListeners;
+    document.addEventListener(
+        'pointerdown',
+        (e) => {
+            if (!menus.some(({ toggle, menu }) => toggle.contains(e.target as Node) || menu.contains(e.target as Node))) {
+                close();
+            }
+        },
+        { signal },
+    );
+    document.addEventListener(
+        'keydown',
+        (e) => {
+            const open = menus.find(({ menu }) => !menu.hidden);
+            if (e.key === 'Escape' && open) {
+                close();
+                open.toggle.focus();
+            }
+        },
+        { signal },
+    );
     return row;
 }
 
@@ -317,7 +375,7 @@ export function buildVoiceSkillsRow(): HTMLElement {
             </div>
         </details>
         <div class="voice-skills-chips"></div>
-        <p class="setting-description">Only these skills are loaded into the voice agent, for skills written for it rather than for the coding worker; none by default. omp loads them by name, pi by their SKILL.md files. The list is the current chat tab's. Takes effect after Voice Agent — Stop, when it starts again.</p>
+        <p class="setting-description">The built-in skills (${BUILTIN_VOICE_SKILLS.join(', ')}) are always loaded. Beyond them, only the skills chosen here are, for skills written for the voice agent rather than for the coding worker; none by default. omp loads them by name, pi by their SKILL.md files. The list is the current chat tab's. Takes effect after Voice Agent — Stop, when it starts again.</p>
     `;
     return row;
 }
@@ -330,8 +388,10 @@ export function renderVoiceSkills(): void {
         return;
     }
     const installed = settingsState.loadedSkills;
+    // A chosen name that is also built in is loaded once, as the built-in: shown with the built-ins.
+    const extra = chosen.filter((name) => !BUILTIN_VOICE_SKILLS.includes(name));
     row.querySelector('.voice-skills-summary')!.textContent =
-        chosen.length === 0 ? 'No skills' : chosen.length === 1 ? chosen[0] : `${chosen.length} skills: ${chosen.join(', ')}`;
+        extra.length === 0 ? 'No other skills' : extra.length === 1 ? extra[0] : `${extra.length} skills: ${extra.join(', ')}`;
 
     // Rebuilt only when the installed skills change: otherwise the checkboxes are set in place, so the
     // one just clicked keeps focus and the open dropdown stays open.
@@ -356,10 +416,16 @@ export function renderVoiceSkills(): void {
         }
     }
     options.querySelectorAll<HTMLInputElement>('[data-voice-skill]').forEach((box) => {
-        box.checked = chosen.includes(box.dataset.voiceSkill ?? '');
+        const builtin = BUILTIN_VOICE_SKILLS.includes(box.dataset.voiceSkill ?? '');
+        box.checked = builtin || chosen.includes(box.dataset.voiceSkill ?? '');
+        box.disabled = builtin;
+        box.title = builtin ? 'Built in: always loaded' : '';
     });
 
-    row.querySelector('.voice-skills-chips')!.innerHTML = chosen.map((name) => {
+    const builtinChips = BUILTIN_VOICE_SKILLS.map((name) => `<span class="voice-skill-chip builtin" title="Built in: always loaded">
+            <span>${escapeHtml(name)}</span>
+        </span>`);
+    const chosenChips = extra.map((name) => {
         // Chosen before, but not installed for this tab's CLI: the voice agent does not load it.
         const missing = installed !== undefined && !installed.some((skill) => skill.name === name);
         const title = missing ? 'Not installed for the current chat tab: not loaded' : name;
@@ -367,7 +433,8 @@ export function renderVoiceSkills(): void {
             <span>${escapeHtml(name)}</span>
             <button type="button" class="voice-skill-remove" data-voice-skill-remove="${escapeHtml(name)}" aria-label="Remove ${escapeHtml(name)}">×</button>
         </span>`;
-    }).join('');
+    });
+    row.querySelector('.voice-skills-chips')!.innerHTML = [...builtinChips, ...chosenChips].join('');
 }
 
 function filterVoiceSkills(row: HTMLElement): void {

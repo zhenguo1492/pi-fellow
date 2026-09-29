@@ -43,6 +43,8 @@ export interface TabState {
     tuiMode: boolean;
     /** The agent in the tab's TUI is working (followed from the session file the TUI appends to). */
     tuiBusy: boolean;
+    /** The last prompt submitted in the tab's TUI was typed by the voice agent (until the user presses Enter in it). */
+    tuiPromptFromVoice: boolean;
     pendingApprovals: Map<string, PendingApproval>;
     queuedMessages: QueuedPrompt[];
     steeringMessages: string[];
@@ -100,6 +102,7 @@ export function makeTabState(
         botView: false,
         tuiMode: false,
         tuiBusy: false,
+        tuiPromptFromVoice: false,
         pendingApprovals: new Map(),
         queuedMessages: [],
         steeringMessages: [],

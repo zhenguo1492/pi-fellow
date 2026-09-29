@@ -1,28 +1,38 @@
 import { escapeHtml } from '../../shared/html';
-import { marked } from 'marked';
+import { Marked, marked } from 'marked';
 
 // ── Marked config ──
 
 const renderer = new marked.Renderer();
 
 let codeBlockId = 0;
-renderer.code = function ({ text, lang }: { text: string; lang?: string | undefined }) {
+function renderCodeBlock({ text, lang }: { text: string; lang?: string | undefined }): string {
     const id = `cb-${++codeBlockId}`;
     const langLabel = lang ? `<span class="code-lang">${escapeHtml(lang)}</span>` : '';
     return `<div class="code-block-wrapper">
         <div class="code-block-header">${langLabel}<button class="copy-btn" data-code-id="${id}">Copy</button></div>
         <pre class="code-block-pre" id="${id}"><code class="code-block-code">${escapeHtml(text)}</code></pre>
     </div>`;
-};
+}
 
-renderer.codespan = function ({ text }: { text: string }) {
+function renderCodespan({ text }: { text: string }): string {
     return `<code>${text}</code>`;
-};
+}
+
+renderer.code = renderCodeBlock;
+renderer.codespan = renderCodespan;
 
 marked.setOptions({
     renderer,
     breaks: true,
     gfm: true,
+});
+
+/** Like `marked`, but raw HTML shows as the text it is: prompts name tags such as `<editor>` that must stay visible. */
+const literalHtml = new Marked({
+    breaks: true,
+    gfm: true,
+    renderer: { code: renderCodeBlock, codespan: renderCodespan, html: ({ text }) => escapeHtml(text) },
 });
 
 /** Restart code-block element ids (`cb-1`, `cb-2`, …); call before re-rendering the whole transcript. */
@@ -33,6 +43,12 @@ export function resetCodeBlockIds(): void {
 export function renderMarkdown(text: string): string {
     if (!text) return '';
     return marked.parse(text) as string;
+}
+
+/** Markdown whose raw HTML is shown as text rather than rendered: for prompts and other text written for a model. */
+export function renderMarkdownLiteralHtml(text: string): string {
+    if (!text) return '';
+    return literalHtml.parse(text) as string;
 }
 
 /** Render partial streamed markdown, closing an unterminated code fence so it renders as code. */

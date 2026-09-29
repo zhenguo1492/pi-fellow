@@ -220,6 +220,7 @@ describe('conversation: proactive turns', () => {
     it('get the floor only when nobody is talking and nothing is waiting', () => {
         const busy: ConvEvent[][] = [
             [{ type: 'userSpeechStart', at }],
+            [{ type: 'userSoundStart', at }],
             [
                 { type: 'userSpeechStart', at },
                 { type: 'userSpeechEnd', at, silenceAt: at },
@@ -244,6 +245,112 @@ describe('conversation: proactive turns', () => {
             { type: 'speak', turnId: 1, text: 'worker 做完了。' },
             { type: 'cancelTurn', turnId: 1 },
         ]);
+    });
+});
+
+describe('conversation: a sound not yet found to be the user (voiceprint check on)', () => {
+    const prompted = run([
+        { type: 'userSpeechStart', at },
+        { type: 'userSpeechEnd', at, silenceAt: at },
+        { type: 'transcript', text: '看一下日志', at },
+    ]).state;
+
+    it('shows as detecting, holds the floor, and a rejected one goes back to listening without ever hearing you', () => {
+        const sound = run([{ type: 'userSoundStart', at }]);
+        expect([phaseOf(sound.state), floorFree(sound.state)]).toEqual(['soundDetected', false]);
+        // Typing wins: the message goes out at once, and the sound counts for nothing when it ends.
+        const typed = run([{ type: 'typed', text: '先别说', at }], sound.state);
+        expect(typed.effects).toEqual([{ type: 'prompt', turnId: 1, text: '先别说', source: 'text' }]);
+        const phases = [phaseOf(typed.state)];
+        let state = typed.state;
+        const effects: Effect[] = [];
+        for (const ev of [
+            { type: 'userSpeechStart', at },
+            { type: 'userSpeechEnd', at, silenceAt: at },
+            { type: 'transcript', text: '孩子在说话', at },
+        ] satisfies ConvEvent[]) {
+            const step = reduce(state, ev);
+            state = step.state;
+            effects.push(...step.effects);
+            phases.push(phaseOf(state));
+        }
+        expect(phases).not.toContain('userSpeaking');
+        expect(effects).toEqual([]);
+        expect(state.bot?.turnId).toBe(1);
+        const quiet = run([{ type: 'userSoundStart', at }, { type: 'userSpeechEnd', at, silenceAt: at }, { type: 'transcript', text: '', at }]);
+        expect([phaseOf(quiet.state), floorFree(quiet.state)]).toEqual(['listening', true]);
+    });
+
+    it('cuts nothing off until it is found to be the user, then is hearing you', () => {
+        const replying = run([{ type: 'llmText', turnId: 1, delta: '好的，我看一下。', at }], prompted);
+        const sound = run([{ type: 'userSoundStart', at }], replying.state);
+        expect(sound.effects).toEqual([]);
+        expect([phaseOf(sound.state), sound.state.bot?.turnId]).toEqual(['soundDetected', 1]);
+        // The bot's voice outranks a sound nobody has vouched for.
+        const playing = run([{ type: 'sentencePlaying', turnId: 1, text: '好的，我看一下。', durationMs: 800, at }], sound.state);
+        expect(phaseOf(playing.state)).toBe('speaking');
+        const you = run([{ type: 'userSpeechStart', at }], sound.state);
+        expect(you.effects).toMatchObject([{ type: 'cancelTurn', turnId: 1 }]);
+        expect(phaseOf(you.state)).toBe('userSpeaking');
+    });
+
+    it('ends without a segment when another path takes the audio over, and what waited goes out', () => {
+        const waiting = run([{ type: 'userSoundStart', at }, { type: 'typed', text: '', attachments: { names: ['a.png'], images: [], files: '' }, at }]);
+        expect(waiting.effects).toEqual([]);
+        const ended = run([{ type: 'userSoundEnd', at }], waiting.state);
+        expect(ended.effects).toMatchObject([{ type: 'prompt', turnId: 1, text: '', source: 'text' }]);
+        expect(ended.state.soundDetected).toBe(false);
+    });
+
+    it('lets typed text void the speech still being transcribed and go out at once', () => {
+        const talking = run([
+            { type: 'userSpeechStart', at },
+            { type: 'userSpeechEnd', at, silenceAt: at },
+            { type: 'typed', text: '用这个', at },
+        ]);
+        expect(talking.effects).toEqual([{ type: 'prompt', turnId: 1, text: '用这个', source: 'text' }]);
+        const late = run([{ type: 'transcript', text: '说到一半', at }], talking.state);
+        expect(late.effects).toEqual([]);
+        expect(late.state.sttDiscard).toBe(0);
+    });
+
+    it('lets typed text void the words being spoken right now, and the words heard but not yet sent', () => {
+        const speaking = run([
+            { type: 'userSpeechStart', at },
+            { type: 'userSpeechEnd', at, silenceAt: at },
+            { type: 'userSpeechStart', at },
+            { type: 'transcript', text: '前半句', at },
+        ]);
+        const typed = run([{ type: 'typed', text: '打字的', at }], speaking.state);
+        expect(typed.effects).toEqual([{ type: 'prompt', turnId: 1, text: '打字的', source: 'text' }]);
+        const rest = run(
+            [
+                { type: 'userSpeechEnd', at, silenceAt: at },
+                { type: 'transcript', text: '后半句', at },
+            ],
+            typed.state,
+        );
+        expect(rest.effects).toEqual([]);
+        expect([rest.state.muteSegment, rest.state.sttDiscard, rest.state.bot?.turnId]).toEqual([false, 0, 1]);
+        // Speech after that counts again.
+        const next = run([{ type: 'userSpeechStart', at }], rest.state);
+        expect(next.effects).toMatchObject([{ type: 'cancelTurn', turnId: 1 }]);
+    });
+
+    it('whose words pass the check only once done still cut the reply off, keeping when they ended', () => {
+        const { state, effects } = run(
+            [
+                { type: 'userSoundStart', at: 10 },
+                { type: 'userSpeechEnd', at: 100, silenceAt: 50 },
+                { type: 'transcript', text: '等一下', at: 200 },
+            ],
+            prompted,
+        );
+        expect(effects).toMatchObject([
+            { type: 'cancelTurn', turnId: 1 },
+            { type: 'prompt', turnId: 2, text: '等一下', source: 'stt', interrupted: expect.stringContaining('heard none of it') },
+        ]);
+        expect(state.metrics).toEqual({ silenceAt: 50, endDetectedAt: 100, sttDoneAt: 200, promptAt: 200 });
     });
 });
 

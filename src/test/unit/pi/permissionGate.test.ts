@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('vscode', () => ({ window: {} }));
 
 import permissionGate, { type GateContext, type GateExtensionApi, type GateToolCallEvent } from '../../../piExtension/permissionGate';
-import { PERMISSION_FILE_ENV, type PermissionGateState } from '../../../pi/permissionPolicy';
+import { EDITS_FILE_ENV, PERMISSION_FILE_ENV, type PermissionGateState } from '../../../pi/permissionPolicy';
 import { RpcExtensionUiHandler } from '../../../pi/rpcExtensionUi';
 import type { PiRpcBridge } from '../../../pi/piRpcBridge';
 import type { RpcExtensionUIRequest } from '../../../pi/rpcTypes';
@@ -15,10 +15,23 @@ type Handler = (event: GateToolCallEvent, ctx: GateContext) => Promise<{ block: 
 
 let dir: string;
 let file: string;
+let editsFile: string;
 let handler: Handler;
 
 function writeState(state: PermissionGateState): void {
     fs.writeFileSync(file, JSON.stringify(state));
+}
+
+/** What the gate reported to the host so far: one list of absolute paths per call. */
+function reported(): string[][] {
+    const text = fs.existsSync(editsFile) ? fs.readFileSync(editsFile, 'utf8') : '';
+    return text
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+            const report: { paths: string[] } = JSON.parse(line);
+            return report.paths;
+        });
 }
 
 /** A worker-side context whose dialogs answer `choice`; records what was asked. */
@@ -39,7 +52,9 @@ function context(choice: string | undefined, branch: GateContext['sessionManager
 beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'permission-gate-'));
     file = path.join(dir, 'state.json');
+    editsFile = path.join(dir, 'edits.ndjson');
     process.env[PERMISSION_FILE_ENV] = file;
+    process.env[EDITS_FILE_ENV] = editsFile;
     const pi: GateExtensionApi = {
         on: (_event, h) => {
             handler = h;
@@ -50,6 +65,7 @@ beforeEach(() => {
 
 afterEach(() => {
     delete process.env[PERMISSION_FILE_ENV];
+    delete process.env[EDITS_FILE_ENV];
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -198,6 +214,68 @@ describe('permission gate: state file and pi plan mode', () => {
         entries.push({ type: 'custom', customType: 'plan-mode-state', data: { enabled: false } });
         expect(await handler({ toolName: 'bash', input: { command: 'npm run build' } }, ctx)).toMatchObject({ block: true });
         expect(asked).toHaveLength(1);
+    });
+});
+
+describe('permission gate: reporting file changes to the host', () => {
+    const cwd = path.resolve('/ws');
+    const at = (...paths: string[]) => paths.map((p) => path.join(cwd, p));
+
+    it('reports the files a change will touch, absolute, before the tool runs', async () => {
+        writeState({ level: 'auto', allowedTools: [] });
+        const { ctx } = context(undefined);
+        const worker = { ...ctx, cwd };
+        for (const [toolName, input] of [
+            ['write', { path: 'src/new.ts', content: 'x' }],
+            ['edit', { file_path: path.join(cwd, 'src/abs.ts'), old_string: 'a', new_string: 'b' }],
+            // An omp hashline patch: every section once, and where a moved file goes.
+            ['edit', { input: '[src/a.ts#1A2B]\nPUT 3.=4:\n+x\n[src/b.ts#3C4D]\nMV src/c.ts\n[src/a.ts#1A2B]\nPUT >9:\n+MV not/an/op.ts\n' }],
+            ['edit', { input: '*** Begin Patch\n*** Update File: src/d.ts\n*** Move to: src/e.ts\n*** Delete File: src/f.ts\n*** End Patch' }],
+            ['edit', { path: 'src/g.ts', edits: [{ rename: 'src/h.ts' }] }],
+        ] as const) {
+            expect(await handler({ toolName, input }, worker), JSON.stringify(input)).toBeUndefined();
+        }
+        expect(reported()).toEqual([
+            at('src/new.ts'),
+            at('src/abs.ts'),
+            at('src/a.ts', 'src/b.ts', 'src/c.ts'),
+            at('src/d.ts', 'src/e.ts', 'src/f.ts'),
+            at('src/g.ts', 'src/h.ts'),
+        ]);
+    });
+
+    it('reports a rewrite over a glob as its folder, and one without paths as the whole working folder', async () => {
+        writeState({ level: 'auto', allowedTools: [] });
+        const worker = { ...context(undefined).ctx, cwd };
+        await handler({ toolName: 'ast_edit', input: { ops: [], paths: ['src/gen/**/*.ts', 'lib/util.ts'] } }, worker);
+        await handler({ toolName: 'ast_edit', input: { ops: [] } }, worker);
+        await handler({ toolName: 'lsp', input: { action: 'rename_file', file: 'src/old.ts', new_name: 'src/new.ts' } }, worker);
+        expect(reported()).toEqual([at('src/gen', 'lib/util.ts'), [cwd], at('src/old.ts', 'src/new.ts')]);
+    });
+
+    it('reports a change still waiting on the user, since it may run the moment they approve', async () => {
+        writeState({ level: 'ask', allowedTools: [] });
+        const worker = { ...context('Deny').ctx, cwd };
+        expect(await handler({ toolName: 'edit', input: { path: 'src/a.ts' } }, worker)).toMatchObject({ block: true });
+        expect(reported()).toEqual([at('src/a.ts')]);
+    });
+
+    it('reports nothing for reads, commands, internal scratch files, or changes Plan blocks', async () => {
+        writeState({ level: 'auto', allowedTools: [] });
+        const worker = { ...context(undefined).ctx, cwd };
+        await handler({ toolName: 'read', input: { path: 'src/a.ts' } }, worker);
+        await handler({ toolName: 'bash', input: { command: 'rm src/a.ts' } }, worker);
+        await handler({ toolName: 'write', input: { path: 'local://PLAN.md', content: '# plan' } }, worker);
+        await handler({ toolName: 'lsp', input: { action: 'references', file: 'src/a.ts' } }, worker);
+        writeState({ level: 'plan', allowedTools: [] });
+        expect(await handler({ toolName: 'edit', input: { path: 'src/a.ts' } }, worker)).toMatchObject({ block: true });
+        expect(reported()).toEqual([]);
+    });
+
+    it("resolves relative paths against the process's folder when the context has none", async () => {
+        writeState({ level: 'auto', allowedTools: [] });
+        await handler({ toolName: 'write', input: { path: 'a.ts', content: '' } }, context(undefined).ctx);
+        expect(reported()).toEqual([[path.resolve(process.cwd(), 'a.ts')]]);
     });
 });
 

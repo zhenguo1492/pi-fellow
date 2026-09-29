@@ -23,6 +23,7 @@ import type { ProactiveTurnHooks, VoiceAgent, VoiceTurnListener } from './voiceA
 import { SileroVad, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE } from '../voice/sileroVad';
 import { MicLevelMeter, frameDb, wavePoints } from '../voice/micLevel';
 import { SpeechSegmenter } from '../voice/speechSegmenter';
+import { SHORT_SPEECH_SECS, describeVerdict, transcribeChecked, voiceVetoesBargeIn, type SpeechGate } from '../voice/speakerGate';
 import { SttClient, listSttModels, type SttConfig } from '../voice/stt';
 import { describeError } from '../voice/modelsProbe';
 import { VoiceServiceError, explainVoiceError } from '../voice/voiceErrors';
@@ -36,6 +37,11 @@ export interface VoiceModeOptions {
     tts: TtsRequestConfig | undefined;
     /** Why `stt` / `tts` was left out, in plain words: the voice bar's tags show it. */
     unavailable?: VoiceUnavailable;
+    /**
+     * Noise reduction and the voiceprint check (src/voice/voiceprint.ts): an utterance in another
+     * voice is not your turn, and cannot cut a reply off. Absent: every voice is heard.
+     */
+    gate?: SpeechGate;
     /** Silence that ends the user's turn (§5.2). */
     turnStopSecs: number;
     /** Silero probability at or above which a frame is speech. */
@@ -106,8 +112,10 @@ const CONNECT_TIMEOUT_MS = 15_000;
  * Evidence = a confident VAD frame or a loud one: Chrome AEC3 chops the user's voice while the bot
  * plays (double-talk), so VAD alone rarely holds; converged residual echo stays below −41 dBFS.
  */
-const BARGE_IN_CONFIDENCE = 0.6;
-const BARGE_IN_DB = -35;
+// Kept low: the browser's echo cancellation turns your voice down while the bot talks. The STT
+// check and the echo comparison, not these, keep the bot's own voice from cutting it off.
+const BARGE_IN_CONFIDENCE = 0.4;
+const BARGE_IN_DB = -40;
 /** Evidence before the first STT check. */
 const BARGE_IN_MS = 400;
 /** A rejected check is retried whenever the evidence grows this much more; the user may start after some echo. */
@@ -130,6 +138,14 @@ const BOT_CEIL_DB = -15;
 const REPLAY_TAIL_MS = 300;
 /** Speech starting this soon after a replay is checked against its text and dropped if it is the echo. */
 const REPLAY_ECHO_MS = 3000;
+/**
+ * With the voiceprint check on, speech is a sound until the check finds it is you. The first check
+ * runs once there is audio enough to compare rather than let through as short (a little over
+ * {@link SHORT_SPEECH_SECS}, pre-roll included); a rejected one runs again after as much more.
+ */
+const SOUND_CHECK_FRAMES = Math.ceil((SHORT_SPEECH_SECS * 1000) / FRAME_MS);
+/** Each check compares only the latest 1.5 s: a noise before you started does not drown your voice. */
+const SOUND_WINDOW_FRAMES = Math.round(1500 / FRAME_MS);
 
 /** A replay on the audio page (the Bot view's speaker button). */
 interface Replay {
@@ -152,10 +168,23 @@ interface BargeIn {
     /** The last-chance check for a short "停" / "wait" has been spent. */
     finalChecked: boolean;
     confirmed: boolean;
+    /** Began while the bot's voice played: checks rule out its echo, not only other voices. */
+    echo: boolean;
     /** What the confirming check heard; stands in if the whole utterance transcribes badly. */
     heardText?: string;
     /** Audio from just before the speech started until now. */
     frames: Int16Array[];
+}
+
+/** A segment being heard while the voiceprint check is on, not yet found to be your voice. */
+interface HeardSound {
+    /** The latest {@link SOUND_WINDOW_FRAMES} frames. */
+    frames: Int16Array[];
+    /** Frames heard so far, pre-roll included. */
+    heard: number;
+    /** `heard` at which the next check runs. */
+    checkAt: number;
+    checking: boolean;
 }
 
 export class VoiceMode {
@@ -178,6 +207,8 @@ export class VoiceMode {
     private _segmenter: SpeechSegmenter;
     /** Owns the audio (the segmenter is not fed) from its first evidence until rejected or ended. */
     private _bargeIn: BargeIn | undefined;
+    /** A segment being heard that the voiceprint check has not yet found to be you. */
+    private _sound: HeardSound | undefined;
     private readonly _recent: Int16Array[] = [];
     /** Transcripts are delivered in speaking order. */
     private _delivery: Promise<void> = Promise.resolve();
@@ -713,6 +744,7 @@ export class VoiceMode {
     private _dropHeardAudio(): void {
         this._buffered = Buffer.alloc(0);
         this._bargeIn = undefined;
+        this._sound = undefined;
         this._segmenter = this._newSegmenter();
         this._vad?.reset();
     }
@@ -720,7 +752,7 @@ export class VoiceMode {
     /** Drops what is being heard, ending the user's turn in progress with nothing said, and zeroes the mic level. */
     private _abandonHeardSpeech(): void {
         this._dropHeardAudio();
-        if (this._state.userSpeaking) {
+        if (this._state.userSpeaking || this._state.soundDetected) {
             const now = Date.now();
             this._dispatch({ type: 'userSpeechEnd', at: now, silenceAt: now });
             this._dispatch({ type: 'transcript', text: '', at: now });
@@ -871,8 +903,10 @@ export class VoiceMode {
             this._onBargeInFrame(this._bargeIn, frame, confidence, loud);
             return;
         }
-        // Echo only exists while sound comes out; speech while the reply is still synthesizing is a plain interruption.
-        if (this._state.botSpeaking && (confidence >= BARGE_IN_CONFIDENCE || loud)) {
+        // Echo only exists while sound comes out; speech while the reply is still synthesizing is a plain
+        // interruption. With the voiceprint check on, speech during any reply must be yours before it cuts the reply off.
+        const speechLike = confidence >= BARGE_IN_CONFIDENCE || loud;
+        if (speechLike && (this._state.botSpeaking || (this._state.bot !== undefined && this._options.gate?.active === true))) {
             this._bargeIn = {
                 evidenceMs: 0,
                 checkAtMs: BARGE_IN_MS,
@@ -880,23 +914,83 @@ export class VoiceMode {
                 verifying: false,
                 finalChecked: false,
                 confirmed: false,
+                echo: this._state.botSpeaking,
                 frames: this._recent.slice(0, -1),
             };
             this._segmenter = this._newSegmenter(); // the candidate owns this audio now
+            this._sound = undefined;
+            if (this._state.soundDetected) {
+                this._dispatch({ type: 'userSoundEnd', at: Date.now() });
+            }
             this._onBargeInFrame(this._bargeIn, frame, confidence, loud);
             return;
         }
         const wasSpeaking = this._segmenter.inSpeech;
         for (const ev of this._segmenter.push(frame, confidence)) {
-            if (ev.type === 'speechStart') {
-                this._dispatch({ type: 'userSpeechStart', at: Date.now() });
-            } else {
+            if (ev.type === 'segment') {
+                this._sound = undefined;
                 this._finishSegment(ev.pcm);
+            } else if (this._options.gate?.active) {
+                // Only a sound until the voiceprint check finds it is you (`_checkSound`).
+                this._sound = { frames: this._recent.slice(-SOUND_WINDOW_FRAMES), heard: this._recent.length, checkAt: SOUND_CHECK_FRAMES, checking: false };
+                this._dispatch({ type: 'userSoundStart', at: Date.now() });
+            } else {
+                this._dispatch({ type: 'userSpeechStart', at: Date.now() });
             }
+        }
+        const sound = this._sound;
+        if (sound && this._segmenter.inSpeech && sound.frames.at(-1) !== frame) {
+            sound.frames.push(frame);
+            sound.heard++;
+            if (sound.frames.length > SOUND_WINDOW_FRAMES) {
+                sound.frames.shift();
+            }
+        }
+        if (sound && !sound.checking && sound.heard >= sound.checkAt) {
+            this._checkSound(sound);
         }
         if (wasSpeaking && !this._segmenter.inSpeech) {
             vad.reset();
         }
+    }
+
+    /**
+     * The voiceprint check on the latest audio of a sound still being heard, as soon as there is enough
+     * of it to judge: your voice turns it into speech (`userSpeechStart`, "Hearing you") while you are
+     * still talking; another voice or noise stays a sound, checked again as more comes in. The finished
+     * segment is checked on its own either way, and that check decides whether its words count.
+     */
+    private _checkSound(sound: HeardSound): void {
+        const gate = this._options.gate;
+        if (!gate) {
+            return; // unreachable: sounds are only heard with a gate
+        }
+        sound.checking = true;
+        const pcm = concatFrames(sound.frames);
+        gate.prepare(pcm, VAD_SAMPLE_RATE)
+            .then((clean) => gate.accept(clean, VAD_SAMPLE_RATE))
+            .then(
+                (verdict) => {
+                    if (this._sound !== sound) {
+                        return; // the segment ended or was dropped meanwhile
+                    }
+                    sound.checking = false;
+                    if (verdict.accepted) {
+                        this._sound = undefined;
+                        this._options.log(`Hearing you (${describeVerdict(verdict)}).`);
+                        this._dispatch({ type: 'userSpeechStart', at: Date.now() });
+                        return;
+                    }
+                    sound.checkAt = sound.heard + SOUND_CHECK_FRAMES;
+                },
+                (err: unknown) => {
+                    this._options.log(`Voiceprint check of the sound failed: ${describeError(err)}`);
+                    if (this._sound === sound) {
+                        sound.checking = false;
+                        sound.checkAt = sound.heard + SOUND_CHECK_FRAMES;
+                    }
+                },
+            );
     }
 
     /** Barge-in bookkeeping for one frame (prototype doc §4.3 state diagram). */
@@ -938,9 +1032,25 @@ export class VoiceMode {
         candidate.verifying = true;
         const pcm = concatFrames(candidate.frames.slice(-BARGE_IN_WINDOW_FRAMES));
         const botText = `${echoSource(this._state)} ${this._replayEchoText(Date.now())}`.trim();
-        stt.transcribe(pcm, VAD_SAMPLE_RATE)
+        // Barge-in windows are often under a second: compare them anyway, or a TV's short line cuts the bot off.
+        transcribeChecked((audio, rate) => stt.transcribe(audio, rate), this._options.gate, pcm, VAD_SAMPLE_RATE, true)
             .then(
-                (text) => ({ text, verdict: classifyBargeIn(text, botText) }),
+                ({ text, verdict: voice }) => {
+                    this._options.log(`Barge-in voice: ${describeVerdict(voice)}.`);
+                    let verdict: BargeInVerdict;
+                    // While the bot plays, its echo mixes into your voice and drags the voiceprint score
+                    // down, so there only a clearly other voice (TV, children) is refused; the echo check
+                    // below decides the rest. The finished segment still goes through the voiceprint.
+                    if (voiceVetoesBargeIn(voice, candidate.echo)) {
+                        verdict = { kind: 'reject', reason: `not your voice: ${describeVerdict(voice)}` };
+                    } else if (candidate.echo) {
+                        verdict = classifyBargeIn(text, botText);
+                    } else {
+                        // Nothing plays, so no echo: any real words in your voice cut the reply off.
+                        verdict = isHallucination(text) || !text.trim() ? { kind: 'reject', reason: 'no words' } : { kind: 'user' };
+                    }
+                    return { text, verdict };
+                },
                 (err: unknown) => ({ text: '', verdict: { kind: 'reject', reason: `STT failed: ${String(err)}` } as BargeInVerdict }),
             )
             .then(({ text, verdict }) => {
@@ -975,13 +1085,19 @@ export class VoiceMode {
         const now = Date.now();
         const echoOf = this._replayEchoText(now - (pcm.length / VAD_SAMPLE_RATE) * 1000);
         this._dispatch({ type: 'userSpeechEnd', at: now, silenceAt: now - this._options.turnStopSecs * 1000 });
-        const result = stt.transcribe(pcm, VAD_SAMPLE_RATE).then(
-            (text) => ({ text }),
+        // Heard and checked against the voiceprint at once; the check never fails the transcription.
+        const result = transcribeChecked((audio, rate) => stt.transcribe(audio, rate), this._options.gate, pcm, VAD_SAMPLE_RATE).then(
+            (heard) => heard,
             (err: unknown) => ({ error: describeError(err) }),
         );
         this._delivery = this._delivery.then(async () => {
             const outcome = await result;
             let text = 'text' in outcome ? outcome.text : '';
+            if ('verdict' in outcome && !outcome.verdict.accepted) {
+                // Someone else's voice: not a turn. The transcript event still goes out, empty, to close the userSpeechEnd above.
+                this._options.log(`Dropped an utterance in another voice (${describeVerdict(outcome.verdict)}): "${text}"`);
+                text = '';
+            }
             if ('error' in outcome) {
                 const message = explainVoiceError(outcome.error, { service: 'stt' }).message;
                 this._options.log(`Speech-to-text failed: ${message} (${outcome.error})`);
@@ -999,7 +1115,7 @@ export class VoiceMode {
                 text = '';
             }
             if (!text.trim() && fallback) {
-                // The bot was already cut off for this speech; answering nothing would leave it silent.
+                // The bot was already cut off for this speech (by words the voiceprint check let through); answering nothing would leave it silent.
                 text = fallback;
             }
             this._dispatch({ type: 'transcript', text, at: Date.now() });

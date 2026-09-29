@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import type { DictationStatus, ServerMessage } from '../shared/protocol';
 import { SettingsPanel } from '../providers/settings-panel';
-import { DictationSession, dictationSegmenterParams } from './dictation';
+import { DictationSession, dictationSegmenterParams, transcribeUtterance } from './dictation';
 import { SileroVad } from './sileroVad';
 import { SttClient } from './stt';
 import { probeStt, readVoiceSettings, resolveSttConfig, sendsApiKey, sttCheck } from './voiceSettings';
+import { speechGate } from './voiceprint';
 import { explainVoiceError } from './voiceErrors';
 
 /** Microphone dictation into the chat composer (mic button / `oh-my-pi-chater.toggleDictation`). */
@@ -104,11 +105,12 @@ export class VoiceInput implements vscode.Disposable {
             }
             const session: DictationSession = new DictationSession(
                 vad,
-                new SttClient(sttConfig),
+                // Only your voice, once you have enrolled a voiceprint and turned it on.
+                transcribeUtterance(new SttClient(sttConfig), speechGate),
                 dictationSegmenterParams(settings),
                 {
                     status: (status) => this.onStatus(session, status),
-                    text: (text) => this.post({ type: 'dictationText', text }),
+                    result: (text) => this.post({ type: 'dictationText', text }),
                     level: (level, wave) => this.post({ type: 'dictationLevel', level, wave }),
                     error: (message) => this.fail(message),
                 },

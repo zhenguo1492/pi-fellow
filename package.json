@@ -136,10 +136,6 @@
         "title": "PI Buddy: Voice Agent — Clear Pi Highlight"
       },
       {
-        "command": "oh-my-pi-chater.voiceAgent.toggleMode",
-        "title": "PI Buddy: Voice Agent — Switch Delegate / Pair Mode"
-      },
-      {
         "command": "oh-my-pi-chater.voiceView.show",
         "title": "PI Buddy: Voice Agent — Show Bot View"
       },
@@ -334,6 +330,36 @@
           "maximum": 3,
           "description": "Voice input: pause (seconds) that ends an utterance and sends it to speech-to-text."
         },
+        "oh-my-pi-chater.voice.voiceprint.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Voice input and voice mode take only your voice: each utterance is compared with the voiceprint you record in Settings → Voice (kept in extension storage, not here), and someone else's is dropped. Runs on the built-in voice engine (a ~28 MB speaker model), whatever speech-to-text you use. Recording a voiceprint turns this on."
+        },
+        "oh-my-pi-chater.voice.voiceprint.threshold": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0.2,
+          "maximum": 0.9,
+          "description": "Voiceprint: similarity (0–1) an utterance needs to count as your voice. Raise it if other voices get through; lower it if yours is dropped. The voiceprint Test in Settings → Voice shows the similarity of each utterance."
+        },
+        "oh-my-pi-chater.voice.voiceprint.shortSpeech": {
+          "type": "string",
+          "default": "accept",
+          "enum": [
+            "stricter",
+            "accept"
+          ],
+          "enumDescriptions": [
+            "Check utterances under 1 second against a threshold 0.1 higher: they carry little voice, so a short shout from someone else is less likely to pass (short words of yours are dropped more often).",
+            "Let utterances under 1 second through unchecked."
+          ],
+          "description": "Voiceprint: how utterances under 1 second are judged."
+        },
+        "oh-my-pi-chater.voice.denoise": {
+          "type": "boolean",
+          "default": false,
+          "description": "Voice input and voice mode: take the background noise out of each utterance (GTCRN on the built-in voice engine, ~0.5 MB) before speech-to-text and the voiceprint check. Adds a little delay."
+        },
         "oh-my-pi-chater.voiceAgent.model": {
           "type": "string",
           "default": "",
@@ -358,7 +384,28 @@
           },
           "default": [],
           "uniqueItems": true,
-          "description": "Voice agent: names of the installed skills it loads (Settings → Voice). Empty loads none. omp loads them by name, pi by their SKILL.md files. Takes effect after Voice Agent — Stop."
+          "description": "Voice agent: names of the installed skills it loads (Settings → Voice), next to its built-in show-me and grilling skills, which are always loaded. Empty loads only the built-ins. omp loads them by name, pi by their SKILL.md files. Takes effect after Voice Agent — Stop."
+        },
+        "oh-my-pi-chater.voiceAgent.extraPrompt": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "Voice agent: extra instructions appended to its built-in system prompt, under \"Additional instructions from the user:\" (Settings → Voice → Voice agent → Instructions). Markdown is fine. Empty adds nothing. The built-in prompt itself cannot be edited. A change restarts a running voice agent's process between turns; the conversation carries on."
+        },
+        "oh-my-pi-chater.voiceAgent.humor": {
+          "type": "string",
+          "default": "occasional",
+          "enum": [
+            "off",
+            "occasional",
+            "often"
+          ],
+          "enumDescriptions": [
+            "Plain and friendly: no mood changes, no jokes.",
+            "Its mood drifts from turn to turn, and about one reply in four invites a brief aside of a random kind: a pun, a cold joke, dry understatement and so on.",
+            "As occasional, with an aside invited in about one reply in three."
+          ],
+          "description": "Voice agent: how much mood and humour its replies carry. The extension rolls the dice every turn, so jokes come at random and in varied kinds instead of every reply or never. Never next to an error, a question for you, an approval or a deletion, and never two replies running. The kind of humour follows the Instructions (voiceAgent.extraPrompt)."
         },
         "oh-my-pi-chater.voiceAgent.confirmBeforeDispatch": {
           "type": "boolean",
@@ -525,7 +572,7 @@
         "oh-my-pi-chater.voiceAgent.userAvatar": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Voice view: your avatar in the Bot view. A pixel-art preset (`preset:uncle`, `preset:boy`, `preset:cat`, `preset:otaku`, `preset:woman`, `preset:gentleman`; also clickable in Settings → Voice), an emoji or up to two characters (e.g. `🦊`, `ZG`), or the path of a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB; `~` is your home folder, a relative path starts at the workspace folder). Empty: the default icon."
+          "markdownDescription": "Voice view: your avatar in the Bot view. A preset (the default icons `preset:user` and `preset:robot`, or pixel art: `preset:uncle`, `preset:boy`, `preset:cat`, `preset:otaku`, `preset:woman`, `preset:gentleman`; also clickable in Settings → Voice), an emoji or up to two characters (e.g. `🦊`, `ZG`), or the path of a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB; `~` is your home folder, a relative path starts at the workspace folder). Empty: the default icon."
         },
         "oh-my-pi-chater.voiceAgent.botName": {
           "type": "string",
@@ -551,6 +598,7 @@
     "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons'",
     "test": "vitest",
     "test:unit": "vitest run",
+    "eval:voice": "vitest run -c vitest.eval.config.ts",
     "test:integration": "node out/test/integration/runTest.js",
     "test:all": "npm run test:unit && npm run test:integration"
   },

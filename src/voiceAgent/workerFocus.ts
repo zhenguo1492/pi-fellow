@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { changedLines, editPaths, readTarget, type FocusTarget } from './piFocus';
+import { editPaths } from '../pi/permissionPolicy';
+import { changedLines, readTarget, type FocusTarget } from './piFocus';
 import type { WorkerController, WorkerEvent } from './workerController';
 
 /** Files larger than this are not compared: the write shows as the whole file. */

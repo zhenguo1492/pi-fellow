@@ -1,4 +1,5 @@
 import type { ServerMessage } from '../../shared/protocol';
+import { pushTalkLevel } from '../avatarMotion';
 import { applyDictationStatus, applyVoiceMicStatus, insertDictatedText } from '../dictation';
 import { dismissExtensionUi, showExtensionUiRequest } from '../extensionUi';
 import { applyContextBreakdown, applyModelStatus } from '../modelStatus';
@@ -50,6 +51,9 @@ export function handleMessage(msg: ServerMessage): void {
             break;
         case 'voiceLevel':
             pushWave(msg.source, msg.wave);
+            if (msg.source === 'bot') {
+                pushTalkLevel(msg.level);
+            }
             break;
         case 'voice':
             handleVoiceMessage(msg.message);

@@ -16,7 +16,6 @@ const WORKER_RECENT = 4;
 /** What the Bot view needs from voice mode, implemented by the voice agent commands. */
 export interface VoiceViewController {
     phase(): VoicePhase;
-    mode(): 'omp' | 'pair';
     engines(): VoiceEngines;
     /** The voice agent when it is running; cards and usage that need it are empty otherwise. */
     agent(): VoiceAgent | undefined;
@@ -202,7 +201,6 @@ export class VoicePanel implements vscode.Disposable {
         const agent = this._controller.agent();
         const state: VoiceViewState = {
             phase: this._controller.phase(),
-            mode: this._controller.mode(),
             engines: this._controller.engines(),
             usage: live ? agent?.usage : undefined,
             session: session

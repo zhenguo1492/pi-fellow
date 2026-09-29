@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+import * as vscode from 'vscode';
 import { composePrompt } from '../pi/fileAttachments';
 import { canonicalizeSessionPath, invalidateSessionInfoPath } from '../pi/sessionCatalog';
 import { extractConversationMessageText } from '../shared/conversationTitle';
@@ -18,9 +20,10 @@ import { updateTabName } from './sidebarTabs';
 import { tabReady, type TabState } from './sidebarTabState';
 import { tabPermissionLevel } from './sidebarPermission';
 import { requestToolApproval } from './sidebarToolApproval';
+import { TUI_INTERRUPT, tuiPromptKeys, type TabTui, type TabTuis } from './sidebarTui';
 
-/** The TUI owns a tab's session file while it shows: the idle RPC worker must not write to it (design §5.12 rule 7). */
-const TUI_TAB_REFUSAL = 'This tab shows the CLI TUI: voice cannot control its worker. Ask the user to switch the tab back to the chat view.';
+/** pi's TUI queues a follow-up with Ctrl+Q instead of Alt+Enter where the terminal takes Alt+Enter. */
+const WINDOWS_KEYS = process.platform === 'win32' || !!process.env.WSL_DISTRO_NAME;
 
 /** The voice agent's task control of the tabs (docs/voice-agent-design.md §5.11), behind the provider's `WorkerController`. */
 export class SidebarWorker {
@@ -30,6 +33,8 @@ export class SidebarWorker {
         private readonly _host: SidebarHost,
         private readonly _queue: SidebarPromptQueue,
         private readonly _attachments: SidebarAttachments,
+        /** The TUIs of tabs in TUI mode: the voice agent types into them and reads their screens. */
+        private readonly _tuis: TabTuis,
     ) {}
 
     activeTask(): WorkerTask | undefined {
@@ -84,9 +89,6 @@ export class SidebarWorker {
 
     async send(tabId: string, text: string, options: WorkerSendOptions): Promise<WorkerSendOutcome> {
         const tab = this._workerTab(tabId);
-        if (tab.tuiMode) {
-            throw new Error(TUI_TAB_REFUSAL);
-        }
         const trimmed = text.trim();
         if (!trimmed) {
             throw new Error('Empty instruction');
@@ -97,6 +99,9 @@ export class SidebarWorker {
         }
         await tabReady(tab);
         const attachments = options.includeEditorContext ? this._attachments.editorContextAttachments(true) : [];
+        if (tab.tuiMode) {
+            return this._sendToTui(tab, composePrompt(trimmed, attachments).text, options);
+        }
 
         if (!this._queue.uiIsStreaming(tab)) {
             await this._queue.beginPrompt(tab, trimmed, attachments, true);
@@ -126,16 +131,33 @@ export class SidebarWorker {
         return 'steered';
     }
 
+    /**
+     * A TUI tab: the prompt is pasted into the TUI's editor and submitted, as the user would. The TUI owns
+     * the session file (design §5.12 rule 7), so the idle RPC worker is never used for it.
+     */
+    private async _sendToTui(tab: TabState, text: string, options: WorkerSendOptions): Promise<WorkerSendOutcome> {
+        const tui = this._runningTui(tab);
+        const busy = tab.tuiBusy;
+        const queue = busy && options.when === 'after';
+        await tui.typeWhenReady(tuiPromptKeys(text, tui.backend, queue, WINDOWS_KEYS));
+        tab.tuiPromptFromVoice = true;
+        return !busy ? 'started' : queue ? 'queued' : 'steered';
+    }
+
     async abort(tabId: string): Promise<void> {
         const tab = this._workerTab(tabId);
         if (tab.tuiMode) {
-            throw new Error(TUI_TAB_REFUSAL);
+            this._runningTui(tab).write(TUI_INTERRUPT);
+            return;
         }
         await this._queue.abortTab(tab);
     }
 
     status(tabId: string): WorkerStatus {
         const tab = this._workerTab(tabId);
+        if (tab.tuiMode) {
+            return { phase: tab.tuiBusy ? 'working' : 'idle', queued: 0, fromVoice: tab.tuiPromptFromVoice, tui: true };
+        }
         const queued = tab.queuedMessages.length;
         const busy = this._queue.uiIsStreaming(tab);
         const elapsedMs = busy && tab.agentStartTime ? Date.now() - tab.agentStartTime : undefined;
@@ -149,7 +171,17 @@ export class SidebarWorker {
     }
 
     pendingRequests(tabId: string): WorkerRequest[] {
-        return this._workerTab(tabId).session.rpcExtensionUi.pendingRequests();
+        const tab = this._workerTab(tabId);
+        // A TUI asks on its screen; the idle RPC worker behind it has nothing to ask.
+        return tab.tuiMode ? [] : tab.session.rpcExtensionUi.pendingRequests();
+    }
+
+    async readTuiScreen(tabId: string, pagesBack: number): Promise<string> {
+        return this._runningTui(this._workerTab(tabId)).screen().read(pagesBack);
+    }
+
+    async typeIntoTui(tabId: string, keys: string): Promise<string> {
+        return this._runningTui(this._workerTab(tabId)).screen().type(keys);
     }
 
     answer(tabId: string, requestId: string, answer: WorkerAnswer): boolean {
@@ -193,6 +225,23 @@ export class SidebarWorker {
         return requestToolApproval(this._host, this._workerTab(tabId), `voice-${++this._approvalSeq}`, toolName, args);
     }
 
+    lockedPaths(tabId: string, paths: string[]): string[] {
+        const tab = this._workerTab(tabId);
+        // A TUI does not load the permission gate: nothing is reported (HostToolRouter keeps its busy rule there).
+        if (tab.tuiMode || !this._queue.uiIsStreaming(tab)) {
+            return [];
+        }
+        const edits = tab.session.workerEdits();
+        if (!edits) {
+            return [];
+        }
+        // The voice agent's paths are relative to the first workspace folder, like its file tools'.
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? tab.session.session?.cwd ?? process.cwd();
+        return edits
+            .overlapping(paths.map((p) => path.resolve(root, p)))
+            .map((locked) => vscode.workspace.asRelativePath(locked, (vscode.workspace.workspaceFolders?.length ?? 0) > 1));
+    }
+
     /** Tabs are addressed by id; a closed tab, or one in the other backend's workspace, is gone. */
     private _workerTab(tabId: string): TabState {
         const tab = this._host.tabs.get(tabId);
@@ -200,5 +249,16 @@ export class SidebarWorker {
             throw new Error(`Worker tab ${tabId} is closed`);
         }
         return tab;
+    }
+
+    private _runningTui(tab: TabState): TabTui {
+        if (!tab.tuiMode) {
+            throw new Error('This tab shows the chat, not the CLI TUI.');
+        }
+        const tui = this._tuis.get(tab.id);
+        if (!tui || tui.exited) {
+            throw new Error('This tab is in TUI mode, but its TUI is not running: ask the user to show the tab so it starts again.');
+        }
+        return tui;
     }
 }

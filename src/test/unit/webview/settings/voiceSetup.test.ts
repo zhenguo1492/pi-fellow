@@ -2,13 +2,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SettingsData } from '../../../../shared/protocol';
 import { settingsState } from '../../../../webview/settings/state';
-import { switchSettingsTab } from '../../../../webview/settings/tabs';
+import { scrollToSettingsSection, switchSettingsTab } from '../../../../webview/settings/tabs';
 import { readSttForm, readTtsForm } from '../../../../webview/settings/voice';
 import { applyVoiceSaved, applyVoiceTestResult, bindVoiceSetup, buildVoiceTab, renderVoiceTab } from '../../../../webview/settings/voiceSetup';
 
 const posted = vi.hoisted((): Array<{ type: string } & Record<string, unknown>> => []);
+const webviewState = vi.hoisted((): { current: Record<string, unknown> | undefined } => ({ current: undefined }));
 vi.mock('../../../../webview/settings/api', () => ({
-    vscode: { postMessage: (message: { type: string }) => posted.push(message), getState: () => undefined, setState: () => {} },
+    vscode: {
+        postMessage: (message: { type: string }) => posted.push(message),
+        getState: () => webviewState.current,
+        setState: (state: Record<string, unknown>) => (webviewState.current = state),
+    },
 }));
 
 /** Local servers for both parts, as saved. */
@@ -18,7 +23,10 @@ const data = {
     voiceReadiness: { stt: { ok: true }, tts: { ok: true } },
     voiceApiKeys: { openai: false, groq: false },
     voiceSkills: [],
+    voiceExtraPrompt: '',
+    voiceDefaultPrompt: 'You are the voice agent.',
     voiceSpeakers: { user: { name: 'User', avatar: '' }, bot: { name: 'Bot', avatar: '' } },
+    voiceprint: { enabled: false, threshold: 0.5, shortSpeech: 'stricter', denoise: false },
 } as unknown as SettingsData;
 
 function showTab(changes: (d: SettingsData) => void = () => {}): void {
@@ -32,6 +40,7 @@ function showTab(changes: (d: SettingsData) => void = () => {}): void {
         voiceDirty: false,
         builtinVoice: undefined,
         activeTab: 'voice',
+        voiceSubtab: 'engine',
     });
     settingsState.voiceDrafts.clear();
     delete settingsState.voiceTestResults.stt;
@@ -251,5 +260,81 @@ describe('Voice tab setup cards', () => {
         click('[data-voice-setup-card="builtin"]');
         switchSettingsTab('general', false);
         expect(document.getElementById('toast')?.textContent).toContain('unsaved changes');
+    });
+});
+
+describe('Voice sub-tabs', () => {
+    beforeEach(() => showTab());
+
+    const tab = (id: string) => document.getElementById(`voice-subtab-${id}`)!;
+    const shownSubpanels = () => [...document.querySelectorAll<HTMLElement>('[data-voice-subpanel]')].filter((p) => !p.hidden).map((p) => p.dataset.voiceSubpanel);
+    const saveBarShown = () => !document.querySelector<HTMLElement>('.voice-save-bar')!.hidden;
+    const dots = () => ['engine', 'listening', 'agent'].filter((id) => !tab(id).querySelector<HTMLElement>('.voice-subtab-dot')!.hidden);
+    const press = (key: string) => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+
+    it('shows one panel at a time; arrows, Home and End move the selection and focus; Save shows only where drafts live', () => {
+        expect([shownSubpanels(), saveBarShown()]).toEqual([['engine'], true]);
+        tab('engine').focus();
+        press('ArrowRight');
+        expect([shownSubpanels(), saveBarShown(), document.activeElement?.id]).toEqual([['listening'], true, 'voice-subtab-listening']);
+        expect([tab('listening').getAttribute('aria-selected'), tab('listening').tabIndex, tab('engine').tabIndex]).toEqual(['true', 0, -1]);
+        press('ArrowRight');
+        expect([shownSubpanels(), saveBarShown()]).toEqual([['agent'], false]);
+        press('ArrowRight');
+        expect(shownSubpanels()).toEqual(['engine']);
+        press('ArrowLeft');
+        expect([shownSubpanels(), document.activeElement?.id]).toEqual([['agent'], 'voice-subtab-agent']);
+        press('Home');
+        expect(shownSubpanels()).toEqual(['engine']);
+        press('End');
+        expect(shownSubpanels()).toEqual(['agent']);
+    });
+
+    it('keeps the chosen sub-tab across a rebuild, and hidden panels keep working', () => {
+        tab('agent').click();
+        expect(webviewState.current?.voiceSubtab).toBe('agent');
+        document.body.replaceChildren(buildVoiceTab(settingsState.currentSettings!));
+        bindVoiceSetup();
+        renderVoiceTab();
+        expect([shownSubpanels(), tab('agent').getAttribute('aria-selected')]).toEqual([['agent'], 'true']);
+
+        // The setup cards are hidden but bound: a click still drafts, and the dot says so.
+        click('[data-voice-setup-card="builtin"]');
+        expect([saveState(), dots()]).toEqual(['Unsaved changes', ['engine']]);
+    });
+
+    it('puts the unsaved dot on the sub-tab whose fields have drafts', () => {
+        const speed = document.getElementById('setting-voiceAgent.tts.speed') as HTMLInputElement;
+        speed.value = '1.5';
+        speed.dispatchEvent(new Event('input'));
+        expect([saveState(), dots()]).toEqual(['Unsaved changes', ['listening']]);
+
+        click('[data-voice-setup-card="builtin"]');
+        expect(dots()).toEqual(['engine', 'listening']);
+
+        speed.value = '1';
+        speed.dispatchEvent(new Event('input'));
+        expect(dots()).toEqual(['engine']);
+
+        click('[data-voice-discard]');
+        expect(dots()).toEqual([]);
+    });
+
+    it('a deep link to a section opens the sub-tab that holds it', () => {
+        vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+            cb(0);
+            return 0;
+        });
+        Element.prototype.scrollIntoView = vi.fn();
+        const opens = (section: string) => {
+            scrollToSettingsSection(section);
+            return shownSubpanels()[0];
+        };
+        expect(opens('voiceprint')).toBe('listening');
+        expect(opens('voice-agent')).toBe('agent');
+        expect(opens('voice')).toBe('engine');
+        expect(opens('voice-listening')).toBe('listening');
+        expect(opens('tts')).toBe('engine');
+        expect(document.getElementById('section-tts')!.classList.contains('section-highlight')).toBe(true);
     });
 });

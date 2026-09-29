@@ -5,7 +5,7 @@ import { bindFileMentionMenu } from '../fileMentionMenu';
 import { bindModelPicker } from '../modelPicker';
 import { modelStatusEl } from '../modelStatus';
 import { onAppShellRebuilt, requestSessionPanelToggle } from '../sessionPanel';
-import { getTuiHost } from '../tuiView';
+import { focusTui, getTuiHost } from '../tuiView';
 import { bindVoiceBar, voiceBarHtml } from '../voiceBar';
 import { vscode } from '../vscodeApi';
 import { el } from './helpers';
@@ -206,7 +206,7 @@ export function render(): void {
     // Bind stable event listeners (these elements persist for the lifetime of the skeleton)
     bindStableEvents();
     initTabLayoutObserver();
-    initExtensionUiHost();
+    initExtensionUiHost({ focusTui });
     bindScrollListener();
     scrollBtn.addEventListener('click', () => {
         resetUserScroll();

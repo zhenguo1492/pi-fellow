@@ -1,5 +1,5 @@
 /**
- * Pure helpers for pair mode (docs/voice-pair-agent-cursor.md §11-§13): where an edit goes in a file,
+ * Pure helpers for the voice agent's own work (docs/voice-pair-agent-cursor.md §11-§13): where an edit goes in a file,
  * what of a terminal command's raw output the voice agent gets back, which output it asked for, and
  * whether a path stays inside a folder. No I/O.
  */

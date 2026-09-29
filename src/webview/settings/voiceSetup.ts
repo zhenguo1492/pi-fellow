@@ -1,7 +1,9 @@
 /**
- * The Voice tab: three cards (Built-in, Cloud service, My own server) that map onto the existing voice
- * settings, the details each needs, and an explicit Save with an unsaved-changes indicator. Fields are
- * drafts (kept across re-renders) until Save; Test and Dry run try them unsaved.
+ * The Voice tab, in sub-tabs (`voiceTabs.ts`). Voice engine: three cards (Built-in, Cloud service, My
+ * own server) that map onto the existing voice settings and the details each needs. Listening and
+ * speaking: language, speed, trying it out, the voiceprint. Voice agent: names, skills, sentence actions, instructions.
+ * Draft fields have an explicit Save with an unsaved-changes indicator (and a dot on the sub-tab that
+ * holds them); they are kept across re-renders until Save, and Test and Dry run try them unsaved.
  */
 import { escapeHtml } from '../../shared/html';
 import type { SettingsClientMessage, SettingsData, SettingsServerMessage, VoiceSettings } from '../../shared/protocol';
@@ -12,6 +14,9 @@ import { vscode } from './api';
 import { buildNumberInput, buildSection, buildSelect, buildTextInput, el, showToast } from './dom';
 import { settingsState, type VoiceSetup } from './state';
 import { buildTabPanel } from './tabs';
+import { bindVoiceprint, buildVoiceprintSection, renderVoiceprint } from './voiceprint';
+import { bindVoicePrompt, buildVoicePromptSection } from './voicePrompt';
+import { buildVoiceSubtabs, markVoiceSubtabUnsaved, voiceSubtabOf } from './voiceTabs';
 import {
     bindVoiceSkills,
     buildDraftSection,
@@ -331,6 +336,31 @@ function renderSaveBar(): void {
         settingsState.voiceDirty = dirty;
         vscode.postMessage({ type: 'voiceDirty', dirty });
     }
+    renderUnsavedSubtabs(dirty);
+}
+
+/**
+ * A dot on each sub-tab holding a draft that differs from what is saved. Whatever `dirty` does not pin
+ * on a field (a pasted key, a value only the form's clamping tells apart) goes on the Voice engine.
+ */
+function renderUnsavedSubtabs(dirty: boolean): void {
+    const data = settingsState.currentSettings;
+    const unsaved = { engine: false, listening: false, agent: false };
+    if (dirty && data) {
+        document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-draft] [data-key]').forEach((field) => {
+            const saved = savedVoiceValue(data, field.dataset.key ?? '');
+            const subtab = voiceSubtabOf(field);
+            if (!subtab || saved === undefined || !settingsState.voiceDrafts.has(field.id)) {
+                return;
+            }
+            const shown = typeof saved === 'number' ? Number(field.value) === saved : field.value.trim() === saved;
+            unsaved[subtab] ||= !shown;
+        });
+        unsaved.engine ||= !unsaved.listening || SERVICES.some((service) => typedApiKey(service) !== undefined);
+    }
+    markVoiceSubtabUnsaved('engine', unsaved.engine);
+    markVoiceSubtabUnsaved('listening', unsaved.listening);
+    markVoiceSubtabUnsaved('agent', unsaved.agent);
 }
 
 /** Everything on the Voice tab that follows the form: cards, panels, section status lines, the save bar. */
@@ -347,6 +377,7 @@ export function renderVoiceTab(): void {
     renderBuiltinPanel(setup === 'builtin');
     renderCloudPanel();
     SERVICES.forEach(renderVoiceStatus);
+    renderVoiceprint();
     renderSaveBar();
 }
 
@@ -561,18 +592,22 @@ function buildSaveBar(): HTMLElement {
 }
 
 export function buildVoiceTab(data: SettingsData): HTMLElement {
-    return buildTabPanel('voice', [
-        buildVoiceHelp(),
-        buildSection('Set up voice', [buildSetupCards(), buildBuiltinPanel(), buildCloudPanel()], 'voice'),
-        buildOwnServerPanel(data),
-        buildListeningSection(data),
-        buildSection(
-            'Voice agent',
-            [buildSpeakersRow(data.voiceSpeakers), buildVoiceSkillsRow(), buildSentenceActionsRow(data.voiceMessageButtons, data.voiceTranslateTo)],
-            'voice-agent',
-        ),
-        buildSaveBar(),
-    ]);
+    return buildTabPanel('voice', buildVoiceSubtabs({
+        engine: [
+            buildVoiceHelp(),
+            buildSection('Set up voice', [buildSetupCards(), buildBuiltinPanel(), buildCloudPanel()], 'voice'),
+            buildOwnServerPanel(data),
+        ],
+        listening: [buildListeningSection(data), buildVoiceprintSection(data)],
+        agent: [
+            buildSection(
+                'Voice agent',
+                [buildSpeakersRow(data.voiceSpeakers), buildVoiceSkillsRow(), buildSentenceActionsRow(data.voiceMessageButtons, data.voiceTranslateTo)],
+                'voice-agent',
+            ),
+            buildVoicePromptSection(data.voiceExtraPrompt),
+        ],
+    }, buildSaveBar()));
 }
 
 // ── Events ──
@@ -667,4 +702,6 @@ export function bindVoiceSetup(): void {
     });
 
     bindVoiceSkills();
+    bindVoicePrompt();
+    bindVoiceprint();
 }

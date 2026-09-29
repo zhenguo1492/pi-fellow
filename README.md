@@ -65,7 +65,7 @@ Start voice mode with the robot button above the chat input, or run **Voice Agen
   - **Hush** stops the current reply, and **Mute** pauses the mic.
   - It answers in the language you last used, and reads mixed Chinese and English.
 - **Pi points at the code.** Pi's focus is highlighted in the editor, in purple while it talks about code, blue while it reads and green while it writes. With **Follow** on, the editor scrolls to that code without moving your cursor. Typing in the editor stops following.
-- **Pair mode (default): Pi works in your editor.**
+- **Pi works in your editor.**
   - It types edits line by line at its highlight, and a single Ctrl+Z undoes each edit.
   - It creates, renames, deletes (after asking you), saves and closes files.
   - It runs commands in a visible **Pi** terminal.
@@ -74,10 +74,11 @@ Start voice mode with the robot button above the chat input, or run **Voice Agen
   - It opens files in the right viewer, such as the Markdown preview or draw.io.
 
   Your chat permission mode still applies to everything it does.
-- **Delegate mode: Pi manages the chat agent.**
+- **Pi hands heavy jobs to the chat agent.** Small changes it makes itself; a job that spans many files or needs a long run goes to the chat agent.
   - It works out a task with you, and once you agree, sends it to the chat agent.
   - While the agent works, it can steer or queue follow-ups, answer the agent's questions, or stop it.
   - It speaks up when the agent needs you, fails or finishes. Set how often under `voiceAgent.narration`.
+  - It keeps off the files the chat agent is changing until the agent's task ends.
 - **Background research.** Pi can start up to three read-only research jobs and tells you what they found.
 - **Bot view.** Toggle a chat tab to the Bot view. It shows the voice conversation, plan and approval cards, and the speech engines and token use. Past voice conversations are kept per workspace and auto-titled.
 - **No microphone?** Run **Voice Agent — Type a Message** to talk to it by text.
@@ -126,6 +127,7 @@ Audio is captured in two ways:
 | `oh-my-pi-chater.voiceAgent.narration` | `important` | When Pi speaks up on its own: `off`, `important`, `all` |
 | `oh-my-pi-chater.voiceAgent.minProactiveGapSecs` | `8` | Quiet seconds before unprompted announcements |
 | `oh-my-pi-chater.voiceAgent.narrationIntervalSecs` | `30` | Progress update interval with narration `all` |
+| `oh-my-pi-chater.voiceAgent.humor` | `occasional` | Mood and jokes: `off`, `occasional`, `often`; the dice are rolled per turn |
 | `oh-my-pi-chater.voiceAgent.turnStopSecs` | `1.2` | Silence that ends your turn |
 | `oh-my-pi-chater.voiceAgent.tts.provider` | `openai` | `chatterbox`, `kokoro` or `openai` |
 | `oh-my-pi-chater.voiceAgent.tts.url` | empty | OpenAI-compatible TTS base URL |

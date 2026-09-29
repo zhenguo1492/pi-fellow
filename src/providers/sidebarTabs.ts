@@ -233,7 +233,7 @@ export class SidebarTabs {
             tab.pendingAttachments = pendingAttachments;
             await this._voiceSessions.adoptTitle(tab);
             // Only talked to the voice agent: open on that conversation; any worker message keeps the worker's.
-            // A tab showing its TUI has no Bot view.
+            // A tab restored into its TUI shows the terminal first.
             tab.botView =
                 !tab.tuiMode &&
                 tab.session.messages.length === 0 &&

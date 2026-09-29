@@ -113,7 +113,8 @@ body {
     background: var(--bg);
 }
 
-.settings-tab-btn {
+.settings-tab-btn,
+.voice-subtab-btn {
     padding: 5px 12px;
     border-radius: 6px;
     border: 1px solid transparent;
@@ -126,16 +127,24 @@ body {
     white-space: nowrap;
 }
 
-.settings-tab-btn:hover {
+.settings-tab-btn:hover,
+.voice-subtab-btn:hover {
     color: var(--fg);
     background: rgba(255, 255, 255, 0.05);
 }
 
-.settings-tab-btn.active {
+.settings-tab-btn.active,
+.voice-subtab-btn.active {
     color: var(--fg);
     background: var(--card-bg);
     border-color: var(--border);
     font-weight: 500;
+}
+
+.settings-tab-btn:focus-visible,
+.voice-subtab-btn:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 1px;
 }
 
 .settings-tab-panels {
@@ -379,7 +388,26 @@ body {
     margin-bottom: 8px;
 }
 
-/* Save for the whole Voice tab, always in view at the bottom. */
+/* The Voice tab's sub-tabs: like the settings tabs, one level down. */
+.voice-subtabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+.voice-subtab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.voice-subtab-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--warning-fg);
+}
+
+/* Save for the Voice tab's draft fields, in view at the bottom of the sub-tabs that hold them. */
 .voice-save-bar {
     position: sticky;
     bottom: 0;
@@ -558,6 +586,46 @@ body {
     display: none;
 }
 
+/* Voiceprint dialogs: the sentences to read, and the test's results (newest first). */
+.voiceprint-list {
+    margin: 0 0 4px;
+    padding-left: 22px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.voiceprint-list li {
+    margin: 4px 0;
+}
+.voiceprint-prompts li[data-state='pending'] {
+    color: var(--muted);
+}
+.voiceprint-prompts li[data-state='current'] {
+    font-weight: 600;
+}
+.voiceprint-prompts li[data-state='done'] {
+    color: var(--success-fg);
+}
+.voiceprint-results {
+    min-height: 48px;
+    max-height: 200px;
+    overflow: auto;
+    padding: 8px 12px 8px 26px;
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    background: var(--input-bg);
+}
+.voiceprint-results[data-empty='true']::before {
+    content: 'Each utterance shows here.';
+    color: var(--muted);
+    font-size: 12px;
+}
+.voiceprint-results li[data-accepted='true'] {
+    color: var(--success-fg);
+}
+.voiceprint-results li[data-accepted='false'] {
+    color: var(--error-fg);
+}
+
 /* Voice agent skills: a dropdown of checkboxes, the chosen ones as chips under it. */
 .voice-skills-picker {
     position: relative;
@@ -668,6 +736,11 @@ body {
     color: var(--muted);
     text-decoration: line-through;
 }
+/* Always loaded: no remove button, so the padding is even. */
+.voice-skill-chip.builtin {
+    padding-right: 8px;
+    opacity: 0.85;
+}
 .voice-skill-remove {
     border: none;
     background: transparent;
@@ -689,34 +762,181 @@ body {
     display: none;
 }
 
-/* Names and avatars: the avatar as the Bot view draws it (32px, tinted like its User green / Bot blue), then the fields. */
-.voice-speaker {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    margin-bottom: 12px;
+/* Voice agent instructions: the extra prompt (Markdown in View, a textarea in Edit) and the built-in prompt, read-only. */
+.voice-extra-prompt-input {
+    display: block;
+    min-height: 120px;
+    resize: vertical;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
 }
-.voice-speaker-avatar {
+.voice-extra-prompt-empty {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    font-style: italic;
+}
+.voice-default-prompt-details > summary {
+    cursor: pointer;
+    color: var(--fg);
+    font-size: 13px;
+    font-weight: 500;
+}
+.voice-default-prompt-details > summary:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 2px;
+}
+.voice-default-prompt-details[open] > .voice-prompt-markdown {
+    margin-top: 8px;
+    max-height: 480px;
+    overflow-y: auto;
+}
+.voice-prompt-markdown {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--card-bg);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+.voice-prompt-markdown > :first-child { margin-top: 0; }
+.voice-prompt-markdown > :last-child { margin-bottom: 0; }
+.voice-prompt-markdown p { margin: 6px 0; }
+.voice-prompt-markdown h1, .voice-prompt-markdown h2, .voice-prompt-markdown h3,
+.voice-prompt-markdown h4, .voice-prompt-markdown h5, .voice-prompt-markdown h6 {
+    margin: 12px 0 4px;
+    font-size: 1.05em;
+    font-weight: 600;
+}
+.voice-prompt-markdown ul, .voice-prompt-markdown ol {
+    margin: 4px 0;
+    padding-left: 18px;
+}
+.voice-prompt-markdown li { margin: 2px 0; }
+.voice-prompt-markdown blockquote {
+    margin: 8px 0;
+    padding-left: 12px;
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+}
+.voice-prompt-markdown a { color: var(--link); }
+.voice-prompt-markdown code:not(.code-block-code) {
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+    font-family: var(--font-mono);
+    font-size: 0.95em;
+}
+.voice-prompt-markdown .code-block-wrapper {
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.voice-prompt-markdown .code-block-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 8px;
+    background: var(--vscode-editorGroupHeader-tabsBackground, rgba(128, 128, 128, 0.1));
+    color: var(--muted);
+    font-size: 11px;
+}
+.voice-prompt-markdown .copy-btn {
+    margin-left: auto;
+    padding: 1px 6px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: none;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+}
+.voice-prompt-markdown .copy-btn:hover {
+    color: var(--fg);
+    background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.08));
+}
+.voice-prompt-markdown .code-block-pre {
+    margin: 0;
+    padding: 8px 10px;
+    overflow-x: auto;
+    background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+}
+.voice-prompt-markdown .code-block-code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    white-space: pre;
+}
+
+/* Names and avatars: the avatar as the Bot view draws it (32px, tinted like its User green / Bot blue) beside the name; clicking it opens the picker under it. */
+.voice-speaker {
     --av: var(--vscode-charts-green, #89d185);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+.voice-speaker--bot {
+    --av: var(--vscode-charts-blue, #3794ff);
+}
+.voice-speaker-who {
+    font-size: 12px;
+    color: var(--muted);
+}
+.voice-speaker-line {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.voice-speaker-name {
+    max-width: 260px;
+}
+.voice-speaker-error {
+    margin-top: 0;
+    color: var(--error-fg);
+}
+/* The avatar and the picker's tiles: the avatar box as the Bot view draws it. */
+.voice-speaker-avatar,
+.voice-avatar-preset {
     flex-shrink: 0;
-    width: 32px;
-    height: 32px;
-    margin-top: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
     border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    font: inherit;
     color: var(--av);
     background: color-mix(in srgb, var(--av) 20%, transparent);
 }
-.voice-speaker-avatar--bot {
-    --av: var(--vscode-charts-blue, #3794ff);
+.voice-speaker-avatar:hover,
+.voice-speaker-avatar[aria-expanded='true'],
+.voice-avatar-preset:hover {
+    border-color: var(--muted);
 }
-.voice-speaker-avatar svg {
+.voice-speaker-avatar:focus-visible,
+.voice-avatar-preset:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 1px;
+}
+.voice-speaker-avatar svg,
+.voice-avatar-preset svg {
     width: 20px;
     height: 20px;
 }
-.voice-speaker-avatar .av-img {
+.voice-speaker-avatar img,
+.voice-avatar-preset img {
+    display: block;
     width: 100%;
     height: 100%;
     border-radius: inherit;
@@ -728,59 +948,36 @@ body {
     line-height: 1;
     white-space: nowrap;
 }
-.voice-speaker-fields {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-.voice-speaker-who {
-    font-size: 12px;
-    color: var(--muted);
-}
-.voice-speaker-name {
-    max-width: 260px;
-}
-.voice-speaker-error {
-    margin-top: 0;
-    color: var(--error-fg);
-}
-/* Pixel-art presets: the avatar box as the Bot view draws it, the chosen one ringed. */
-.voice-avatar-presets {
-    --av: var(--vscode-charts-green, #89d185);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-.voice-avatar-presets--bot {
-    --av: var(--vscode-charts-blue, #3794ff);
-}
-.voice-avatar-preset {
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    overflow: hidden;
-    cursor: pointer;
-    background: color-mix(in srgb, var(--av) 20%, transparent);
-}
-.voice-avatar-preset img {
-    display: block;
-    width: 100%;
-    height: 100%;
-}
-.voice-avatar-preset:hover {
-    border-color: var(--muted);
-}
-.voice-avatar-preset:focus-visible {
-    outline: 1px solid var(--focus-border);
-    outline-offset: 1px;
-}
 .voice-avatar-preset[aria-pressed='true'] {
     border-color: var(--focus-border);
     box-shadow: 0 0 0 1px var(--focus-border);
+}
+/* Upload: not an avatar, so no tint; a dashed box like a drop target. */
+.voice-avatar-upload {
+    color: var(--muted);
+    background: transparent;
+    border: 1px dashed var(--muted);
+}
+.voice-avatar-upload:hover {
+    color: var(--fg);
+    border-color: var(--fg);
+}
+.voice-avatar-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 10;
+    display: grid;
+    grid-template-columns: repeat(5, 32px);
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.voice-avatar-menu[hidden] {
+    display: none;
 }
 
 .setting-select {
@@ -799,7 +996,8 @@ body {
     border-color: var(--focus-border);
 }
 
-.setting-range {
+.setting-range,
+.voiceprint-threshold {
     width: 100%;
     -webkit-appearance: none;
     appearance: none;
@@ -809,7 +1007,8 @@ body {
     outline: none;
     cursor: pointer;
 }
-.setting-range::-webkit-slider-thumb {
+.setting-range::-webkit-slider-thumb,
+.voiceprint-threshold::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: 16px;
     height: 16px;

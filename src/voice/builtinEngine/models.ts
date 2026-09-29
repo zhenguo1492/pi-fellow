@@ -36,8 +36,38 @@ export const TTS_VOICE = {
     extra: (file: string) => file.startsWith('espeak-ng-data/') && (!file.endsWith('_dict') || file === 'espeak-ng-data/en_dict'),
 } as const satisfies ModelSpec;
 
+/**
+ * 3D-Speaker CAM++ speaker embeddings (192 values), trained on Chinese and English speech: the
+ * voiceprint. Measured on sherpa-onnx's test recordings it separates speakers far better than the
+ * English-only CAM++ and ResNet34 exports of the same repo.
+ */
+export const SPEAKER_MODEL = {
+    id: 'campplus-zh-en-advanced',
+    repo: 'csukuangfj/speaker-embedding-models',
+    revision: '0743f301363dec56491a490f6d6cbc9d67f9a3bf',
+    required: ['3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx'],
+} as const satisfies ModelSpec;
+
+/** GTCRN speech enhancement (16 kHz), for noise reduction before speech-to-text and the voiceprint check. */
+export const DENOISE_MODEL = {
+    id: 'gtcrn-simple',
+    repo: 'csukuangfj/speech-enhancement-models',
+    revision: 'ccf4b25730940483dbb210d7d251d56e1531d0b4',
+    required: ['gtcrn_simple.onnx'],
+} as const satisfies ModelSpec;
+
 /** The model id the server lists and `/audio/speech` requests name (see resolveTtsConfig). */
 export const TTS_MODEL_ID = 'piper';
+
+/** What the engine can run; each needs its models loaded (a server loads only those it is started with). */
+export type EngineFeature = 'stt' | 'tts' | 'speaker' | 'denoise';
+
+export const FEATURE_MODELS: Record<EngineFeature, ModelSpec> = {
+    stt: STT_MODEL,
+    tts: TTS_VOICE,
+    speaker: SPEAKER_MODEL,
+    denoise: DENOISE_MODEL,
+};
 
 const DOWNLOAD_CONCURRENCY = 6;
 

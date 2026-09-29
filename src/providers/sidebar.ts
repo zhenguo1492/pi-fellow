@@ -159,11 +159,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         onVoiceReadinessChange(() => {
             this.sendStateSync();
         });
-        this._tui = new SidebarTuiMode(this._host);
+        this._tui = new SidebarTuiMode(this._host, (tabId, event) => this._tabEvent.fire({ tabId, event }));
         this._attachments = new SidebarAttachments(this._host, pastedStorageDir);
         this._voiceSessions = new SidebarVoiceSessions(outputChannel);
         this._queue = new SidebarPromptQueue(this._host, this._attachments);
-        this._worker = new SidebarWorker(this._host, this._queue, this._attachments);
+        this._worker = new SidebarWorker(this._host, this._queue, this._attachments, this._tui.tuis);
         this._tabs = new SidebarTabs(
             this._host,
             backends,
@@ -185,7 +185,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._handlers = {
             ...this._queue.handlers(),
             ...this._attachments.handlers(),
-            ...conversationHandlers(this._host, planDocument),
+            ...conversationHandlers(this._host, planDocument, this._tui.dialogs),
             ...this._sessionPanel.handlers(),
             ...this._tui.handlers(),
             ...toolApprovalHandlers(this._host),
@@ -407,6 +407,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
 
     requestToolApproval(tabId: string, toolName: string, args: Record<string, unknown>): Promise<boolean> {
         return this._worker.requestToolApproval(tabId, toolName, args);
+    }
+
+    lockedPaths(tabId: string, paths: string[]): string[] {
+        return this._worker.lockedPaths(tabId, paths);
+    }
+
+    readTuiScreen(tabId: string, pagesBack: number): Promise<string> {
+        return this._worker.readTuiScreen(tabId, pagesBack);
+    }
+
+    typeIntoTui(tabId: string, keys: string): Promise<string> {
+        return this._worker.typeIntoTui(tabId, keys);
     }
 
     /** Pull latest messages/model from Pi RPC, then push to webview (avoids stale/laggy chat). */

@@ -13,7 +13,7 @@ import { setStreamPhase, updateStreamingUI } from './streaming';
 import { updateQueuedMessageBanner } from './queuedBanner';
 import { updateAttachmentsStrip } from './composerChips';
 import { clearComposerEdit, getComposerEdit, restoreComposerDraft, stashComposerDraft, updateInputArea } from './composer';
-import { updateTabs } from './tabs';
+import { tabView, updateTabs } from './tabs';
 import { updateModeSwitch, updatePlanPanel } from './plan';
 import { updateEffortControl, updatePermissionControl } from './permission';
 import { syncToolApprovalCards } from './toolApproval';
@@ -78,8 +78,10 @@ export function applyStateSync(s: SerializedAgentState): void {
     applyVoiceMicStatus(s.voice);
     applyVoiceBarStatus(s.voice);
     // The composer talks to what the tab shows and is locked in the Bot view while voice is off.
-    const botView = !state.tuiMode && state.tabs.some((t) => t.isActive && t.botView);
-    setBotViewShown(botView);
+    // The Bot view may cover a TUI tab's terminal: the TUI keeps running and the composer is back.
+    const view = tabView(state.tabs.find((t) => t.isActive));
+    const botView = view === 'bot';
+    setBotViewShown(botView, state.tuiMode);
 
     if (tabSwitched || !isSkeletonBuilt()) {
         render();
@@ -122,6 +124,6 @@ export function applyStateSync(s: SerializedAgentState): void {
     setPickerCurrentModel(state.model);
     updateEffortControl();
     updateTuiToggle();
-    syncTuiView(state.tabs.filter((t) => t.tuiMode).map((t) => t.id), state.activeTabId);
+    syncTuiView(state.tabs.filter((t) => t.tuiMode).map((t) => t.id), state.activeTabId, view === 'terminal');
     document.getElementById('app')?.classList.toggle('bot-mode', botView);
 }

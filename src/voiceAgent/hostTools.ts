@@ -6,6 +6,65 @@ import type { ResearchJob } from './research';
 import { formatViewers, type FileViewers, type Viewer } from './viewers';
 import { clip, formatDigest, type WorkerDigest } from './workerDigest';
 
+/** Keys terminal_send can press by name: what a terminal gets for each. */
+const TERMINAL_KEYS: Record<string, string> = {
+    up: '\x1b[A',
+    down: '\x1b[B',
+    right: '\x1b[C',
+    left: '\x1b[D',
+    tab: '\t',
+    space: ' ',
+    enter: '\r',
+    escape: '\x1b',
+    esc: '\x1b',
+    backspace: '\x7f',
+    delete: '\x1b[3~',
+    home: '\x1b[H',
+    end: '\x1b[F',
+    pageup: '\x1b[5~',
+    pagedown: '\x1b[6~',
+};
+
+/** Names terminal_send's description offers; any ctrl-<letter> works too. */
+const TERMINAL_KEY_NAMES = `${Object.keys(TERMINAL_KEYS).join(', ')}, and ctrl-a to ctrl-z (e.g. ctrl-c)`;
+
+/** How far back worker_status and terminal_read look at most, in screens. */
+const MAX_PAGES_BACK = 20;
+
+/** A pagesBack argument in whole screens, within 0..MAX_PAGES_BACK. */
+function pagesBack(value: unknown): number {
+    return typeof value === 'number' ? Math.min(Math.max(Math.round(value), 0), MAX_PAGES_BACK) : 0;
+}
+
+/** One key name as the characters a terminal gets for it; ctrl-<letter> (or ctrl+<letter>) is that control character. */
+function terminalKey(name: string): string | undefined {
+    const key = name.trim().toLowerCase().replace(/\s*\+\s*/g, '-');
+    const ctrl = /^(?:ctrl|control)-([a-z])$/.exec(key);
+    if (ctrl) {
+        return String.fromCharCode(ctrl[1].charCodeAt(0) - 96);
+    }
+    return Object.hasOwn(TERMINAL_KEYS, key) ? TERMINAL_KEYS[key] : undefined;
+}
+
+/** terminal_send's keys, as the characters to send; unknown names are refused rather than guessed. */
+export function terminalKeys(keys: unknown): string {
+    if (keys === undefined) {
+        return '';
+    }
+    if (!Array.isArray(keys)) {
+        throw new Error('keys must be a list of key names.');
+    }
+    return keys
+        .map((key) => {
+            const sequence = typeof key === 'string' ? terminalKey(key) : undefined;
+            if (sequence === undefined) {
+                throw new Error(`Unknown key ${JSON.stringify(key)}: use ${TERMINAL_KEY_NAMES}.`);
+            }
+            return sequence;
+        })
+        .join('');
+}
+
 /** A new task held back until the user agrees (design §6, two-phase confirmation). */
 export interface Proposal {
     id: string;
@@ -68,7 +127,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'tell_worker',
         label: 'Tell worker',
         description:
-            "Send an instruction to the worker, the coding agent on the user's current task. Routed on the worker's state when it runs: idle starts a new task (a task that changes files may return a proposal that needs the user's go-ahead); working with when=now steers the running task; working with when=after queues it to run once the current task finishes.",
+            "Send an instruction to the worker, the coding agent on the user's current task. Routed on the worker's state when it runs: idle starts a new task (a task that changes files may return a proposal that needs the user's go-ahead); working with when=now steers the running task; working with when=after queues it to run once the current task finishes. In a tab showing the CLI's TUI (<worker tui=\"true\">) it is typed into the TUI's editor and submitted, as the user would.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -107,7 +166,8 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
     {
         name: 'stop_worker',
         label: 'Stop worker',
-        description: 'Stop what the worker is doing. Use when the user tells it to stop.',
+        description:
+            "Stop what the worker is doing. Use when the user tells it to stop. In a TUI tab it presses Escape, the TUI's interrupt; a run stopped on a question counts as idle there: to dismiss the question, press escape with answer_worker.",
         parameters: { ...OBJECT, properties: {} },
         loadMode: 'essential',
     },
@@ -115,16 +175,20 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'answer_worker',
         label: 'Answer worker',
         description:
-            "Answer a <worker-request> with the user's own answer. select: value is one of the options. confirm: confirmed. input/editor: value. cancel: true dismisses the request.",
+            "Answer a <worker-request> with the user's own answer. select: value is one of the options. confirm: confirmed. input/editor: value. cancel: true dismisses the request. In a TUI tab (<worker tui=\"true\">) there are no requests: the question is on its screen; type the user's answer into the TUI as value (text) and/or keys (e.g. [\"down\", \"enter\"] to pick the second option), without requestId, and get its screen back.",
         parameters: {
             ...OBJECT,
             properties: {
-                requestId: { type: 'string' },
-                value: { type: 'string' },
+                requestId: { type: 'string', description: 'The <worker-request> id; not in a TUI tab.' },
+                value: { type: 'string', description: 'The answer; in a TUI tab, text typed as it is.' },
                 confirmed: { type: 'boolean' },
                 cancel: { type: 'boolean' },
+                keys: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: `TUI tab only: keys pressed after value, in order: ${TERMINAL_KEY_NAMES}.`,
+                },
             },
-            required: ['requestId'],
         },
         loadMode: 'essential',
     },
@@ -132,8 +196,18 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'worker_status',
         label: 'Worker status',
         description:
-            "The worker's state, what it is waiting on, its recent activity log, and the task's last instructions with their results.",
-        parameters: { ...OBJECT, properties: {} },
+            "The worker's state, what it is waiting on, its recent activity log, and the task's last instructions with their results. In a TUI tab, its state and the TUI's screen as text instead (or that nothing changed since you last read it).",
+        parameters: {
+            ...OBJECT,
+            properties: {
+                pagesBack: {
+                    type: 'integer',
+                    minimum: 0,
+                    maximum: MAX_PAGES_BACK,
+                    description: 'TUI tab only: how many screens further up to read, when the screen does not show enough; default 0, the screen itself.',
+                },
+            },
+        },
         loadMode: 'essential',
     },
     {
@@ -178,7 +252,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'list_viewers',
         label: 'List viewers',
         description:
-            "List the ways the user's VS Code can show a file besides plain text: editors for its file type from the installed extensions (e.g. the draw.io editor for .drawio, VS Code's image preview) and VS Code's built-in preview commands (e.g. the Markdown preview, which also draws the Mermaid diagrams in a .md file). Call it before open_with whenever the user asks to see, preview or view a diagram or rendered file; open_with only takes a viewer id from this list. Changes nothing; works in both modes.",
+            "List the ways the user's VS Code can show a file besides plain text: editors for its file type from the installed extensions (e.g. the draw.io editor for .drawio, VS Code's image preview) and VS Code's built-in preview commands (e.g. the Markdown preview, which also draws the Mermaid diagrams in a .md file). Call it before open_with whenever the user asks to see, preview or view a diagram or rendered file; open_with only takes a viewer id from this list. Changes nothing.",
         parameters: { ...OBJECT, properties: { path: { type: 'string', description: 'Workspace-relative path.' } }, required: ['path'] },
         loadMode: 'essential',
     },
@@ -186,7 +260,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'open_with',
         label: 'Open with',
         description:
-            "Show a file in the user's editor with one of the viewers list_viewers returned for it: an editor opens the file in it, a command opens the file and runs it. For a diagram file such as .drawio, use its editor. For Mermaid, show the Markdown file that holds it with markdown.showPreviewToSide, so the user edits on one side and watches it render on the other. Only ids from list_viewers for this same file are accepted: call list_viewers first. Gives up waiting after 8 seconds. Changes no files; works in both modes.",
+            "Show a file in the user's editor with one of the viewers list_viewers returned for it: an editor opens the file in it, a command opens the file and runs it. For a diagram file such as .drawio, use its editor. For Mermaid, show the Markdown file that holds it with markdown.showPreviewToSide, so the user edits on one side and watches it render on the other. Only ids from list_viewers for this same file are accepted: call list_viewers first. Gives up waiting after 8 seconds. Changes no files.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -199,25 +273,10 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         loadMode: 'essential',
     },
     {
-        name: 'set_mode',
-        label: 'Set mode',
-        description:
-            'Switch between omp mode (you direct the worker) and pair mode (you edit files and run commands yourself, like a human partner, and do not direct the worker). To omp: switches at once. Pass auto=true when you switch from pair to omp on your own because the job is heavy, not because the user asked. To pair: the first call only records the request; ask the user to confirm, and call it again after they agree in their next message. Exception: after your own auto=true switch, set_mode pair switches back at once once that work is done.',
-        parameters: {
-            ...OBJECT,
-            properties: {
-                mode: { type: 'string', enum: ['omp', 'pair'] },
-                auto: { type: 'boolean', description: 'Only with mode="omp": you switch on your own initiative, the user did not ask.' },
-            },
-            required: ['mode'],
-        },
-        loadMode: 'essential',
-    },
-    {
         name: 'edit_file',
         label: 'Edit file',
         description:
-            "Pair mode only. Replace oldText with newText in an existing file, typed out character by character in the user's editor while they follow you, so they watch you write (at once when they do not); one Ctrl+Z undoes it. oldText must match the file exactly (read it first). An empty oldText fills an empty file. New files are made with create_file. Keep each edit small: one function or block.",
+            "Replace oldText with newText in an existing file, typed out character by character in the user's editor while they follow you, so they watch you write (at once when they do not); one Ctrl+Z undoes it. oldText must match the file exactly (read it first). An empty oldText fills an empty file. New files are made with create_file. Keep each edit small: one function or block.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -234,7 +293,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'create_file',
         label: 'Create file',
         description:
-            "Pair mode only. Create a new file in the workspace, with its content if given, and open it in the user's editor. Missing parent folders are created. Fails if the file exists: change existing files with edit_file.",
+            "Create a new file in the workspace, with its content if given, and open it in the user's editor. Missing parent folders are created. Fails if the file exists: change existing files with edit_file.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -248,14 +307,14 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
     {
         name: 'create_folder',
         label: 'Create folder',
-        description: 'Pair mode only. Create a folder in the workspace, with any missing parents.',
+        description: 'Create a folder in the workspace, with any missing parents.',
         parameters: { ...OBJECT, properties: { path: { type: 'string', description: 'Workspace-relative path.' } }, required: ['path'] },
         loadMode: 'essential',
     },
     {
         name: 'rename_file',
         label: 'Rename file',
-        description: 'Pair mode only. Rename or move a file or folder within the workspace. Never overwrites: fails if the new path exists.',
+        description: 'Rename or move a file or folder within the workspace. Never overwrites: fails if the new path exists.',
         parameters: {
             ...OBJECT,
             properties: {
@@ -270,7 +329,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'delete_file',
         label: 'Delete file',
         description:
-            'Pair mode only. Delete a file, or a folder with recursive true. The first call deletes nothing: it checks the path and records the request; tell the user exactly what goes and ask. Call it again with the same path and recursive only after they agree in their next message. It goes to the trash; if the trash cannot take it, it is backed up to a temp folder first and the result says where.',
+            'Delete a file, or a folder with recursive true. The first call deletes nothing: it checks the path and records the request; tell the user exactly what goes and ask. Call it again with the same path and recursive only after they agree in their next message. It goes to the trash; if the trash cannot take it, it is backed up to a temp folder first and the result says where.',
         parameters: {
             ...OBJECT,
             properties: {
@@ -285,14 +344,14 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'save_file',
         label: 'Save file',
         description:
-            "Pair mode only. Save an open file, or without path every open workspace file with unsaved changes. This also saves the user's own unsaved changes.",
+            "Save an open file, or without path every open workspace file with unsaved changes. This also saves the user's own unsaved changes.",
         parameters: { ...OBJECT, properties: { path: { type: 'string', description: 'Workspace-relative path; leave out to save all.' } } },
         loadMode: 'essential',
     },
     {
         name: 'close_editor',
         label: 'Close editor',
-        description: "Pair mode only. Close a file's tabs in the user's editor. Refused while it has unsaved changes.",
+        description: "Close a file's tabs in the user's editor. Refused while it has unsaved changes.",
         parameters: { ...OBJECT, properties: { path: { type: 'string', description: 'Workspace-relative path.' } }, required: ['path'] },
         loadMode: 'essential',
     },
@@ -300,7 +359,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'run_in_terminal',
         label: 'Run in terminal',
         description:
-            "Pair mode only. Type a command into the Pi terminal in the user's VS Code and run it; returns the exit code and the last lines of output. After timeoutSecs it returns what it has so far and the command keeps running (servers, watchers, or a program waiting for input such as psql), which terminal_send and terminal_read then drive.",
+            "Type a command into the Pi terminal in the user's VS Code and run it; returns the exit code and the last lines of output. When its output has been quiet for 5 seconds, or after timeoutSecs, it returns what it has so far and the command keeps running (servers, watchers, or a program waiting for input such as psql), which terminal_send and terminal_read then drive.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -315,13 +374,18 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'terminal_send',
         label: 'Type in terminal',
         description:
-            "Pair mode only. Type a line into a program still running in a Pi terminal (one run_in_terminal left running, such as psql answering a prompt), then wait until its output goes quiet and return only the new output, or its exit code if it ended. What you type is usually echoed into the terminal and its output: for passwords prefer .pgpass or environment variables, and never repeat a secret back.",
+            "Type a line into a program still running in a Pi terminal (one run_in_terminal left running, such as psql answering a prompt), then wait until its output goes quiet and return only the new output, or its exit code if it ended; for a program that draws a full screen (omp, pi, vim, less, htop) its screen as text instead. What you type is usually echoed into the terminal and its output: for passwords prefer .pgpass or environment variables, and never repeat a secret back.",
         parameters: {
             ...OBJECT,
             properties: {
                 terminal: { type: 'string', description: 'The Pi terminal\'s name, e.g. "Pi (2)"; default: the latest one still running.' },
-                text: { type: 'string', description: 'What to type, e.g. a SQL statement; may be empty to just press Enter.' },
-                enter: { type: 'boolean', description: 'Press Enter after it; default true.' },
+                text: { type: 'string', description: 'What to type, e.g. a SQL statement; may be empty to just press Enter or send keys.' },
+                keys: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: `Keys to press after the text, in order, e.g. ["down", "down"] to move in a selection menu or ["ctrl-c"] to interrupt: ${TERMINAL_KEY_NAMES}.`,
+                },
+                enter: { type: 'boolean', description: 'Press Enter after it all; default true, but false when keys are given.' },
                 waitSecs: { type: 'integer', minimum: 1, maximum: 30, description: 'How long to wait for its output to go quiet; default 2.' },
             },
             required: ['text'],
@@ -332,11 +396,18 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'terminal_read',
         label: 'Read terminal',
         description:
-            'Pair mode only. What a program left running in a Pi terminal printed since you last saw it (its last lines when nothing is new), and whether it is still running.',
+            "What a program left running in a Pi terminal printed since you last saw it (its last lines when nothing is new), and whether it is still running. For a program that draws a full screen (omp, pi, vim, less, htop), its screen as text instead, or that nothing changed since you last read it.",
         parameters: {
             ...OBJECT,
             properties: {
                 terminal: { type: 'string', description: 'The Pi terminal\'s name, e.g. "Pi (2)"; default: the latest one still running.' },
+                pagesBack: {
+                    type: 'integer',
+                    minimum: 0,
+                    maximum: MAX_PAGES_BACK,
+                    description:
+                        'Screen-drawing programs only: how many screens further up to read, from what the terminal kept above the screen, else by pressing PageUp and back down in a full-screen program; default 0, the screen itself.',
+                },
             },
         },
         loadMode: 'essential',
@@ -359,7 +430,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'debug_start',
         label: 'Start debugging',
         description:
-            "Pair mode only. Start one of the user's launch configurations (.vscode/launch.json) under the debugger, as Run and Debug does, and wait until it pauses (a breakpoint or an exception) or ends. Returns where it paused, with the code, call stack and local variables, or its exit code and Debug Console output; the pause becomes your focus in the editor.",
+            "Start one of the user's launch configurations (.vscode/launch.json) under the debugger, as Run and Debug does, and wait until it pauses (a breakpoint or an exception) or ends. Returns where it paused, with the code, call stack and local variables, or its exit code and Debug Console output; the pause becomes your focus in the editor.",
         parameters: {
             ...OBJECT,
             properties: {
@@ -374,7 +445,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'debug_control',
         label: 'Debug control',
         description:
-            'Pair mode only. Press a debug toolbar button for the session the user sees: continue, pause, stepOver, stepInto, stepOut, restart or stop. Waits for the next pause or the end and returns it like debug_start; the pause becomes your focus in the editor.',
+            'Press a debug toolbar button for the session the user sees: continue, pause, stepOver, stepInto, stepOut, restart or stop. Waits for the next pause or the end and returns it like debug_start; the pause becomes your focus in the editor.',
         parameters: {
             ...OBJECT,
             properties: {
@@ -388,7 +459,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
     {
         name: 'set_breakpoint',
         label: 'Set breakpoint',
-        description: 'Pair mode only. Add a breakpoint on a line, optionally only when a condition holds, or remove the one there.',
+        description: 'Add a breakpoint on a line, optionally only when a condition holds, or remove the one there.',
         parameters: {
             ...OBJECT,
             properties: {
@@ -405,7 +476,7 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'debug_inspect',
         label: 'Debug inspect',
         description:
-            'Pair mode only. Where the program being debugged is paused: the code, call stack and local variables, and the breakpoints; with expression, its value in the paused frame, as a watch shows it. The pause becomes your focus in the editor.',
+            'Where the program being debugged is paused: the code, call stack and local variables, and the breakpoints; with expression, its value in the paused frame, as a watch shows it. The pause becomes your focus in the editor.',
         parameters: {
             ...OBJECT,
             properties: {
@@ -415,9 +486,6 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         loadMode: 'essential',
     },
 ];
-
-/** omp: the voice agent directs the worker. pair: it works in the editor and terminal itself, like a human partner. */
-export type AgentMode = 'omp' | 'pair';
 
 /** What the voice agent can do in the user's VS Code; each resolves with a report for the model. */
 export interface EditorHands {
@@ -440,8 +508,11 @@ export interface EditorHands {
     runInTerminal(command: string, timeoutMs: number): Promise<string>;
     /** Types into the program a run left running in a Pi terminal (default: the latest); returns its new output. */
     sendToTerminal(input: { terminal?: string; text: string; enter: boolean; waitMs: number }): Promise<string>;
-    /** What a program left running in a Pi terminal printed since last shown, and whether it still runs. */
-    readTerminal(terminal: string | undefined): Promise<string>;
+    /**
+     * What a program left running in a Pi terminal printed since last shown, and whether it still runs;
+     * a screen-drawing program's screen instead, `pagesBack` screens further up when asked.
+     */
+    readTerminal(terminal: string | undefined, pagesBack: number): Promise<string>;
     /** Without source: what there is to read. */
     readOutput(source: string | undefined, lines: number): Promise<string>;
     startDebugging(configuration: string | undefined, noDebug: boolean, timeoutMs: number): Promise<string>;
@@ -454,27 +525,25 @@ export interface EditorHands {
 export type DebugAction = 'continue' | 'pause' | 'stepOver' | 'stepInto' | 'stepOut' | 'restart' | 'stop';
 const DEBUG_ACTIONS: Record<DebugAction, true> = { continue: true, pause: true, stepOver: true, stepInto: true, stepOut: true, restart: true, stop: true };
 
-/** Tools that direct the worker: not in pair mode, where the voice agent is the one working. */
-const WORKER_CONTROL: Record<string, true> = { tell_worker: true, confirm_task: true, stop_worker: true, answer_worker: true };
-/** Tools that change files, run things or drive the debugger. Reading output is not among them. */
-const PAIR_ONLY: Record<string, true> = {
-    edit_file: true,
-    create_file: true,
-    create_folder: true,
-    rename_file: true,
-    delete_file: true,
-    save_file: true,
-    close_editor: true,
-    run_in_terminal: true,
-    terminal_send: true,
-    terminal_read: true,
-    debug_start: true,
-    debug_control: true,
-    set_breakpoint: true,
-    debug_inspect: true,
-};
-/** Pair tools that write the workspace's files: not while the worker may be writing them too. */
-const FILE_CHANGING: Record<string, true> = { edit_file: true, create_file: true, rename_file: true, delete_file: true };
+/**
+ * What a file-changing tool would touch, for the worker's file lock: undefined for a tool that
+ * changes no file. save_file without a path saves every open file: the whole workspace.
+ */
+function lockTargets(toolName: string, args: Record<string, unknown>): string[] | undefined {
+    switch (toolName) {
+        case 'edit_file':
+        case 'create_file':
+        case 'delete_file':
+            return [requireString(args, 'path')];
+        case 'rename_file':
+            return [requireString(args, 'from'), requireString(args, 'to')];
+        case 'save_file':
+            return [optionalString(args, 'path') ?? '.'];
+        default:
+            return undefined;
+    }
+}
+
 /**
  * Pair tools governed by the tab's permission level. `write` changes file contents: runs unasked in
  * Edit automatically. `exec` runs things, or deletes or moves files (as the worker's gate treats
@@ -513,12 +582,6 @@ export class HostToolRouter {
     /** Settled with the voice panel's buttons and not yet told to the model, per tab. */
     private readonly _unseenSettled = new Map<string, SettledProposal[]>();
     private _nextProposal = 1;
-    /** A new voice agent starts in pair mode; it hands heavy jobs to the worker with set_mode auto. */
-    private _mode: AgentMode = 'pair';
-    /** User turn in which switching to pair mode was asked for; a later user turn confirms it. */
-    private _pairRequestedTurn: number | undefined;
-    /** The voice agent itself switched pair -> omp for a heavy job: it may switch back to pair without asking. */
-    private _autoSwitchedFromPair = false;
     /** A deletion asked about in `turn`; the same delete_file in a later user turn carries it out. */
     private _pendingDelete: { path: string; recursive: boolean; turn: number } | undefined;
     /** Own changes waiting on their approval card, by id. */
@@ -537,7 +600,6 @@ export class HostToolRouter {
         private readonly _startResearch: (tabId: string, question: string) => ResearchJob,
         /** Absent without an editor: open_file and the pair tools fail. */
         private readonly _hands?: EditorHands,
-        private readonly _onModeChange?: (mode: AgentMode) => void,
     ) {}
 
     /** Own changes waiting on the approval card, shown on every turn so the model keeps reminding the user. */
@@ -555,21 +617,6 @@ export class HostToolRouter {
         const settled = this._unseenApprovals.get(tabId) ?? [];
         this._unseenApprovals.delete(tabId);
         return settled;
-    }
-
-    get mode(): AgentMode {
-        return this._mode;
-    }
-
-    /** The user switched in the UI: no confirmation needed. */
-    setMode(mode: AgentMode): void {
-        this._pairRequestedTurn = undefined;
-        this._pendingDelete = undefined;
-        this._autoSwitchedFromPair = false;
-        if (mode !== this._mode) {
-            this._mode = mode;
-            this._onModeChange?.(mode);
-        }
     }
 
     proposals(tabId: string): Proposal[] {
@@ -621,20 +668,9 @@ export class HostToolRouter {
         if (turn.proactive && toolName !== 'worker_status') {
             throw new Error('Nobody asked for this: the user has not spoken since this update. Tell them and let them decide.');
         }
-        if (this._mode === 'pair' && WORKER_CONTROL[toolName]) {
-            throw new Error(
-                'You are in pair mode: you do the work yourself and do not direct the worker. If the user wants omp to do it, ask whether to switch back to omp mode; if the job is too heavy to do yourself, switch with set_mode omp and auto=true.',
-            );
-        }
-        if (this._mode === 'omp' && PAIR_ONLY[toolName]) {
-            throw new Error(
-                this._autoSwitchedFromPair
-                    ? 'Only in pair mode. You switched to omp mode yourself: once the worker has finished that work, switch back with set_mode pair.'
-                    : 'Only in pair mode. In omp mode changes and commands go to the worker; switch to pair mode only if the user explicitly asks for it.',
-            );
-        }
-        if (FILE_CHANGING[toolName] && this._worker.status(tabId).phase === 'working') {
-            throw new Error('The worker is still running a task and may be writing files. Wait for it to finish, or ask the user to stop it from the chat.');
+        const locked = this._workerLock(tabId, toolName, args);
+        if (locked) {
+            throw new Error(locked);
         }
         if (Object.hasOwn(PERMISSION_TIER, toolName)) {
             if (this._worker.permissionLevel(tabId) === 'plan') {
@@ -658,34 +694,10 @@ export class HostToolRouter {
         return this._act(toolName, args, turn);
     }
 
-    /** Carries out a call that passed the mode and permission checks. */
+    /** Carries out a call that passed the worker-lock and permission checks. */
     private async _act(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<string> {
         const { tabId } = turn;
         switch (toolName) {
-            case 'set_mode': {
-                const mode = args.mode === 'pair' ? 'pair' : 'omp';
-                if (mode === 'omp') {
-                    if (this._mode === 'omp') {
-                        this._pairRequestedTurn = undefined;
-                        return 'Already in omp mode.';
-                    }
-                    const auto = args.auto === true;
-                    this.setMode('omp');
-                    this._autoSwitchedFromPair = auto;
-                    return auto
-                        ? 'Now in omp mode: tell the worker to do the job; it can run its own subagents in parallel. Once that work is done, switch back with set_mode pair; no confirmation needed.'
-                        : 'Now in omp mode: changes and commands go to the worker again.';
-                }
-                if (this._mode === 'pair') {
-                    return 'Already in pair mode.';
-                }
-                if (!this._autoSwitchedFromPair && (this._pairRequestedTurn === undefined || turn.seq <= this._pairRequestedTurn)) {
-                    this._pairRequestedTurn = turn.seq;
-                    return 'Not switched yet. Ask the user to confirm pair mode: you will edit files and run commands yourself in their editor and terminal, and will not direct omp. Call set_mode pair again only after they agree in their next message.';
-                }
-                this.setMode('pair');
-                return 'Now in pair mode: edit files with edit_file, manage them with create_file, create_folder, rename_file, delete_file, save_file and close_editor, run commands with run_in_terminal (and drive one left running with terminal_send and terminal_read), and debug with debug_start, set_breakpoint, debug_control and debug_inspect, saying what you do as you go. The worker is not yours to direct until you switch to omp mode: when the user asks for it, or on your own for a job too heavy to do yourself.';
-            }
             case 'edit_file':
                 return this._requireHands().editFile({
                     path: requireString(args, 'path'),
@@ -730,19 +742,20 @@ export class HostToolRouter {
                 if (typeof args.text !== 'string') {
                     throw new Error('Missing text.');
                 }
-                const enter = args.enter !== false;
-                if (args.text === '' && !enter) {
-                    throw new Error('Nothing to send: give text, or leave enter on to press Enter.');
+                const keys = terminalKeys(args.keys);
+                const enter = typeof args.enter === 'boolean' ? args.enter : keys === '';
+                if (args.text === '' && keys === '' && !enter) {
+                    throw new Error('Nothing to send: give text or keys, or leave enter on to press Enter.');
                 }
                 return this._requireHands().sendToTerminal({
                     terminal: optionalString(args, 'terminal'),
-                    text: args.text,
+                    text: args.text + keys,
                     enter,
                     waitMs: seconds(args.waitSecs, 30, DEFAULT_TERMINAL_WAIT_SECS) * 1000,
                 });
             }
             case 'terminal_read':
-                return this._requireHands().readTerminal(optionalString(args, 'terminal'));
+                return this._requireHands().readTerminal(optionalString(args, 'terminal'), pagesBack(args.pagesBack));
             case 'read_output': {
                 const lines = typeof args.lines === 'number' ? Math.min(Math.max(Math.round(args.lines), 1), 400) : DEFAULT_OUTPUT_LINES;
                 return this._requireHands().readOutput(optionalString(args, 'source'), lines);
@@ -817,13 +830,22 @@ export class HostToolRouter {
                 return this._send(this._take(id), 'voice');
             }
             case 'stop_worker': {
-                if (this._worker.status(tabId).phase === 'idle') {
+                const status = this._worker.status(tabId);
+                if (status.phase === 'idle') {
                     return 'The worker was already idle.';
                 }
                 await this._worker.abort(tabId);
-                return 'Stopped.';
+                return status.tui ? 'Pressed Escape, the TUI\'s interrupt. worker_status shows whether it stopped.' : 'Stopped.';
             }
             case 'answer_worker': {
+                if (this._worker.status(tabId).tui) {
+                    const keys = (typeof args.value === 'string' ? args.value : '') + terminalKeys(args.keys);
+                    if (!keys) {
+                        throw new Error('Nothing to type: give the user\'s answer as value (text) and/or keys, e.g. ["down", "enter"].');
+                    }
+                    // The text itself is not repeated: it may be a secret.
+                    return `Typed into the TUI. Its screen now:\n${await this._worker.typeIntoTui(tabId, keys)}`;
+                }
                 const requestId = requireString(args, 'requestId');
                 const request = this._worker.pendingRequests(tabId).find((r) => r.id === requestId);
                 if (!request) {
@@ -848,6 +870,10 @@ export class HostToolRouter {
                     : 'Too late: it was already answered in the editor or timed out.';
             }
             case 'worker_status':
+                if (this._worker.status(tabId).tui) {
+                    const screen = await this._worker.readTuiScreen(tabId, pagesBack(args.pagesBack));
+                    return `State: ${this._worker.status(tabId).phase}. This tab shows the CLI's own TUI; its screen:\n${screen}`;
+                }
                 return this._statusReport(tabId);
             case 'open_file': {
                 const startLine = typeof args.startLine === 'number' ? args.startLine : undefined;
@@ -946,12 +972,13 @@ export class HostToolRouter {
                 if (!approved) {
                     return { outcome: 'rejected', result: 'The user rejected it on the approval card; nothing was done.' };
                 }
-                // Rechecked: the mode or the worker may have changed while the card waited.
+                // Rechecked: the permission level or the worker's files may have changed while the card waited.
                 if (this._worker.permissionLevel(tabId) === 'plan') {
                     return { outcome: 'failed', result: 'Not done: the task was switched to read-only Plan mode before it was approved.' };
                 }
-                if (FILE_CHANGING[toolName] && this._worker.status(tabId).phase === 'working') {
-                    return { outcome: 'failed', result: 'Not done: the worker started a task that may be writing files before it was approved.' };
+                const locked = this._workerLock(tabId, toolName, args);
+                if (locked) {
+                    return { outcome: 'failed', result: `Not done: ${locked}` };
                 }
                 return { outcome: 'done', result: await act() };
             })
@@ -973,6 +1000,32 @@ export class HostToolRouter {
             throw new Error('There is no editor here.');
         }
         return this._hands;
+    }
+
+    /**
+     * Why a file-changing tool may not run now: the worker's running task is changing one of its files
+     * (the permission gate reports each before it happens). A TUI tab reports nothing, so there any
+     * running task keeps the voice agent's file changes out. Undefined when it may go ahead.
+     */
+    private _workerLock(tabId: string, toolName: string, args: Record<string, unknown>): string | undefined {
+        const targets = lockTargets(toolName, args);
+        if (!targets) {
+            return undefined;
+        }
+        const status = this._worker.status(tabId);
+        if (status.tui) {
+            return status.phase === 'working'
+                ? 'The worker is still running a task and may be writing files. Wait for it to finish, or ask the user to stop it from the chat.'
+                : undefined;
+        }
+        const locked = this._worker.lockedPaths(tabId, targets);
+        if (locked.length === 0) {
+            return undefined;
+        }
+        return (
+            `The worker's running task is changing ${locked.join(', ')}, so you may not touch ${locked.length === 1 ? 'it' : 'them'} until that task ends. ` +
+            'Tell the user, then work on other files, wait for the worker to finish, or ask whether to stop it.'
+        );
     }
 
     private _statusReport(tabId: string): string {

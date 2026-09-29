@@ -3,7 +3,10 @@
  * voice-loop prototype. Pure reducer: `reduce(state, event) → { state, effects }`. The executor
  * (voiceMode.ts) feeds it microphone, STT, reply and playback events and runs the effects.
  *
- * - The user always wins: speech start (or a typed message) cancels the reply in progress.
+ * - The user always wins: speech start (or a typed message) cancels the reply in progress. With the
+ *   voiceprint check on, speech is first only a sound (`soundDetected`): it holds the floor, so no
+ *   reply goes out or starts over it, but only once it is found to be the user's voice does it
+ *   become `userSpeaking` and cut the reply off (or its words do, when they come in).
  * - A prompt goes out only once the user has stopped talking AND every transcription has landed,
  *   so an utterance split by a pause is one turn.
  * - A reply cut off leaves an `<interrupted>` note saying what the user actually heard; it goes
@@ -27,9 +30,10 @@ import { flushSentence, takeSentences } from './sentences';
 
 /**
  * `standby`: another VS Code window has the voice; this one neither listens nor speaks.
+ * `soundDetected`: a sound is being heard that the voiceprint check has not yet found to be the user's.
  * `synthesizing`: sentences are with TTS but nothing is playing yet.
  */
-export type Phase = 'standby' | 'listening' | 'userSpeaking' | 'transcribing' | 'synthesizing' | 'thinking' | 'speaking';
+export type Phase = 'standby' | 'listening' | 'soundDetected' | 'userSpeaking' | 'transcribing' | 'synthesizing' | 'thinking' | 'speaking';
 
 export interface BotTurn {
     turnId: number;
@@ -66,7 +70,13 @@ export interface ConvState {
     /** TTS came or went while a reply was being given: `voiced` takes this once that reply is over. */
     nextVoiced?: boolean;
     userSpeaking: boolean;
+    /** A sound is being heard, not yet known to be the user's voice: it holds the floor but cuts nothing off. */
+    soundDetected: boolean;
     sttPending: number;
+    /** Transcripts still to come that a typed message voided: dropped when they land. */
+    sttDiscard: number;
+    /** The sound or speech in progress when a message was typed: it counts for nothing when it ends. */
+    muteSegment: boolean;
     /** Heard or typed, not yet sent; typed messages may carry the composer's attachments. */
     userBuffer: Array<{ text: string; source: 'text' | 'stt'; attachments?: VoiceAttachments }>;
     /**
@@ -96,6 +106,10 @@ export interface ConvState {
 
 export type ConvEvent =
     | { type: 'userSpeechStart'; at: number }
+    /** Speech started while the voiceprint check is on: a sound until it is found to be the user's voice (`userSpeechStart`). */
+    | { type: 'userSoundStart'; at: number }
+    /** The sound ended without a segment to transcribe (another path took its audio over). */
+    | { type: 'userSoundEnd'; at: number }
     | { type: 'userSpeechEnd'; at: number; silenceAt: number }
     | { type: 'transcript'; text: string; at: number }
     /** A message typed while voice mode is on: it cuts the reply off like speech does. */
@@ -138,7 +152,10 @@ export function initialState(active = true, voiced = true): ConvState {
         active,
         voiced,
         userSpeaking: false,
+        soundDetected: false,
         sttPending: 0,
+        sttDiscard: 0,
+        muteSegment: false,
         userBuffer: [],
         ttsActive: false,
         botSpeaking: false,
@@ -149,7 +166,7 @@ export function initialState(active = true, voiced = true): ConvState {
     };
 }
 
-/** The status shown: userSpeaking > speaking > transcribing > synthesizing > thinking > listening. */
+/** The status shown: userSpeaking > speaking > soundDetected > transcribing > synthesizing > thinking > listening. */
 export function phaseOf(s: ConvState): Phase {
     if (!s.active) {
         return 'standby';
@@ -159,6 +176,9 @@ export function phaseOf(s: ConvState): Phase {
     }
     if (s.botSpeaking) {
         return 'speaking';
+    }
+    if (s.soundDetected) {
+        return 'soundDetected';
     }
     if (s.sttPending > 0) {
         return 'transcribing';
@@ -171,7 +191,7 @@ export function phaseOf(s: ConvState): Phase {
 
 /** Nobody is talking and nothing is waiting to be said: the voice agent may speak up. */
 export function floorFree(s: ConvState): boolean {
-    return s.active && !s.userSpeaking && s.sttPending === 0 && s.userBuffer.length === 0 && !s.bot;
+    return s.active && !s.userSpeaking && !s.soundDetected && s.sttPending === 0 && s.userBuffer.length === 0 && !s.bot;
 }
 
 /** What an echo of the bot would repeat: the reply in progress and the one before it. */
@@ -238,7 +258,7 @@ function toTts(s: ConvState, count: number, at: number): ConvState {
 
 /** Sends what the user said once they are done and every transcript is in. */
 function tryPrompt(s: ConvState, at: number): Step {
-    if (s.userSpeaking || s.sttPending > 0 || s.userBuffer.length === 0) {
+    if (s.userSpeaking || s.soundDetected || s.sttPending > 0 || s.userBuffer.length === 0) {
         return { state: s, effects: [] };
     }
     const text = s.userBuffer.map((part) => part.text).filter(Boolean).join(' ');
@@ -263,15 +283,27 @@ function maybeFinish(s: ConvState): ConvState {
 export function reduce(s: ConvState, ev: ConvEvent): Step {
     switch (ev.type) {
         case 'userSpeechStart': {
+            if (s.muteSegment) {
+                return { state: s, effects: [] }; // the speech a typed message voided: it cuts nothing off
+            }
             const cut = interrupt(s, ev.at);
-            return { state: { ...cut.state, userSpeaking: true }, effects: cut.effects };
+            return { state: { ...cut.state, userSpeaking: true, soundDetected: false }, effects: cut.effects };
         }
+        case 'userSoundStart':
+            return { state: s.userSpeaking || s.muteSegment ? s : { ...s, soundDetected: true }, effects: [] };
+        case 'userSoundEnd':
+            return tryPrompt({ ...s, soundDetected: false, muteSegment: false }, ev.at);
         case 'userSpeechEnd': {
+            if (s.muteSegment) {
+                // Its transcript still comes: drop it when it lands.
+                return { state: { ...s, muteSegment: false, sttDiscard: s.sttDiscard + 1 }, effects: [] };
+            }
             const metrics = s.bot ? s.metrics : {};
             return {
                 state: {
                     ...s,
                     userSpeaking: false,
+                    soundDetected: false,
                     sttPending: s.sttPending + 1,
                     metrics: { ...metrics, silenceAt: ev.silenceAt, endDetectedAt: ev.at },
                 },
@@ -279,20 +311,44 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
             };
         }
         case 'transcript': {
+            if (s.sttDiscard > 0) {
+                return { state: { ...s, sttDiscard: s.sttDiscard - 1 }, effects: [] }; // voided by a typed message
+            }
             // Heard before the voice moved to another window: nobody here is listening for the answer.
             const text = s.active ? ev.text.trim() : '';
+            // Words the voiceprint check let through only once they were done still cut the reply off;
+            // the new exchange keeps when they ended.
+            const cut = text ? interrupt(s, ev.at) : { state: s, effects: [] };
+            const metrics = cut.effects.length ? { silenceAt: s.metrics.silenceAt, endDetectedAt: s.metrics.endDetectedAt } : s.metrics;
             const next: ConvState = {
-                ...s,
+                ...cut.state,
                 sttPending: Math.max(0, s.sttPending - 1),
                 userBuffer: text ? [...s.userBuffer, { text, source: 'stt' }] : s.userBuffer,
-                metrics: { ...s.metrics, sttDoneAt: ev.at },
+                metrics: { ...metrics, sttDoneAt: ev.at },
             };
-            return tryPrompt(next, ev.at);
+            const prompted = tryPrompt(next, ev.at);
+            return { state: prompted.state, effects: [...cut.effects, ...prompted.effects] };
         }
         case 'typed': {
+            // Typing wins over talking: words still being spoken, transcribed or waiting to go out count
+            // for nothing, and the typed message goes out at once.
             const cut = interrupt(s, ev.at);
             const typed = { text: ev.text, source: 'text' as const, attachments: ev.attachments };
-            const next = tryPrompt({ ...cut.state, userBuffer: [...cut.state.userBuffer, typed] }, ev.at);
+            if (!ev.text.trim()) {
+                // Only attachments: the words being said are about them, so they wait for those words.
+                const joined = tryPrompt({ ...cut.state, userBuffer: [...cut.state.userBuffer, typed] }, ev.at);
+                return { state: joined.state, effects: [...cut.effects, ...joined.effects] };
+            }
+            const voided: ConvState = {
+                ...cut.state,
+                muteSegment: cut.state.muteSegment || cut.state.userSpeaking || cut.state.soundDetected,
+                userSpeaking: false,
+                soundDetected: false,
+                sttDiscard: cut.state.sttDiscard + cut.state.sttPending,
+                sttPending: 0,
+                userBuffer: [...cut.state.userBuffer.filter((part) => part.source === 'text'), typed],
+            };
+            const next = tryPrompt(voided, ev.at);
             return { state: next.state, effects: [...cut.effects, ...next.effects] };
         }
         case 'proactiveStart': {
@@ -375,7 +431,7 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
             }
             // Another window has the voice now: stop talking, and drop what this one half-heard.
             const cut = interrupt(s, ev.at);
-            return { state: { ...cut.state, active: false, userSpeaking: false, userBuffer: [] }, effects: cut.effects };
+            return { state: { ...cut.state, active: false, userSpeaking: false, soundDetected: false, userBuffer: [] }, effects: cut.effects };
         }
         case 'hush':
             return interrupt(s, ev.at);

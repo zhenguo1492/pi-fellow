@@ -2,11 +2,12 @@ import * as vscode from 'vscode';
 import type { OwnVoiceServers, SttEngine, VoiceReadiness, VoiceServiceCheck, VoiceSettings } from '../shared/protocol';
 import { TTS_LANGUAGE_FIELDS, testTtsConnectivity, type TtsConfig, type TtsEngine, type TtsLanguageField, type TtsRequestConfig } from '../voiceAgent/tts';
 import { builtinVoiceEngineUrl } from './builtinEngine/engine';
-import { STT_MODEL, TTS_MODEL_ID, TTS_VOICE } from './builtinEngine/models';
+import { STT_MODEL, TTS_MODEL_ID, TTS_VOICE, type EngineFeature } from './builtinEngine/models';
 import { describeError, type ApiKeySource, type ServiceOutcome } from './modelsProbe';
 import { testSttConnectivity, type SttConfig } from './stt';
 import { explainVoiceError, type VoiceErrorKind } from './voiceErrors';
 import { CLOUD_PROVIDERS, presetForUrl } from '../shared/voicePresets';
+import { voiceprintFeatures } from './voiceprint';
 
 /**
  * A service's last result and the settings it was had with (`key`); another key means unchecked.
@@ -379,10 +380,19 @@ export async function migrateTtsSettings(): Promise<void> {
     }
 }
 
-/** The built-in engine's URL, the engine started first; its failing to (models not downloading, say) goes to `outcome`. */
-async function builtinUrl(outcome: ServiceOutcome): Promise<string> {
+/** The built-in engine features the voice settings use now: it loads them all whenever it (re)starts. */
+export function builtinEngineFeatures(): EngineFeature[] {
+    return [
+        ...(readVoiceSettings().sttEngine === 'builtin' ? (['stt'] as const) : []),
+        ...(readTtsSettings().engine === 'builtin' ? (['tts'] as const) : []),
+        ...voiceprintFeatures(),
+    ];
+}
+
+/** The built-in engine's URL running `feature`, the engine started first; its failing to (models not downloading, say) goes to `outcome`. */
+async function builtinUrl(feature: EngineFeature, outcome: ServiceOutcome): Promise<string> {
     try {
-        return await builtinVoiceEngineUrl();
+        return await builtinVoiceEngineUrl([feature]);
     } catch (err) {
         outcome(err);
         throw err;
@@ -398,7 +408,7 @@ async function builtinUrl(outcome: ServiceOutcome): Promise<string> {
 export async function resolveSttConfig(s: VoiceSettings, draftKey?: string): Promise<SttConfig> {
     const onOutcome = useRecorder('stt', sttKey(s), s.sttEngine === 'builtin' ? '' : s.sttUrl.trim());
     if (s.sttEngine === 'builtin') {
-        return { url: await builtinUrl(onOutcome), model: STT_MODEL.id, language: s.language, onOutcome };
+        return { url: await builtinUrl('stt', onOutcome), model: STT_MODEL.id, language: s.language, onOutcome };
     }
     const typedKey = Boolean(draftKey?.trim() && presetForUrl('stt', s.sttUrl));
     return { url: s.sttUrl, model: s.sttModel, language: s.language, apiKey: apiKeySource('stt', s.sttUrl, draftKey), ...(typedKey ? {} : { onOutcome }) };
@@ -411,7 +421,7 @@ export async function resolveSttConfig(s: VoiceSettings, draftKey?: string): Pro
 export async function resolveTtsConfig(t: TtsConfig, draftKey?: string): Promise<TtsRequestConfig> {
     const onOutcome = useRecorder('tts', ttsKey(t), t.engine === 'builtin' ? '' : t.url.trim());
     if (t.engine === 'builtin') {
-        return { ...t, url: await builtinUrl(onOutcome), model: TTS_MODEL_ID, voice: TTS_VOICE.id, languageField: 'none', onOutcome };
+        return { ...t, url: await builtinUrl('tts', onOutcome), model: TTS_MODEL_ID, voice: TTS_VOICE.id, languageField: 'none', onOutcome };
     }
     const typedKey = Boolean(draftKey?.trim() && presetForUrl('tts', t.url));
     return { ...t, apiKey: apiKeySource('tts', t.url, draftKey), maxInputChars: presetForUrl('tts', t.url)?.maxInputChars, ...(typedKey ? {} : { onOutcome }) };

@@ -39,6 +39,7 @@ import { describeError, type ModelsProbeResult } from '../voice/modelsProbe';
 import { testSttConnectivity } from '../voice/stt';
 import { explainVoiceError } from '../voice/voiceErrors';
 import { VoiceDryRun } from '../voice/voiceDryRun';
+import { deleteVoiceprint, onVoiceprintChange, voiceprintStatus } from '../voice/voiceprint';
 import {
     onVoiceReadinessChange,
     readTtsSettings,
@@ -60,6 +61,7 @@ import { CLOUD_PROVIDERS } from '../shared/voicePresets';
 import { DEFAULT_TRANSLATION_LANGUAGE } from '../shared/translationLanguages';
 import { DEFAULT_SPEAKER_NAMES, type VoiceSpeakerId } from '../shared/voiceSpeakers';
 import { pickAvatar, resolveSpeakers } from '../voiceAgent/speakers';
+import { VOICE_SYSTEM_PROMPT } from '../voiceAgent/voicePrompt';
 
 type VoiceServiceId = 'stt' | 'tts';
 const VOICE_SERVICE_NAMES: Record<VoiceServiceId, string> = { stt: 'speech-to-text', tts: 'text-to-speech' };
@@ -121,6 +123,8 @@ export class SettingsPanel {
             }),
             // The STT check mark follows the automatic checks too, not only the Test button.
             onVoiceReadinessChange(() => void this._sendSettings()),
+            // A voiceprint saved or deleted, or its check pausing because the engine failed.
+            onVoiceprintChange(() => void this._sendSettings()),
         );
 
         void this._sendSettings();
@@ -343,6 +347,13 @@ export class SettingsPanel {
                     break;
                 case 'stopSttDryRun':
                     await this._voiceDryRun.stopStt();
+                    break;
+                case 'startVoiceprint':
+                    await this._voiceDryRun.startVoiceprint(msg.run, msg.mode);
+                    break;
+                case 'deleteVoiceprint':
+                    await deleteVoiceprint();
+                    this._post({ type: 'success', message: 'Voiceprint deleted: voice input takes every voice again.' });
                     break;
                 case 'ttsDryRun':
                     await this._voiceDryRun.synthesize(msg.settings, msg.text, msg.apiKey);
@@ -572,7 +583,7 @@ export class SettingsPanel {
     }
 
     private async _sendBuiltinVoiceStatus(busy: boolean, error?: string): Promise<void> {
-        const status = await builtinVoiceStatus().catch(() => undefined);
+        const status = await builtinVoiceStatus(['stt', 'tts']).catch(() => undefined);
         this._post({ type: 'builtinVoiceStatus', status, busy, error });
     }
 
@@ -580,7 +591,7 @@ export class SettingsPanel {
     private async _prepareBuiltinVoice(): Promise<void> {
         await this._sendBuiltinVoiceStatus(true);
         try {
-            await builtinVoiceEngineUrl();
+            await builtinVoiceEngineUrl(['stt', 'tts']);
             await this._sendBuiltinVoiceStatus(false);
         } catch (err: unknown) {
             await this._sendBuiltinVoiceStatus(false, explainVoiceError(err).message);
@@ -623,7 +634,10 @@ export class SettingsPanel {
             voiceSkills: config.get<string[]>('voiceAgent.skills', []),
             voiceMessageButtons: config.get<boolean>('voiceAgent.messageButtons', false),
             voiceTranslateTo: config.get<string>('voiceAgent.translateTo', DEFAULT_TRANSLATION_LANGUAGE),
+            voiceExtraPrompt: config.get<string>('voiceAgent.extraPrompt', ''),
+            voiceDefaultPrompt: VOICE_SYSTEM_PROMPT,
             voiceSpeakers: await this._voiceSpeakers(config),
+            voiceprint: voiceprintStatus(),
         };
 
         if (sync && piConfig) {

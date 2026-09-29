@@ -176,7 +176,7 @@ describe('viewers: what can show a file', () => {
     });
 
     it('by default offers no third-party preview command, but still their editors', () => {
-        expect(findViewers(ALL, '/ws/docs/diagrams/voice-flow.mmd', 'mermaid.sequenceDiagram', OFF)).toEqual({
+        expect(findViewers(ALL, '/ws/docs/sequence.mmd', 'mermaid.sequenceDiagram', OFF)).toEqual({
             editors: [expect.objectContaining({ id: 'default' })],
             commands: [],
         });
@@ -199,7 +199,7 @@ describe('viewers: finding third-party preview commands (setting on)', () => {
     });
 
     it("prefers a general preview command over its context-menu variant with the same title", () => {
-        const { commands } = findViewers(ALL, '/ws/docs/diagrams/voice-flow.mmd', 'mermaid.sequenceDiagram', ON);
+        const { commands } = findViewers(ALL, '/ws/docs/sequence.mmd', 'mermaid.sequenceDiagram', ON);
         expect(commands.map((c) => [c.id, c.label])).toEqual([['mermaidChart.preview', 'Mermaid: Preview Diagram']]);
         // Found by extension too, before the language is known.
         expect(findViewers(ALL, 'flow.mermaid', undefined, ON).commands.map((c) => c.id)).toEqual(['mermaidChart.preview']);

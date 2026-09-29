@@ -58,7 +58,7 @@ export class AgentCursor implements vscode.Disposable {
     private readonly _followingChanged = new vscode.EventEmitter<boolean>();
     /** Following was turned on or off: by the follow button, or by the user typing. */
     readonly onDidChangeFollowing = this._followingChanged.event;
-    /** Pi's own edits in flight (pair mode): their document changes are not the user typing. */
+    /** Pi's own edits in flight: their document changes are not the user typing. */
     private _selfEdits = 0;
     /** Until then tool activity is deferred (`_deferred`), so the current focus stays put. */
     private _holdUntil = 0;
@@ -189,7 +189,7 @@ export class AgentCursor implements vscode.Disposable {
     }
 
     /**
-     * Pi is about to write `range` of `uri` itself (pair mode): shown and revealed whether or not the
+     * Pi is about to write `range` of `uri` itself: shown and revealed whether or not the
      * user follows Pi. Resolves with the editor to type into.
      */
     write(uri: vscode.Uri, range: vscode.Range): Promise<vscode.TextEditor> {

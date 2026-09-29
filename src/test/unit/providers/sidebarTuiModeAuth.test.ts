@@ -51,7 +51,7 @@ function setup() {
         sendStateSync: vi.fn(),
         outputChannel: { appendLine: vi.fn() },
     } as unknown as SidebarHost;
-    const mode = new SidebarTuiMode(host);
+    const mode = new SidebarTuiMode(host, vi.fn());
     return { mode, handlers: mode.handlers(), tab, session };
 }
 

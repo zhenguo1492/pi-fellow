@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SilenceGate, buildTurnMessage, type TurnInput } from '../../../voiceAgent/voicePrompt';
+import { SilenceGate, buildTurnMessage, tuiQuestionLine, type TurnInput, USER_TURN_REMINDER } from '../../../voiceAgent/voicePrompt';
 
 function stream(deltas: string[]) {
     const gate = new SilenceGate();
@@ -117,6 +117,14 @@ describe('turn message: proposals settled with the panel buttons', () => {
     });
 });
 
+describe('turn message: a tab showing the CLI TUI', () => {
+    it('marks the worker as a TUI, so the model reads its screen and types its answers', () => {
+        const input: TurnInput = { trigger: { kind: 'user', text: '好了吗', source: 'stt' }, status: { phase: 'idle', queued: 0 }, updates: [], requests: [], proposals: [], research: [] };
+        expect(buildTurnMessage({ ...input, status: { phase: 'working', queued: 0, tui: true } })).toContain('<worker status="working" tui="true"/>');
+        expect(buildTurnMessage(input)).toContain('<worker status="idle"/>');
+    });
+});
+
 describe('turn message: approval cards', () => {
     it('shows a card still waiting and an answered one with its result, so the model reminds the user or reports it', () => {
         const message = buildTurnMessage({
@@ -132,5 +140,42 @@ describe('turn message: approval cards', () => {
         expect(message).toContain('<approval-pending id="a2" tool="delete_file">old.ts</approval-pending>');
         expect(message).toContain('<approval-settled id="a1" tool="run_in_terminal" outcome="done">npm test\nResult: Exit code 0.</approval-settled>');
         expect(message).toContain('<worker-update kind="approval">');
+    });
+});
+
+describe('turn message: the line that closes a user turn', () => {
+    const base: TurnInput = {
+        trigger: { kind: 'user', text: '这个方法是干嘛的', source: 'stt' },
+        status: { phase: 'idle', queued: 0 },
+        updates: [],
+        requests: [],
+        proposals: [],
+        research: [],
+    };
+
+    it('ends every user turn with the language and length reminder, after the attachments', () => {
+        expect(buildTurnMessage(base).endsWith(`<user source="stt">这个方法是干嘛的</user>\n${USER_TURN_REMINDER}`)).toBe(true);
+        const withFiles = buildTurnMessage({ ...base, trigger: { ...base.trigger, kind: 'user', text: 'look', source: 'text', files: '<file path="a.md">hi</file>\n' } });
+        expect(withFiles.endsWith(`</user>\n<attached>\n<file path="a.md">hi</file>\n</attached>\n${USER_TURN_REMINDER}`)).toBe(true);
+    });
+
+    it('leaves the turns nobody started to their own closing lines', () => {
+        const opening = buildTurnMessage({ ...base, trigger: { kind: 'opening', reason: 'connect' } });
+        const update = buildTurnMessage({ ...base, trigger: { kind: 'proactive', observation: 'done', detail: 'The worker finished.' } });
+        expect([opening, update].some((message) => message.includes(USER_TURN_REMINDER))).toBe(false);
+        expect(opening.endsWith('Nobody has spoken yet; speak first, in one short sentence.')).toBe(true);
+    });
+});
+
+describe('tuiQuestionLine', () => {
+    it('says what the TUI asks and the choices, so the voice agent need not read them off the screen', () => {
+        expect(tuiQuestionLine({ method: 'select', title: 'Allow tool: bash', message: 'Reason: prompt\nCommand: rm -rf out', options: ['Approve', 'Deny'] })).toBe(
+            'It asks for a choice: "Allow tool: bash" (Reason: prompt; Command: rm -rf out), options: Approve | Deny. The chat shows it as a card too.\n',
+        );
+        expect(tuiQuestionLine({ method: 'confirm', title: 'Delete the build folder?' })).toBe(
+            'It asks for a yes or no: "Delete the build folder?". The chat shows it as a card too.\n',
+        );
+        expect(tuiQuestionLine({ method: 'input', title: 'Branch name' })).toBe('It asks for a line of text: "Branch name". The chat shows it as a card too.\n');
+        expect(tuiQuestionLine(undefined)).toBe('');
     });
 });

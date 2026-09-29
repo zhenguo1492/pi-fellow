@@ -152,3 +152,66 @@ describe('FloorArbiter: user turns and task switches', () => {
         expect(arbiter.next(busy, 130000)?.kind).toBe('progress');
     });
 });
+
+describe('FloorArbiter: a TUI run that stopped', () => {
+    const START = { type: 'tui_run_start' };
+    const stopped = (screen: string) => ({ type: 'tui_run_end', screen });
+
+    it('is announced at once with the last lines of the screen, like a request that may time out', () => {
+        const { arbiter, view } = setup();
+        arbiter.turnEnded(1000);
+        arbiter.ingest('tab-1', START, 1000);
+        arbiter.ingest('tab-1', stopped('Allow rm -rf out? Approve / Deny'), 1500);
+        const next = arbiter.next(view(), 1500)!;
+        expect(next).toEqual({ kind: 'stopped', tabId: 'tab-1', screen: 'Allow rm -rf out? Approve / Deny' });
+        arbiter.consume(next);
+        expect(arbiter.next(view(), 60000)).toBeUndefined();
+    });
+
+    it('is not announced while the TUI works again, and a new run makes it old news', () => {
+        const { arbiter, view } = setup();
+        arbiter.ingest('tab-1', stopped('done'), 0);
+        expect(arbiter.next(view({ phase: 'working' }), 60000)).toBeUndefined();
+        arbiter.ingest('tab-1', START, 1000);
+        expect(arbiter.next(view(), 60000)).toBeUndefined();
+    });
+
+    it('comes after a request of the chat worker, and before its errors and finished work', () => {
+        const { arbiter, view, end } = setup();
+        arbiter.ingest('tab-1', end('error'), 0);
+        arbiter.ingest('tab-1', stopped('screen'), 0);
+        const first = arbiter.next(view({ requestIds: ['q1'] }), 60000)!;
+        expect(first.kind).toBe('needs_input');
+        arbiter.consume(first);
+        expect(arbiter.next(view({ requestIds: ['q1'] }), 60000)?.kind).toBe('stopped');
+    });
+
+    it('with narration off, is announced only when the voice agent typed the prompt', () => {
+        const { arbiter, view } = setup({ narration: 'off' });
+        arbiter.ingest('tab-1', stopped('screen'), 0);
+        expect(arbiter.next(view(), 60000)).toBeUndefined();
+        expect(arbiter.next(view({ fromVoice: true }), 60000)?.kind).toBe('stopped');
+    });
+
+    it('is news no more once the user spoke', () => {
+        const { arbiter, view } = setup();
+        arbiter.ingest('tab-1', stopped('screen'), 0);
+        arbiter.userTurn('tab-1', []);
+        expect(arbiter.next(view(), 60000)).toBeUndefined();
+    });
+});
+
+describe('FloorArbiter: the question a stopped TUI waits on', () => {
+    it("carries the dialog's question with the screen, and drops one that is not a question", () => {
+        const { arbiter, view } = setup();
+        const question = { method: 'select', title: 'Allow tool: bash', message: 'Command: ls', options: ['Approve', 'Deny'] };
+        arbiter.ingest('tab-1', { type: 'tui_run_end', screen: 'Allow tool: bash', question }, 0);
+        expect(arbiter.next(view(), 60000)).toEqual({ kind: 'stopped', tabId: 'tab-1', screen: 'Allow tool: bash', question });
+
+        const other = setup();
+        other.arbiter.ingest('tab-1', { type: 'tui_run_end', screen: 's', question: { method: 'launch', title: 'x' } }, 0);
+        expect(other.arbiter.next(other.view(), 60000)).toEqual({ kind: 'stopped', tabId: 'tab-1', screen: 's' });
+        other.arbiter.ingest('tab-1', { type: 'tui_run_end', screen: 's', question: { method: 'select', title: 'x', options: [1, 2] } }, 0);
+        expect(other.arbiter.next(other.view(), 60000)).toEqual({ kind: 'stopped', tabId: 'tab-1', screen: 's', question: { method: 'select', title: 'x' } });
+    });
+});

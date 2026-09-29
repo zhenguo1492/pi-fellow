@@ -2,6 +2,7 @@ import type { BuiltinVoiceStatus, McpSettingsSnapshot, SettingsData, SkillInfo, 
 import { vscode } from './api';
 import type { SettingsTabId } from './tabs';
 import type { VoiceService } from './voice';
+import type { VoiceSubtab } from './voiceTabs';
 
 /** The Voice tab's three ways to set voice up; they only map onto the existing settings. */
 export type VoiceSetup = 'builtin' | 'cloud' | 'own';
@@ -30,8 +31,14 @@ interface SettingsState {
     ttsServerModels: string[];
     /** The chat tab's CLI's skills; undefined until they arrive. */
     loadedSkills: SkillInfo[] | undefined;
+    /** The voice agent extra prompt as typed while it is edited; undefined: shown as Markdown (View). */
+    voiceExtraPromptDraft: string | undefined;
+    /** "View default prompt" is expanded; kept across re-renders. */
+    voiceDefaultPromptOpen: boolean;
     mcpSnapshot: McpSettingsSnapshot | null;
     activeTab: SettingsTabId;
+    /** The Voice tab's sub-tab shown; kept in the webview state. */
+    voiceSubtab: VoiceSubtab;
     toastTimeout: ReturnType<typeof setTimeout> | undefined;
 }
 
@@ -42,6 +49,11 @@ function restoredTab(): SettingsTabId {
         activeTab = 'voice';
     }
     return activeTab;
+}
+
+function restoredVoiceSubtab(): VoiceSubtab {
+    const saved: unknown = vscode.getState()?.voiceSubtab;
+    return saved === 'listening' || saved === 'agent' ? saved : 'engine';
 }
 
 /** All mutable state of the settings page. */
@@ -58,7 +70,10 @@ export const settingsState: SettingsState = {
     builtinVoice: undefined,
     ttsServerModels: [],
     loadedSkills: undefined,
+    voiceExtraPromptDraft: undefined,
+    voiceDefaultPromptOpen: false,
     mcpSnapshot: null,
     activeTab: restoredTab(),
+    voiceSubtab: restoredVoiceSubtab(),
     toastTimeout: undefined,
 };

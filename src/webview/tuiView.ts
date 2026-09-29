@@ -151,13 +151,22 @@ export function getTuiHost(): HTMLElement {
     return host;
 }
 
-/** Show the active tab's terminal when it is in TUI mode; keep other TUI tabs' terminals, drop the rest. */
-export function syncTuiView(tuiTabIds: string[], active: string): void {
+/**
+ * Show the active tab's terminal when it is in TUI mode and `shown` (not covered by the Bot view); keep
+ * other TUI tabs' terminals, hidden ones included, and drop the rest. Hiding the terminal that had focus
+ * hands it to the composer; showing one focuses it.
+ */
+export function syncTuiView(tuiTabIds: string[], active: string, shown: boolean): void {
     for (const id of [...panes.keys()]) {
         if (!tuiTabIds.includes(id)) disposePane(id);
     }
-    const enabled = tuiTabIds.includes(active);
+    const enabled = shown && tuiTabIds.includes(active);
+    // Read before the terminal hides: a hidden element loses focus without a trace.
+    const hadFocus = panes.get(activeTabId)?.el.contains(document.activeElement) === true;
     document.getElementById('app')?.classList.toggle('tui-mode', enabled);
+    if (!enabled && hadFocus) {
+        document.getElementById('input')?.focus();
+    }
     activeTabId = enabled ? active : '';
     for (const [id, p] of panes) {
         p.el.classList.toggle('tui-pane--active', id === activeTabId);
@@ -169,6 +178,18 @@ export function syncTuiView(tuiTabIds: string[], active: string): void {
         fitPane(active, pane);
         pane.term.focus();
     });
+}
+
+/**
+ * Puts keyboard focus in the tab's terminal: at once when it is the one shown, else the state sync that
+ * shows it does (syncTuiView). For a dialog card's Show the terminal button, so keys go to the TUI
+ * without first clicking into it.
+ */
+export function focusTui(tabId: string): void {
+    const pane = panes.get(tabId);
+    if (pane && tabId === activeTabId) {
+        pane.term.focus();
+    }
 }
 
 export function writeTuiData(tabId: string, data: string): void {

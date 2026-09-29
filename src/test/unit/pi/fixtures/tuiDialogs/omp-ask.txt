@@ -1,0 +1,30 @@
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+╰──────────────────────────┴─────────────────────────────────────────────────────────────────────╯
+ Tip: `/shake` rips heavy tool results out of context to reclaim tokens without a full /compact —
+      `/shake images` drops just images
+
+
+ MCP server failed to connect: expo:expo [config:
+ ~/.claude/plugins/cache/claude-plugins-official/expo/1.13.6/.mcp.json]: HTTP 401:
+ {"error":"invalid_token","error_description":"Missing Authorization h…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.4.3 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+╭─ Ask ────────────────────────────────────────────────────────────────────────────────────────────╮
+│  a    b    Submit                                                                                │
+│ Which database?                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ❯ ○ Postgres                                                                                     │
+│   ○ SQLite                                                                                       │
+│   ○ Other (type your own)                                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

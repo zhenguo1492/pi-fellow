@@ -1,0 +1,30 @@
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+│                          │                                                                     │
+╰──────────────────────────┴─────────────────────────────────────────────────────────────────────╯
+ Tip: Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `omp -c`
+      resumes the right one
+
+
+ Connecting to MCP servers: expo:expo…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.4.3 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ MCP server failed to connect: expo:expo [config:
+ ~/.claude/plugins/cache/claude-plugins-official/expo/1.13.6/.mcp.json]: HTTP 401:
+ {"error":"invalid_token","error_description":"Missing Authorization h…
+
+╭─ Pick a deploy target ───────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│                                                                                                  │
+│    Staging                                                                                       │
+│  ❯ Production                                                                                    │
+│    Local only                                                                                    │
+│                                                                                                  │
+│ up/down navigate  enter select  esc cancel                                                       │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

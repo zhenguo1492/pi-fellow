@@ -1,317 +1,325 @@
-# 智能体光标：边讲边指代码（2026-09-25）
+# Agent cursor: pointing at code while talking (2026-09-25)
 
-**实现状态**：
+**Implementation status**:
 
-已实现：
-- **看到你的编辑器**：每轮消息附带 `<editor>` 块。代码在 `editorSnapshot.ts`，编辑器跟踪复用 `utils/fileEditor.ts`。
-- **代码锚点**：锚点从回复里取出，不显示也不朗读。代码在 `codeAnchors.ts`。
-- **Pi 高亮**：行尾显示标签，不改你的选区和焦点。三种焦点三种颜色：讲解时是紫色 `Pi`，读文件时是蓝色 `Pi · reading`，写文件时是绿色 `Pi · writing`。代码在 `agentCursor.ts`。
-- **和语音同步**：语音模式下，锚点在它后面那句话开始播放时才生效；打字对话时立即生效。
-- **Pi 焦点**：除了讲解时的指向，还包括语音智能体自己读的文件（`onRead`）和 worker 读写的文件（`workerFocus.ts`）。worker 写文件的范围按写前、写后的内容比较得出，比较逻辑在 `piFocus.ts` 的 `changedLines`。worker 的焦点只在语音智能体开着时显示。
-- **跟随 Pi**：开关只有一个，是输入框上方状态条里「Voice agent」右边的准星按钮（`voiceBar.ts` 的 `data-act="follow"`）：中心实心、高亮表示跟随，空心表示不跟随。点击会写入设置 `voiceAgent.followPi`（全局，默认 `true`），所以重启后保持你的选择。跟随时，编辑器会在你的栏里用预览标签打开 Pi 的焦点，不抢键盘。不跟随时只在状态栏显示 `$(eye-closed) Pi: writing calc.js:18-22`，已经显示在屏幕上的文件照样高亮。你一打字就自动停止跟随，按钮随之变为不跟随；这个自动停止不写设置，下次启动仍按你上次点的来。
-- **防乱跳**：讲解时的指向会保持 6 s，这段时间里读写活动只排队、不跳过去，之后只执行最新的那一个；读写活动之间也至少间隔 1.5 s。
-- **`open_file` 宿主工具**：你说"打开某文件 / 跳到某处"时，即使没在跟随也会打开。
-- **指向单个名字**：`⟦path:行#名字⟧` 只圈出那一行上的这个名字（变量、参数、字段），同一文件里它的其他用处用虚线框标出（`vscode.executeDocumentHighlights`，跟随作用域）。给的行上找不到时，向上下各找 3 行；再找不到就退回整行高亮。`⟦path#名字⟧` 解析到的符号如果是变量、常量、字段、属性或枚举成员，而且声明只占一行，也按名字圈出。`open_file` 同时给 `startLine` 和 `symbol` 时同理。状态栏显示成 `Pi: calc.js:6 · sum`。查找逻辑在 `piFocus.ts` 的 `findName`。
-- **提示词规则**：已加入。
+Implemented:
+- **Sees your editor**: every turn's message carries an `<editor>` block. Code is in `editorSnapshot.ts`; editor tracking reuses `utils/fileEditor.ts`.
+- **Code anchors**: anchors are extracted from the reply and are neither displayed nor spoken. Code is in `codeAnchors.ts`.
+- **Pi highlight**: a label is shown at the end of the line, without changing your selection or focus. Three kinds of focus, three colors: purple `Pi` when explaining, blue `Pi · reading` when reading a file, green `Pi · writing` when writing a file. Code is in `agentCursor.ts`.
+- **Synced with speech**: in voice mode, an anchor takes effect only when the sentence following it starts playing; in typed conversation it takes effect immediately.
+- **Pi focus**: besides pointing during explanations, this also covers files the voice agent reads itself (`onRead`) and files the worker reads and writes (`workerFocus.ts`). The range of a worker write is computed by comparing content before and after the write; the comparison logic is `changedLines` in `piFocus.ts`. Worker focus is shown only while the voice agent is on.
+- **Follow Pi**: there is a single toggle, the crosshair button to the right of "Voice agent" in the status bar above the composer (`data-act="follow"` in `voiceBar.ts`): a filled, highlighted center means following, hollow means not following. Clicking writes the setting `voiceAgent.followPi` (global, default `true`), so your choice persists across restarts. While following, the editor opens Pi's focus in your column in a preview tab, without stealing the keyboard. When not following, only the VS Code status bar shows `$(eye-closed) Pi: writing calc.js:18-22`; files already on screen are still highlighted. As soon as you type, following stops automatically and the button switches to not following; this automatic stop does not write the setting, so the next launch still uses what you last clicked.
+- **Anti-jumping**: pointing during an explanation is held for 6 s; during that time read/write activity is only queued, not jumped to, and afterwards only the latest one is performed; read/write activities are also spaced at least 1.5 s apart.
+- **`open_file` extension host tool**: when you say "open some file / jump somewhere", it opens even if you are not following.
+- **Pointing at a single name**: `⟦path:line#name⟧` circles only that name (variable, parameter, field) on that line, and other uses of it in the same file are marked with dashed boxes (`vscode.executeDocumentHighlights`, scope-aware). If it is not found on the given line, it searches 3 lines up and down; if still not found, it falls back to highlighting the whole line. If the symbol resolved by `⟦path#name⟧` is a variable, constant, field, property, or enum member and its declaration spans a single line, it is also circled by name. Same when `open_file` is given both `startLine` and `symbol`. The VS Code status bar shows it as `Pi: calc.js:6 · sum`. The lookup logic is `findName` in `piFocus.ts`.
+- **Prompt rules**: added.
 
-实测（真实 VS Code + omp，脚本 `/tmp/voice-smoke/suite-pair*.js`、`suite-follow.js`）：
-- 能看到选区，不读文件就答对；
-- 跨文件指向 `main.js` → `calc.js`；
-- 语音模式下，4 次指向分别落在 4 个步骤开始播放的那一刻；
-- 不跟随时 `open_file` 照样能打开文件，普通的指向不会动你的编辑器；
-- 重新跟随时会跳到 Pi 的焦点；
-- worker 写 `calc.js` 时，焦点依次是 `reading calc.js` → `writing calc.js` → `writing calc.js:18-22`，这个范围正好是新加的函数和导出行；
-- 你一打字就停止跟随，而 worker 写盘引起的文件重载不会让它停止跟随。
+Tested (real VS Code + omp, scripts `/tmp/voice-smoke/suite-pair*.js`, `suite-follow.js`):
+- It can see the selection and answers correctly without reading the file;
+- Cross-file pointing `main.js` → `calc.js`;
+- In voice mode, 4 pointings each land at the moment the corresponding one of 4 steps starts playing;
+- When not following, `open_file` still opens the file, and ordinary pointing does not move your editor;
+- Re-enabling following jumps to Pi's focus;
+- When the worker writes `calc.js`, the focus goes `reading calc.js` → `writing calc.js` → `writing calc.js:18-22`, and that range is exactly the newly added function and export line;
+- Following stops as soon as you type, while file reloads caused by the worker writing to disk do not stop it.
 
-与草案不同的地方：
-- 颜色是固定的三种颜色，没有写进 `contributes.colors`；
-- 标签在行尾，没有 `◀`；
-- 文件在你当前编辑器所在的栏打开（`preview` + `preserveFocus`），开关只有跟随和不跟随两档，没做 `lead` / `side` / `hint`。
+Differences from the draft:
+- Colors are three fixed colors, not declared in `contributes.colors`;
+- The label is at the end of the line, without `◀`;
+- Files open in the column of your current editor (`preview` + `preserveFocus`); the toggle has only two states, following and not following; `lead` / `side` / `hint` were not done.
 
-**未做**：
-- §4 的在旁边一栏打开（`side`）；
-- 聚焦历史，比如"上一个"、"回到我的代码"；
-- §5 的 `<agent-focus>`，也就是"这里"指谁；
-- 语音面板把锚点显示成小标签；
-- worker 执行 bash 或跑测试时，状态栏没有显示。
+**Not done**:
+- §4's opening in a side column (`side`);
+- Focus history, e.g. "previous", "back to my code";
+- §5's `<agent-focus>`, i.e. whom "here" refers to;
+- The voice panel showing anchors as small chips;
+- Nothing is shown in the VS Code status bar when the worker runs bash or tests.
 
-目标：语音智能体有一个**自己的代码选择器**，与你的光标分开。它讲到哪段代码，就在编辑器里高亮哪段；讲到别的文件时，自动打开那个文件。讲解和高亮按句子同步。
+Goal: the voice agent has **its own code selector**, separate from your cursor. Whatever code it is talking about gets highlighted in the editor; when it talks about another file, that file opens automatically. Explanation and highlighting are synced per sentence.
 
-验收场景：你问"讲讲一句话从麦克风到 worker 的完整路径"。它依次打开 `voiceMode.ts`、`conversation.ts`、`voiceAgent.ts`、`sidebar.ts`，每念一句，就高亮这句说的那几行。你的光标、选区和键盘焦点都不被动。
+Acceptance scenario: you ask "walk me through the full path of an utterance from the microphone to the worker". It opens `voiceMode.ts`, `conversation.ts`, `voiceAgent.ts`, `sidebar.ts` in turn, and for each sentence it speaks, it highlights the lines that sentence is about. Your cursor, selection, and keyboard focus are untouched.
 
-背景见 [`voice-pair-brainstorm.md`](./voice-pair-brainstorm.md)，本文对应其中的 F1。
+## 1. What the user sees
 
-## 1. 用户看到什么
-
-| 元素 | 实现 | 说明 |
+| Element | Implementation | Notes |
 |---|---|---|
-| 智能体高亮 | `TextEditorDecorationType`：独立的背景色、左侧竖条、gutter 图标、滚动条标记，行尾用 `after` 显示 `◀ Pi` | 颜色通过 `package.json` 的 `contributes.colors` 定义，跟随主题。**只是装饰，不改 `editor.selection`**，所以你的光标和选区不受影响 |
-| 切换文件 | `showTextDocument(uri, { preview: true, preserveFocus: true, viewColumn })` | 用预览 tab，讲完一圈不会留下一排 tab；`preserveFocus` 保证键盘焦点还在原来的地方 |
-| 滚动 | `revealRange(range, InCenterIfOutsideViewport)` | 目标已经在屏幕上就不滚动 |
-| 状态栏 | `🔊 Pi › stt.ts › transcribe (2/5)` | 显示它现在指着哪里；点击跳过去 |
-| 语音面板 | 句子里的锚点显示成可点击的 `stt.ts:139-141` 小标签 | 需要和正在做的语音面板约定好格式，见 §6 |
+| Agent highlight | `TextEditorDecorationType`: its own background color, left bar, gutter icon, scrollbar marker, and `◀ Pi` at line end via `after` | Colors are defined via `contributes.colors` in `package.json` and follow the theme. **Decoration only; `editor.selection` is not changed**, so your cursor and selection are unaffected |
+| Switching files | `showTextDocument(uri, { preview: true, preserveFocus: true, viewColumn })` | Uses a preview tab so a full walkthrough doesn't leave a row of tabs; `preserveFocus` keeps keyboard focus where it was |
+| Scrolling | `revealRange(range, InCenterIfOutsideViewport)` | No scrolling if the target is already on screen |
+| VS Code status bar | `🔊 Pi › stt.ts › transcribe (2/5)` | Shows where it is currently pointing; click to jump there |
+| Voice panel | Anchors in sentences shown as clickable `stt.ts:139-141` chips | The format must be agreed with the voice panel currently in progress; see §6 |
 
-## 2. 它怎么"指"：在回复里嵌入锚点
+## 2. How it "points": anchors embedded in the reply
 
-模型在回复文本里写锚点，**放在它所指的那句话开头**：
+The model writes anchors in its reply text, **placed at the start of the sentence they refer to**:
 
 ```
-入口在这里⟦src/voiceAgent/voiceMode.ts:560-575⟧，它把每句话送去合成。
-然后状态机接手⟦src/voiceAgent/conversation.ts#reduce⟧，决定谁在说话。
+The entry point is here⟦src/voiceAgent/voiceMode.ts:560-575⟧; it sends each sentence to synthesis.
+Then the state machine takes over⟦src/voiceAgent/conversation.ts#reduce⟧ and decides who is speaking.
 ```
 
-支持四种形式：
+Four forms are supported:
 
-- `⟦path:start-end⟧`：一段行
-- `⟦path:line#name⟧`：那一行上的一个名字，比如变量或参数，只圈出名字本身和它在文件里的其他用处
-- `⟦path:line⟧`：一行
-- `⟦path#symbol⟧`：一个符号。用 `vscode.executeDocumentSymbolProvider` 解析成范围，模型不用读文件、不知道行号也能指
+- `⟦path:start-end⟧`: a range of lines
+- `⟦path:line#name⟧`: a name on that line, such as a variable or parameter; only the name itself and its other uses in the file are circled
+- `⟦path:line⟧`: one line
+- `⟦path#symbol⟧`: a symbol. Resolved to a range with `vscode.executeDocumentSymbolProvider`, so the model can point without reading the file or knowing line numbers
 
-**为什么用内嵌锚点，不用宿主工具（`show_code`）**：
+**Why embedded anchors rather than an extension host tool (`show_code`)**:
 
-- 工具调用要多一次往返，设计文档实测一轮工具约 2.8 s；
-- 工具调用发生在说话之前，没法和"念到哪一句"对齐；
-- 锚点跟着文本流走，天然和句子绑定，不增加延迟。
+- A tool call costs an extra round trip; the design doc measured about 2.8 s per tool round;
+- A tool call happens before speaking, so it cannot be aligned with "which sentence is being spoken";
+- Anchors travel with the text stream, are naturally bound to sentences, and add no latency.
 
-模型知道行号，因为它自己的 `read` 工具输出带行号。
+The model knows line numbers because its own `read` tool output includes them.
 
-## 3. 数据流
+## 3. Data flow
 
 ```mermaid
 flowchart LR
-  LLM[语音模型流式文本] --> CUT[takeSentences<br/>锚点整体不切]
-  CUT --> SPK[speak 效果<br/>句子保留锚点]
-  SPK --> STRIP[送 TTS 前剥掉锚点]
-  STRIP --> TTS[TTS 合成 / 播放]
-  TTS -->|playing 事件| CUR[AgentCursor.focus]
-  CUR --> ED[编辑器：打开文件 / 滚动 / 高亮]
-  SPK --> PANEL[语音面板：锚点显示成小标签]
+  LLM[Voice model streaming text] --> CUT[takeSentences<br/>never split inside anchors]
+  CUT --> SPK[speak effect<br/>sentences keep anchors]
+  SPK --> STRIP[Strip anchors before TTS]
+  STRIP --> TTS[TTS synthesis / playback]
+  TTS -->|playing event| CUR[AgentCursor.focus]
+  CUR --> ED[Editor: open file / scroll / highlight]
+  SPK --> PANEL[Voice panel: anchors shown as chips]
 ```
 
-现有的挂载点：
+Existing hook points:
 
-- `sentences.ts` 的 `takeSentences` 目前会在 `:` 处切句（软断点），锚点里的 `:` 可能被切开。需要让 `⟦…⟧` 像代码围栏一样整体不切。
-- `voiceMode.ts:308` 的 `speak` 效果把句子交给 `Speaker`；在 `voiceMode.ts:594` 调 `synthesize` 之前剥掉锚点。
-- `voiceMode.ts:270` 已经会对每句话发出 `playing` 事件（`onAudio`）。智能体光标只要订阅它：**哪句开始播放，就聚焦那句的锚点**。
-- 打字模式（语音模式没开）：从 `VoiceAgentListener.onText`（`voiceAgent.ts:52`）的增量里，锚点一完整就立即聚焦。
-- 回声过滤：`recentReplies` 取自生成文本，比对前也要剥掉锚点，否则回声比对会失真。
+- `takeSentences` in `sentences.ts` currently splits sentences at `:` (a soft break), so the `:` inside an anchor could be split. `⟦…⟧` must be kept whole, like a code fence.
+- The `speak` effect at `voiceMode.ts:308` hands sentences to `Speaker`; strip anchors before `synthesize` is called at `voiceMode.ts:594`.
+- `voiceMode.ts:270` already emits a `playing` event for each sentence (`onAudio`). The agent cursor only needs to subscribe to it: **when a sentence starts playing, focus that sentence's anchor**.
+- Typed mode (voice mode off): from the deltas of `VoiceAgentListener.onText` (`voiceAgent.ts:52`), focus an anchor as soon as it is complete.
+- Echo filtering: `recentReplies` is taken from generated text, so anchors must also be stripped before comparison, otherwise echo matching is skewed.
 
-## 4. 不打扰的规则
+## 4. Non-intrusion rules
 
-1. **永远不改你的光标、选区和键盘焦点。** 只用装饰和 `preserveFocus`。
-2. **你在打字时不抢主编辑区。** 如果你最近 5 s 内在编辑，或者当前文件有未保存改动：
-   - 在旁边一栏打开（`ViewColumn.Beside`）；
-   - 或者只在状态栏提示"Pi 想给你看 stt.ts › transcribe"，由你决定要不要过去。
+1. **Never change your cursor, selection, or keyboard focus.** Use only decorations and `preserveFocus`.
+2. **Don't take over the main editor area while you are typing.** If you edited within the last 5 s, or the current file has unsaved changes:
+   - open in a side column (`ViewColumn.Beside`);
+   - or only hint in the VS Code status bar "Pi wants to show you stt.ts › transcribe", and let you decide whether to go there.
 
-   由设置 `voiceAgent.cursor.follow` 控制：`lead`（直接带你看）/ `side`（在旁边一栏）/ `hint`（只提示）。
-3. **高亮什么时候消失**：这轮说完后再保留 N 秒；你在那个范围里点击或编辑，也会立即清掉。
-4. **打断**：你插嘴时停止切换，保留当前高亮，因为你多半就是想问这里。`<interrupted>` 说明里本来就记录了播到哪一句，模型能知道光标停在哪。
-5. **可以回退**：维护一个聚焦历史栈。可以说"上一个""回到刚才"；也可以说"回到我的代码"，回到讲解开始前你所在的文件和位置。
+   Controlled by the setting `voiceAgent.cursor.follow`: `lead` (take you there directly) / `side` (in a side column) / `hint` (hint only).
+3. **When the highlight disappears**: kept for N seconds after the turn finishes; clicking or editing inside that range also clears it immediately.
+4. **Interruption**: when you barge in, stop switching and keep the current highlight, since you most likely want to ask about that spot. The `<interrupted>` note already records which sentence was playing, so the model can know where the cursor stopped.
+5. **Going back**: maintain a focus history stack. You can say "previous" or "go back"; you can also say "back to my code" to return to the file and position you were at before the explanation began.
 
-## 5. "这里"指谁的光标
+## 5. Whose cursor "here" refers to
 
-接入 EditorWatcher（brainstorm 里的 E1）以后，每轮消息里同时附上两个位置：
+Once EditorWatcher is wired in, each turn's message carries both positions:
 
-- `<editor …>`：你在看的地方
-- `<agent-focus file="…" lines="…">`：它刚才指的地方
+- `<editor …>`: where you are looking
+- `<agent-focus file="…" lines="…">`: where it just pointed
 
-消解规则：
+Resolution rules:
 
-- 智能体聚焦之后，你动过自己的光标或选区：说"这里"指你的位置；
-- 否则指它刚才高亮的位置。
+- If you moved your own cursor or selection after the agent focused: "here" means your position;
+- Otherwise it means the position it just highlighted.
 
-这一点很关键。它正在带你看代码时，你问"这里为什么要 await"，"这里"指的是它的高亮，不是你的光标。
+This matters. While it is walking you through code and you ask "why is there an await here", "here" means its highlight, not your cursor.
 
-## 6. 校验与安全
+## 6. Validation and safety
 
-- 锚点路径必须在工作区内，而且文件存在；行号超出文件范围就截到有效范围；符号解析失败就退回文件开头。无效锚点忽略，只记日志。
-- 这个功能只读，不写任何文件。它不突破设计文档 §1.2 的非目标（"语音智能体不直接修改文件"）。
-- 给语音面板的约定：句子文本里保留原始锚点 `⟦path:start-end⟧` / `⟦path#symbol⟧`，由面板渲染成小标签，点击时执行 `oh-my-pi-chater.voiceAgent.revealAnchor`。
+- Anchor paths must be inside the workspace and the file must exist; line numbers outside the file are clamped to the valid range; if symbol resolution fails, fall back to the start of the file. Invalid anchors are ignored and only logged.
+- This feature is read-only and writes no files. It does not violate the non-goal in design doc §1.2 ("the voice agent does not modify files directly").
+- Contract with the voice panel: sentence text keeps the raw anchors `⟦path:start-end⟧` / `⟦path#symbol⟧`; the panel renders them as chips, and clicking executes `oh-my-pi-chater.voiceAgent.revealAnchor`.
 
-## 7. 提示词要加的规则
+## 7. Rules to add to the prompt
 
-系统提示词是静态的，加规则不影响缓存：
+The system prompt is static, so adding rules does not affect caching:
 
-- 讲代码时，在每句话开头放它所指的锚点；每句最多一个。
-- 优先用 `#symbol` 形式。行号只用你刚 `read` 过、确认过的。
-- 不要把路径念出来，说"这里""这个函数"就行，用户看得到高亮。
-- 跨文件讲解时按执行顺序走，每处一两句。
+- When explaining code, put the anchor it refers to at the start of each sentence; at most one per sentence.
+- Prefer the `#symbol` form. Only use line numbers you have just `read` and confirmed.
+- Don't read paths aloud; say "here" or "this function" — the user can see the highlight.
+- For cross-file explanations, follow execution order, one or two sentences per location.
 
-## 8. 实现切片
+## 8. Implementation slices
 
-| # | 内容 | 文件 | 备注 |
+| # | Content | Files | Notes |
 |---|---|---|---|
-| 1 | 锚点解析、剥离、切句时整体不切（纯函数，带单元测试） | 新增 `src/voiceAgent/codeAnchors.ts`；改 `sentences.ts` | 可以马上做，不和面板冲突 |
-| 2 | `AgentCursor`：装饰、打开和滚动、跟随策略、历史栈、状态栏 | 新增 `src/voiceAgent/agentCursor.ts`；`package.json` 加 colors、设置、命令 | 可以马上做 |
-| 3 | 接线：送 TTS 前剥锚点；`playing` 时聚焦；打字模式走 `onText`；回声比对剥锚点 | `voiceMode.ts`、`voiceAgentCommands.ts`、`conversation.ts` | **另一个会话正在改这几个文件**（面板），要等它合入 |
-| 4 | 提示词规则 | `voicePrompt.ts` | |
-| 5 | `<agent-focus>` 和 `<editor>` 快照，"这里"的消解 | `voicePrompt.ts`、`voiceAgent.ts`；需要先做 EditorWatcher | 第二阶段 |
-| 6 | 语音面板把锚点渲染成小标签 | `voiceView.ts` | 和面板作者约定格式 |
+| 1 | Anchor parsing, stripping, keeping anchors whole during sentence splitting (pure functions, with unit tests) | New `src/voiceAgent/codeAnchors.ts`; change `sentences.ts` | Can be done right away; no conflict with the panel |
+| 2 | `AgentCursor`: decorations, opening and scrolling, follow policy, history stack, VS Code status bar | New `src/voiceAgent/agentCursor.ts`; add colors, settings, commands to `package.json` | Can be done right away |
+| 3 | Wiring: strip anchors before TTS; focus on `playing`; typed mode goes through `onText`; strip anchors for echo comparison | `voiceMode.ts`, `voiceAgentCommands.ts`, `conversation.ts` | **Another session is editing these files** (the panel); wait for it to merge |
+| 4 | Prompt rules | `voicePrompt.ts` | |
+| 5 | `<agent-focus>` and `<editor>` snapshots, resolving "here" | `voicePrompt.ts`, `voiceAgent.ts`; requires EditorWatcher first | Phase two |
+| 6 | Voice panel renders anchors as chips | `voiceView.ts` | Agree on format with the panel author |
 
-## 9. 待定
+## 9. Open questions
 
-1. `follow` 默认用 `lead`、`side` 还是 `hint`？建议默认 `lead`，你在打字时自动降为 `side`。
-2. 讲完一圈要不要自动回到原来的位置？建议不自动回去，但留一个"回到我的代码"。
-3. 高亮颜色：用一个固定的"Pi 色"，和你自己的选区颜色明显区分开。
+1. Should `follow` default to `lead`, `side`, or `hint`? Suggest defaulting to `lead`, automatically downgrading to `side` while you are typing.
+2. After a full walkthrough, should it automatically return to the original position? Suggest not returning automatically, but keeping a "back to my code".
+3. Highlight color: use a fixed "Pi color" clearly distinct from your own selection color.
 
-## 11. 两个模式：委派 / 结对（已实现，2026-09-25）
+## 11. Working beside the worker: the file lock (2026-09-29)
 
-| | 委派模式（值 `omp`） | 结对模式（默认，值 `pair`） |
+Until 2026-09-29 the voice agent had two modes: one in which it only directed the worker, and one in which it worked in the editor itself. The directing mode was removed, because the voice agent working itself can hand a heavy job to the worker anyway: the prompt's "Dividing the work" section (`VOICE_SYSTEM_PROMPT`) has it do small work (a function or a few blocks in one or two files) at once and send heavy work (many files, a big refactor, a long test run, anything gaining from parallel agents) to the worker with `tell_worker`. That mode's only real value was keeping the two from editing the same files at once; that is now the file lock below. All tools are always available: the voice agent's own tools (`edit_file`, `run_in_terminal`, the debugging tools in §12, the file tools in §13) and the worker tools (`tell_worker`, `confirm_task`, `stop_worker`, `answer_worker`, `worker_status`). Proactive turns may not change files or run commands.
+
+**What the gate reports** (`src/piExtension/permissionGate.ts`, loaded into every RPC chat worker by `PiRpcBridge`):
+- The gate runs before every worker tool call. For every call it does not block (allowed, or about to ask the user), it computes `modifiedPaths(toolName, input)` (`src/pi/permissionPolicy.ts`), resolves them against `ctx.cwd` (fallback `process.cwd()`), and synchronously appends one NDJSON line `{"paths":[…]}` of absolute paths to the file named by env `VSCODE_PI_EDITS_FILE` (`EDITS_FILE_ENV`), before the tool runs.
+- A call about to ask is reported before the user answers, so its files are locked from the moment the worker asks. A call that is then denied leaves its files locked until the task ends, which is harmless.
+- It also reports while pi's own plan mode owns the policy.
+
+**`modifiedPaths`** (`src/pi/permissionPolicy.ts`):
+- Read-tier calls (`toolTier`): nothing.
+- `write` / `edit`: `editPaths`, i.e. `path` / `file_path`, omp hashline `[path#tag]` section headers and `MV dest` lines, apply_patch `*** Add/Update/Delete File:` and `*** Move to:`, `edits[].rename`. `editPaths` moved here from `src/voiceAgent/piFocus.ts`; `WorkerFocusTracker` (`workerFocus.ts`) uses it from here.
+- `ast_edit`: its `paths`; a glob becomes its folder before the first wildcard; no paths means the whole working folder `.`.
+- `lsp` rename / code action: its `file` (and `new_name` for rename_file) only.
+- Internal URLs (`xd://`, `local://`, `memory://`) are skipped. Commands are not parsed (see the bash gap below).
+
+**Host set** (`PermissionGateFile` in `src/pi/permissionGate.ts`, `WorkerEditLocks` in `src/pi/workerEdits.ts`):
+- `PermissionGateFile` creates the edits file next to the permission file (`os.tmpdir()/vscode-pi-edits-<uuid>.ndjson`), passes the env var in `launch()`, and deletes the file with the worker (`dispose`). A new worker process gets a new, empty file.
+- `edits()` reads the new whole lines synchronously into a `WorkerEditLocks`, a set of absolute normalized paths (`ingest`, `overlapping(targets)`, `clear`); being synchronous, it always sees a report the gate wrote before its tool ran. `clearEdits()` empties the set and truncates the file.
+- Exposed as `PiRpcBridge.workerEdits()` / `clearWorkerEdits()` and `PiChatSession.workerEdits()`. `PiChatSession` clears it on `agent_end` unless `willRetry`, i.e. when the task ends.
+
+**Lock check** (`WorkerController.lockedPaths(tabId, paths)`, implemented in `SidebarWorker`; `HostToolRouter._workerLock` in `hostTools.ts`):
+- `lockedPaths` is empty while the tab's worker is not streaming or the tab is in TUI mode. Otherwise it resolves the voice agent's workspace-relative paths against the first workspace folder and returns, workspace-relative, the locked paths that overlap them: the same path, a target inside a locked folder, or a locked file inside a target folder.
+- `_workerLock` checks `edit_file`, `create_file` and `delete_file` (`path`), `rename_file` (`from` and `to`), and `save_file` (`path`, or the whole workspace `.` without a path). Other tools are not checked.
+- The check runs before the permission checks, so a locked deletion is not even asked about, and again when an approval card is answered; a refusal then settles the card as "Not done: …".
+- Refusal text: "The worker's running task is changing <paths>, so you may not touch it/them until that task ends. Tell the user, then work on other files, wait for the worker to finish, or ask whether to stop it." The prompt says the same: tell the user, then work on other files, wait, or ask whether to stop the worker; and do not send the worker a task on a file the voice agent itself is in the middle of changing.
+- Other files stay editable while the worker works.
+
+**Known gaps**:
+- TUI tabs: the TUI does not load the gate, so nothing is reported. For a tab in TUI mode the router keeps the old rule: while its TUI runs a task, all the voice agent's file changes are refused wholesale ("The worker is still running a task and may be writing files…"). Left as is for now.
+- bash: commands are not parsed, so `rm` / `mv` / `sed -i` via bash and other exec tools report nothing, and the files they change are not locked.
+
+**Tests**: `src/test/unit/pi/permissionGate.test.ts` ("reporting file changes to the host"), `src/test/unit/pi/workerEdits.test.ts` (lock set, edits file, gate → host end to end), `src/test/unit/voiceAgent/hostTools.test.ts` ("the worker's file lock", TUI case); eval `src/test/eval/voicePrompt.eval.ts` ("a heavy job goes to the worker", "a file the worker is changing is left alone").
+
+The voice agent's own tools follow.
+
+**`edit_file`** (`pairHands.ts`; location logic is `locateEdit` in `pairText.ts`):
+- Uses `oldText` to exactly match the location to change; if there are multiple matches, picks the one nearest `nearLine`. Empty `oldText` can only fill an empty file; a missing file is an error — use `create_file` (§13) for new files.
+- First deletes the original text, then types the new code line by line, about 90 ms per line, at most 2 s total. The green `Pi · writing` highlight follows the line being written, and is shown whether or not you are following.
+- The deletion and line-by-line typing are merged into one undo step: the first edit sets `undoStopBefore`, and only the last edit sets `undoStopAfter`. So a single Ctrl+Z undoes it.
+- If the file had no unsaved changes, it is saved automatically; if you have unsaved changes, it is not saved.
+- If the file is changed by someone else while typing (the document version number jumps), it stops and reports.
+- Refused on a file the worker's running task is changing (the file lock above).
+- Only files inside the workspace can be changed; see §13 for the check rules.
+- Its own edits do not count as "you typing", so they don't stop following.
+
+**`run_in_terminal`** (`pairHands.ts`; output cleanup is `cleanTerminalOutput` in `pairText.ts`):
+- Runs in a dedicated "Pi" terminal shown at the bottom, without stealing the keyboard.
+- Executes via shell integration's `executeCommand`, reads the output and exit code, and gives the last 60 lines to the model.
+- Waits 30 s by default; on timeout it returns the output so far, the command keeps running, and the result names the terminal (e.g. "Pi (2)") so it can be operated further with `terminal_send` / `terminal_read`.
+- If the previous command is still running, a new "Pi (2)" terminal is opened.
+- If the terminal has no shell integration, the command is only sent, with a note that the result cannot be seen.
+
+**`terminal_send` / `terminal_read`** (`pairHands.ts`; operate interactive programs left running after a `run_in_terminal` timeout, e.g. psql; full-screen TUIs such as vim or top are out of scope):
+- Timed-out commands continue to be tracked: output keeps being read into their scrollback buffer (at most 200 000 characters), remembering how far the model has already seen.
+- `terminal_send {terminal?, text, enter?, waitSecs?}`: `terminal` is a Pi terminal name, defaulting to the most recent one still running; input via `sendText(text, enter)` (`enter` defaults to true; `text` may be empty to just press Enter), waits until output has been quiet for 500 ms or `waitSecs` (default 2, max 30), and returns only new output; if the program has ended, returns the exit code. The result does not repeat the input text (it may be a password); the tool description warns that input is echoed and that passwords should preferably go through `.pgpass` or environment variables. If the program has already ended, nothing is typed (otherwise it would go to the shell as a new command); it only reports that it ended.
+- `terminal_read {terminal?}`: returns new output since last time; if there is none, gives the last 20 lines and says whether it is still running.
+- An ended command stops being tracked after its exit code is reported once; it is also dropped when a new command runs in the same terminal or the terminal is closed.
+- Permissions: `terminal_send` counts as running a command like `run_in_terminal` (rejected in Plan; requires approval in Manual and Edit automatically); `terminal_read` is read-only and needs no approval.
+
+**Prompt constraints**:
+- Do small work itself; hand heavy work to the worker with `tell_worker`, unless the user wants to go step by step;
+- Run only commands the user asked for or just agreed to;
+- For operations like deleting files, `git push`, or installing dependencies, ask the user first.
+
+**Tested** (2026-09-25, script `/tmp/voice-smoke/suite-pairmode.js`):
+- Adding a `double` function: written line by line, highlight moves from 15-16 to 15-22, saved, worker idle, one Ctrl+Z restores the original;
+- Running `node -e …double(21)` in the terminal → exit code 0, output 42; `process.exit(3)` → exit code 3.
+
+**Known limitations**:
+- The voice agent's own changes do not go into checkpoints or the diff panel; rollback relies on Ctrl+Z or git;
+- Pi focus in the VS Code status bar does not show terminal commands;
+- "Only run commands you asked for" is enforced only by the prompt; the extension host does not check it.
+
+## 12. Reading VS Code output, debugging (implemented, 2026-09-25)
+
+| Tool | What it does |
+|---|---|
+| `read_output` | Read-only. Without `source`: lists readable outputs; with `source`: returns its last lines (default 80, max 400) |
+| `list_viewers` | Doesn't change files. Lists editors that can display this file (custom editors from all installed extensions) and preview commands from VS Code's built-in extensions (e.g. Markdown preview); no extension is hardcoded |
+| `open_with` | Doesn't change files. Opens the file with one of the viewers `list_viewers` returned for the same file; `toSide` opens in the side editor group; waits at most 8 s |
+| `debug_start` | Starts a configuration from `.vscode/launch.json` by name (`noDebug` is equivalent to Ctrl+F5), waits until paused or finished (default 15 s) |
+| `debug_control` | Presses a debug toolbar button: continue, pause, stepOver, stepInto, stepOut, restart, stop; waits until the next pause or finish (default 10 s) |
+| `set_breakpoint` | Adds a breakpoint on a line (optionally with a condition), or deletes it with `remove` |
+| `debug_inspect` | Where it is stopped: code, call stack, local variables, breakpoint list; with `expression`, evaluates in the top stack frame |
+
+**`read_output`** (`vscodeOutput.ts`; name matching is `pickName` in `pairText.ts`: exact match first, case-insensitive; otherwise the unique one containing it):
+- **Output panel**: VS Code has no API to read other extensions' output channels, but each channel is written as a file in the current window's log directory, right next to this extension's `context.logUri`. It reads: `exthost/output_logging_<latest>/<n>-<name>.log` (extensions' plain channels), `exthost/<extension id>/<name>.log` (log channels, e.g. Git), `exthost/exthost.log` (Extension Host), `window<N>/output_<latest>/tasks.log` (Tasks), and window- and session-level `*.log` (Window, Main, Shared, etc.). Only the last 256 KB of a file is read. This directory layout is undocumented; if VS Code changes it, this must follow.
+- **Debug Console**: `DebugDriver` uses `registerDebugAdapterTrackerFactory('*')` to collect `output` events from all debug sessions (excluding telemetry), grouped per run (top-level session plus js-debug child sessions), keeping the last 5 runs. The latest is called `Debug Console`.
+- **Terminals**: `onDidStartTerminalShellExecution` records commands run in all terminals (including the user's own), keeping the last 5 commands per terminal with their output and exit code. Only commands run after the extension started, in terminals with shell integration, are available; terminals without shell integration are marked in the list as unreadable.
+
+**`list_viewers` / `open_with`** (discovery and matching in the pure-function module `viewers.ts`, execution in `pairHands.ts`):
+
+Only the parts found reliable in testing are kept (2026-09-26): custom editors are all opened with `vscode.openWith`, equally reliable regardless of who contributes them (draw.io opens fine); the built-in Markdown preview works (bierner.markdown-mermaid draws Mermaid inside it). Third-party extensions' preview commands each require different arguments and state and are unreliable: MermaidChart's `mermaidChart.preview` on a `.mmd` file either displays nothing or times out after 8 s. So third-party preview commands are not listed by default and not accepted by `open_with`; to use them, enable the setting `oh-my-pi-chater.voiceAgent.discoverPreviewCommands` (default `false`, read on each call).
+
+The prompt tells the model: open diagram files like `.drawio` with their custom editor; put Mermaid in a mermaid code block in a `.md` file and preview it to the side with `markdown.showPreviewToSide`, editing and viewing side by side; for a standalone `.mmd` file, it may propose moving it into Markdown.
+
+- **Editors**: scans `contributes.customEditors` in `vscode.extensions.all`; `selector.filenamePattern` is matched by VS Code's rules (with `/` it matches the whole path, otherwise only the file name, case-insensitive), e.g. draw.io's `*.drawio`, `*.dio`, `*.drawio.svg`. Order: extension `default`, built-in `builtin`, `option`, and finally the built-in text editor `default`. Not affected by the setting above.
+- **Built-in vs third-party**: an extension counts as built-in if `isBuiltin` in its runtime extension description (not in the API types) is set, or if it is installed under `vscode.env.appRoot/extensions`.
+- **Preview commands** (always discovered for built-in extensions; also for third-party ones when the setting is on): commands in `contributes.commands` whose name (last segment of the id, split on camelCase) or title contains a word starting with preview (`appReview` does not count), and whose extension is meant for this file:
+  - the same extension's `menus` has a `when` indicating it is for this file: an `==` or `=~` on `resourceLangId`/`editorLangId`/`resourceExtname`/`resourceFilename`/`resourcePath` holds, and no condition on the file fails; other context keys (focus, views, etc.) are treated as unknown;
+  - or the command is not restricted by a `commandPalette` `when` (shown in the command palette for all files), and the extension contributes this file's language or an editor that can open it (with the setting on, MermaidChart's `mermaidChart.preview` is found this way).
+  - Ranking: editor title bar 0, command palette 1, only in context menus etc. 2; add 2 more if hidden from the command palette (`when: false`) or if the id contains ContextMenu. Among identical titles only the top-ranked one is kept. At most 8. Markdown's `markdown.showPreview` and `markdown.showPreviewToSide` are found from the built-in extension regardless of the setting.
+- **Language**: if the file is already open, its `languageId` is used; otherwise inferred from each extension's `contributes.languages` `filenames`, `filenamePatterns`, and the longest `extensions`.
+- **Whether the file exists**: a file already open in `workspace.textDocuments` counts as existing (a file just created by `create_file` may not yet be stat-able); otherwise `fs.stat` is tried up to 5 times, 200 ms apart.
+- **Safety**: the path must be inside the workspace, as with other tools; `open_with` first recomputes `list_viewers` and rejects any id not in it, so it cannot be used to run arbitrary commands.
+- **Execution**: editors use `vscode.openWith`. For preview commands, the file is first shown as the active editor (many preview commands ignore arguments and only look at the active editor), then the command is run with the uri; if it throws, or no new tab appears within 1.5 s, it is run once more without arguments. Opening the file and each command execution wait at most 8 s; on timeout it returns "started, not finished yet", without waiting further or running a second time, so the tool doesn't hang when an extension's command never returns.
+
+**Debugging** (`debugDriver.ts`):
+- Control uses VS Code's own commands (`workbench.action.debug.stepOver`, etc.), acting on the session and thread you see in the UI; the debug toolbar and Variables view update as usual.
+- Paused/running is determined from debug adapter messages: a `stopped` event means paused; a `continued` event, or a `continue` / `next` / `stepIn` / `stepOut` etc. request sent to the adapter, means running. So it keeps up even when you press F10 yourself.
+- Waiting starts listening before the action, so a quickly hit breakpoint isn't missed. restart may switch to a new top-level session, so it only waits for a pause and does not treat the old session ending as "finished".
+- When paused it returns: the reason, function and location, 2 lines of code before and after (current line marked `→`), up to 5 call stack frames, and up to 25 variables from the first non-expensive scope. The paused line becomes Pi's focus and is opened and highlighted even when not following.
+- After setting a breakpoint, that line is also opened as Pi's focus.
+- Starting or restarting a program counts as "running a command"; the prompt requires the user to ask or agree first; stepping and inspecting while debugging together need no further asking.
+
+**Tested** (script `/tmp/voice-smoke/suite-debug.js`, real VS Code + omp + built-in js-debug):
+- "What is sum in average for, show me" → focus `name: "sum"`, solid box at the declaration, dashed boxes at the other two uses, `Pi` label at line end;
+- "What error did Smoke Build report" → `read_output` read `error E1234`, which the test wrote to the output channel;
+- "What did the command just run in the user shell terminal output" → read the command, stdout, stderr, and `exit code 2`;
+- "Set a breakpoint on calc.js line 11 and start debugging with Run main" → `set_breakpoint` + `debug_start`, returned `Paused (breakpoint) in global.average at calc.js:11`, local variables `sum = 0; values = (0) []`, Pi focus at `calc.js:11`;
+- `debug_inspect` evaluating `[sum, values.length]` → `[0, 0]`; stepOut → `main.js:3`; continue → runs to completion, Debug Console shows `average of scores: NaN`; afterwards `read_output` on `Debug Console` gets the same content.
+
+**Known limitations**:
+- An exit code is available only if the adapter sends an `exited` event; in testing js-debug did not send it;
+- Evaluation is only in the top stack frame, ignoring the frame you selected in the Call Stack view;
+- Terminal output is recorded only from extension startup onward.
+
+## 13. File operations (implemented, 2026-09-26)
+
+Code is in `fileHands.ts`; routing and delete confirmation are in `hostTools.ts`. Proactive turns cannot use these tools. `create_file`, `rename_file`, `delete_file` and `save_file`, like `edit_file`, are refused on files the worker's running task is changing (the file lock, §11).
+
+| Tool | Implementation | Notes |
 |---|---|---|
-| 谁动手 | worker（`tell_worker` 等） | 语音智能体自己：`edit_file`、`run_in_terminal`，调试工具（§12） |
-| worker 工具 | 可用 | 宿主拒绝（`tell_worker` / `confirm_task` / `stop_worker` / `answer_worker`） |
-| 结对工具 | 宿主拒绝 | 可用 |
+| `create_file` `{path, content?}` | `WorkspaceEdit.createFile(…, { contents })` | Errors if the file already exists. Missing parent folders are created automatically. Once created, it opens in your editor column with the `Pi · writing` highlight |
+| `create_folder` `{path}` | `workspace.fs.createDirectory` | If it already exists, just reports so |
+| `rename_file` `{from, to}` | `WorkspaceEdit.renameFile(…, { overwrite: false })` | Can rename or move files and folders. Errors if the target exists; never overwrites. Cannot rename the workspace root |
+| `delete_file` `{path, recursive?}` | See below | Requires confirmation first |
+| `save_file` `{path?}` | `TextDocument.save()` | Without path, saves all workspace files with unsaved changes. This also saves your own changes to disk, so the prompt requires using it only when you ask |
+| `close_editor` `{path}` | `window.tabGroups.close` | Closes this file's tabs in all editor groups; refuses if there are unsaved changes |
 
-**切换规则**（`hostTools.ts` 的 `set_mode`）：
-- 进入结对模式需要两步。第一次调用只记录请求，模型要请用户确认；之后用户的下一轮回复表示同意，才能真正切换。这个规则和 `confirm_task` 相同。
-- 切回委派立即生效。用户要求时切；在结对模式里遇到重活（比如需要几个智能体并行），语音智能体也可以自己切，调用时带 `auto=true`，然后让 worker 去做，worker 可以自己开子智能体。
-- 自己切走的例外：只有语音智能体自己从结对带 `auto=true` 切到委派后，它可以不经确认直接切回结对（活干完后）。标记 `_autoSwitchedFromPair` 在切回结对、或用户在界面上切换模式时清除；用户要求切到委派的（口头或界面），切回结对仍要两步确认。
-- 界面上的切换（机器人工具条的模式按钮、命令 "Switch Delegate / Pair Mode"）本身就是明确的操作，不需要确认。
-- 新启动的语音智能体总是在结对模式。用户交代任务时它先判断轻重：小改动自己做，重活自己带 `auto=true` 切到委派交给 worker，做完切回结对。
-- 主动开口的轮次不能切换模式、不能改文件、不能跑命令。
+`edit_file` no longer creates files; creation always goes through `create_file`.
 
-**显示**：
-- 输入框上方的机器人工具条有模式按钮：委派模式显示委派图标，结对模式显示握手图标，悬停提示 “Delegate mode” / “Pair mode”，点击切换；
-- Bot 视图的 LLM 一行显示 “Delegate mode” 或 “Pair mode”；
-- 切换时，对话里记一行 System（“Delegate mode: …” / “Pair mode: …”）。
+**Path checks** (`FileHands.resolve`, used by all file tools and `edit_file`):
+- The path is resolved against the first workspace folder, and the result must fall inside some `file:` workspace folder. The check uses `insideFolder` in `pairText.ts`, so a name like `..cache` counts as inside the workspace, while `../x` and `/ws2` do not.
+- The deepest existing part of the path, after resolving symlinks with `fs.realpath`, must still be inside the workspace. Links pointing outside the workspace are rejected.
 
-**实现要点**：模式放在每一轮消息的 `<mode name="…"/>` 里，不写进系统提示词，这样切换模式后提示词缓存照样命中。
+**Deletion**:
+- **Two-step confirmation, enforced by the extension host**:
+  - The first call only checks, then records a pending deletion; the returned text says what will be deleted, and for folders states how many files they contain.
+  - Only a later call in one of the user's turns with the same path and recursive actually deletes.
+  - A different path, a different recursive, or switching voice context all start over.
+  - The pending deletion appears in the message every turn as `<pending-delete path="…"/>`.
+- **Deletion refused for**: the workspace root; the `.git` directory and its contents; anything that itself has, or contains files with, unsaved changes; folders without `recursive: true`.
+- **Trash preferred**: `workspace.fs.delete(uri, { recursive, useTrash: true })`.
+- **Back up first if trash fails**: the original file or folder is copied with `fs.cp` to `<system temp dir>/oh-my-pi-chater-deleted/<timestamp>/<workspace-relative path>`, symlinks copied as links; only after the backup succeeds is it deleted permanently with `useTrash: false`. If the backup fails, nothing is deleted. The tool result states the backup location.
+- **After deletion**: editor tabs for the deleted content are closed; they have no unsaved changes.
 
-**`edit_file`**（`pairHands.ts`，定位逻辑在 `pairText.ts` 的 `locateEdit`）：
-- 用 `oldText` 精确匹配要改的位置；匹配到多处时按 `nearLine` 选最近的一处。`oldText` 为空时只能填充空文件；文件不存在时报错，新建文件改用 `create_file`（§13）。
-- 先删掉原文，再逐行敲入新代码，每行约 90 ms，整次最长 2 s。绿色的 `Pi · writing` 高亮跟着写到的行走，不管你是否在跟随都会显示。
-- 删除和逐行输入合并成一个撤销步骤：第一次编辑设 `undoStopBefore`，只有最后一次设 `undoStopAfter`。所以一次 Ctrl+Z 就能撤销。
-- 文件原本没有未保存的改动，就自动保存；如果你有未保存的改动，就不保存。
-- 敲的过程中如果文件被别人改了（文档版本号跳变），就停下来并报告。
-- worker 正在干活时拒绝修改。
-- 只能改工作区内的文件，检查规则见 §13。
-- 它自己的编辑不算"你在打字"，所以不会停止跟随。
+**Tested** (script `/tmp/voice-smoke/suite-files.js`, real VS Code + omp; `XDG_DATA_HOME` points the trash at a test directory):
+- Create `src/util.js` with content, `src` folder created automatically → opened in the editor, showing `Pi · writing`;
+- Create folder `lib`; move `src/util.js` to `lib/math.js`;
+- Ask it to delete `lib/math.js` → first turn only asks, file still there; after confirmation it is deleted, the file appears in the trash at `files/math.js`, and the tab is closed;
+- Delete the `lib` folder → when asking it says "contains 2 files"; after confirmation the whole folder goes to the trash;
+- Create a file under `escape/`, a link pointing outside the workspace → rejected by the extension host;
+- Delete a file outside the workspace → the model refused on its own without calling the tool; the file is still there;
+- Trash unavailable (make `$XDG_DATA_HOME/Trash` a regular file) → trash reports `Failed to move item to trash`; the file is first backed up to `/tmp/oh-my-pi-chater-deleted/<timestamp>/notes/todo.txt` with identical content, then deleted; the reply told the user where the backup is.
 
-**`run_in_terminal`**（`pairHands.ts`，输出清理在 `pairText.ts` 的 `cleanTerminalOutput`）：
-- 在专用的 "Pi" 终端里运行，终端显示在底部，不抢键盘。
-- 用 shell 集成的 `executeCommand` 执行，读取输出和退出码，把最后 60 行交给模型。
-- 默认等 30 s，超时后返回已有的输出，命令继续运行，结果里写明终端名（如 "Pi (2)"），可以接着用 `terminal_send` / `terminal_read` 操作它。
-- 上一条命令还在跑时，另开一个 "Pi (2)" 终端。
-- 终端没有 shell 集成时，只把命令发过去，并说明看不到结果。
-
-**`terminal_send` / `terminal_read`**（`pairHands.ts`，操作 `run_in_terminal` 超时后留着的交互程序，如 psql；全屏 TUI 如 vim、top 不在范围内）：
-- 超时的命令继续被跟踪：输出照样读进它的滚动缓冲（最多 200 000 字符），并记住已经给模型看过的位置。
-- `terminal_send {terminal?, text, enter?, waitSecs?}`：`terminal` 是 Pi 终端名，默认最近一个还在跑的；用 `sendText(text, enter)` 输入（`enter` 默认 true，`text` 可以为空只按回车），等到输出静下来 500 ms 或 `waitSecs`（默认 2，最多 30），只返回新输出；程序结束了就返回退出码。结果里不重复输入的文本（可能是密码）；工具描述提醒输入会回显，密码优先用 `.pgpass` 或环境变量。程序已经结束时不输入（否则会进 shell 成为新命令），只报告结束。
-- `terminal_read {terminal?}`：返回上次之后的新输出，没有新的就给最后 20 行，并说明是否还在跑。
-- 结束的命令报告一次退出码后就不再跟踪；同一终端跑新命令、终端被关掉时也丢弃。
-- 权限：`terminal_send` 和 `run_in_terminal` 一样算跑命令（Plan 拒绝，Manual 和 Edit automatically 要审批）；`terminal_read` 只读，不需要审批。两者都只在结对模式可用。
-
-**提示词约束**：
-- 只在用户明确要求时才提议进入结对模式；
-- 结对模式下，只跑用户要求或刚答应的命令；
-- 删除文件、`git push`、安装依赖之类的操作，先问用户。
-
-**实测**（脚本 `/tmp/voice-smoke/suite-pairmode.js`、`suite-modechip.js`）：
-- 请求结对 → 先问，再确认 → 进入结对模式，面板和状态栏都显示 Pair；
-- 结对模式下加 `double` 函数：逐行写入，高亮从 15-16 走到 15-22，已保存，worker 空闲，一次 Ctrl+Z 恢复原文；
-- 终端运行 `node -e …double(21)` → 退出码 0、输出 42；`process.exit(3)` → 退出码 3；
-- 口头"切回 omp" → 立即切换；切换按钮两个方向都正常；
-- 回到委派模式后说"直接删掉"：它没有自己动手，而是交给 worker 并提出方案。
-
-**已知限制**：
-- 结对模式的修改不进 checkpoint 和 diff 面板，回滚靠 Ctrl+Z 或 git；
-- 状态栏的 Pi 焦点不显示终端命令；
-- "只跑你要求的命令"只由提示词约束，宿主不做检查。
-
-## 12. 读 VS Code 的输出、调试（已实现，2026-09-25）
-
-| 工具 | 模式 | 做什么 |
-|---|---|---|
-| `read_output` | 两种模式都能用（只读） | 不带 `source`：列出能读的输出；带 `source`：返回它的最后若干行（默认 80，最多 400） |
-| `list_viewers` | 两种模式都能用（不改文件） | 列出能显示这个文件的编辑器（所有已装扩展的 custom editor）和 VS Code 内置扩展的预览命令（如 Markdown 预览）；不写死任何扩展 |
-| `open_with` | 两种模式都能用（不改文件） | 用 `list_viewers` 对同一个文件给出的某个 viewer 打开；`toSide` 在旁边的编辑组打开；最多等 8 s |
-| `debug_start` | 结对 | 按名字启动 `.vscode/launch.json` 里的配置（`noDebug` 相当于 Ctrl+F5），等到暂停或结束（默认 15 s） |
-| `debug_control` | 结对 | 按调试工具栏的按钮：continue、pause、stepOver、stepInto、stepOut、restart、stop，等到下一次暂停或结束（默认 10 s） |
-| `set_breakpoint` | 结对 | 在某行加断点（可带条件），或 `remove` 删掉 |
-| `debug_inspect` | 结对 | 当前停在哪：代码、调用栈、局部变量、断点列表；带 `expression` 时在栈顶帧求值 |
-
-**`read_output`**（`vscodeOutput.ts`，名字匹配在 `pairText.ts` 的 `pickName`：先精确匹配，不区分大小写；否则取唯一包含它的）：
-- **Output 面板**：VS Code 没有读别的扩展输出通道的 API，但每个通道都写成当前窗口日志目录里的文件，就在本扩展 `context.logUri` 旁边。读的是：`exthost/output_logging_<最新>/<n>-<名字>.log`（扩展的普通通道）、`exthost/<扩展 id>/<名字>.log`（日志通道，如 Git）、`exthost/exthost.log`（Extension Host）、`window<N>/output_<最新>/tasks.log`（Tasks）、窗口和会话级的 `*.log`（Window、Main、Shared 等）。只读文件末尾 256 KB。这个目录结构没有写进文档，VS Code 改了就要跟着改。
-- **Debug Console**：`DebugDriver` 用 `registerDebugAdapterTrackerFactory('*')` 收集所有调试会话的 `output` 事件（去掉 telemetry），按一次运行（顶层会话加 js-debug 的子会话）分开，保留最近 5 次。最新一次叫 `Debug Console`。
-- **终端**：用 `onDidStartTerminalShellExecution` 记录所有终端里跑的命令（包括用户自己的终端），每个终端保留最近 5 条命令和它们的输出、退出码。只有扩展启动之后、有 shell 集成的终端里跑的命令才有；没有 shell 集成的终端在列表里注明读不到。
-
-**`list_viewers` / `open_with`**（发现和匹配在纯函数模块 `viewers.ts`，执行在 `pairHands.ts`）：
-
-只留实测可靠的部分（2026-09-26）：custom editor 都用 `vscode.openWith` 打开，谁贡献的都一样可靠（draw.io 正常打开）；内置 Markdown 预览正常（bierner.markdown-mermaid 在里面画 Mermaid）。第三方扩展的预览命令各自要不同的参数和状态，不可靠：MermaidChart 的 `mermaidChart.preview` 对 `.mmd` 文件要么什么也没显示，要么 8 s 超时。所以第三方预览命令默认不列、`open_with` 也不接受，要用得打开设置 `oh-my-pi-chater.voiceAgent.discoverPreviewCommands`（默认 `false`，每次调用时读取）。
-
-提示词让模型：`.drawio` 这类图表文件用它的 custom editor 打开；Mermaid 放在 `.md` 文件的 mermaid 代码块里，用 `markdown.showPreviewToSide` 在旁边预览，一边改一边看；单独的 `.mmd` 文件可以提议搬进 Markdown。
-
-- **编辑器**：扫 `vscode.extensions.all` 的 `contributes.customEditors`，`selector.filenamePattern` 按 VS Code 的规则匹配（有 `/` 时匹配整条路径，否则只匹配文件名，不区分大小写），比如 draw.io 的 `*.drawio`、`*.dio`、`*.drawio.svg`。顺序：扩展的 `default`、内置的 `builtin`、`option`，最后是内置文本编辑器 `default`。不受上面的设置影响。
-- **内置还是第三方**：运行时扩展描述里的 `isBuiltin`（不在 API 类型里），或者扩展装在 `vscode.env.appRoot/extensions` 下，就算内置。
-- **预览命令**（内置扩展的总是找；设置打开时也找第三方的）：`contributes.commands` 里名字（id 最后一段，按驼峰拆词）或标题里有以 preview 开头的词的（`appReview` 不算），并且扩展是给这个文件的：
-  - 同一个扩展的 `menus` 里有 `when` 说明是给这个文件的：`resourceLangId`/`editorLangId`/`resourceExtname`/`resourceFilename`/`resourcePath` 的 `==` 或 `=~` 成立，且对文件的条件没有不成立的；其他上下文键（焦点、视图等）当作未知；
-  - 或者命令没有被 `commandPalette` 的 `when` 限制（命令面板里对所有文件都显示），而扩展贡献了这个文件的语言或能打开它的编辑器（设置打开时，MermaidChart 的 `mermaidChart.preview` 就是这样找到的）。
-  - 排序：编辑器标题栏 0，命令面板 1，只在右键菜单等处 2；命令面板隐藏的（`when: false`）或 id 里带 ContextMenu 的再加 2。标题相同的只留排最前的一个。最多 8 个。Markdown 的 `markdown.showPreview`、`markdown.showPreviewToSide` 从内置扩展里找到，设置开不开都有。
-- **语言**：文件已打开就用它的 `languageId`，否则按各扩展 `contributes.languages` 的 `filenames`、`filenamePatterns`、最长的 `extensions` 推断。
-- **文件在不在**：已经在 `workspace.textDocuments` 里打开的直接算在（`create_file` 刚建的文件可能还 stat 不到）；否则 `fs.stat` 最多试 5 次，间隔 200 ms。
-- **安全**：路径和其他工具一样必须在工作区里；`open_with` 先重新算一遍 `list_viewers`，id 不在里面就拒绝，所以不能用它执行任意命令。
-- **执行**：编辑器用 `vscode.openWith`。预览命令先把文件显示成活动编辑器（很多预览命令不看参数，只看活动编辑器），再带着 uri 执行；如果抛错，或 1.5 s 内没有出现新的标签页，就不带参数再执行一次。打开文件、每次执行命令都最多等 8 s，超时就返回"已经开始、还没结束"，不再等，也不再执行第二次，避免扩展的命令一直不返回时工具卡住。
-
-**调试**（`debugDriver.ts`）：
-- 控制用 VS Code 自己的命令（`workbench.action.debug.stepOver` 等），作用于你在界面上看到的那个会话和线程，调试工具栏、变量视图照常更新。
-- 暂停、继续靠调试适配器消息判断：`stopped` 事件记为暂停；`continued` 事件，或者发给适配器的 `continue` / `next` / `stepIn` / `stepOut` 等请求，记为继续运行。所以你自己按 F10 也跟得上。
-- 等待在动作之前开始监听，快速命中的断点不会漏掉。restart 可能换一个新的顶层会话，所以只等暂停，不把旧会话结束当成"跑完了"。
-- 暂停时返回：原因、函数和位置、前后各 2 行代码（当前行标 `→`）、最多 5 帧调用栈、第一个非 expensive 作用域里最多 25 个变量。暂停的那一行成为 Pi 的焦点，不跟随时也会打开并高亮。
-- 设断点后也会把那一行作为 Pi 的焦点打开。
-- 启动、重启程序算"跑命令"，提示词要求用户要求或同意后才做；一起调试时的单步和查看不用再问。
-
-**实测**（脚本 `/tmp/voice-smoke/suite-debug.js`，真实 VS Code + omp + 内置 js-debug）：
-- "average 里的 sum 是干什么的，指给我看" → 焦点 `name: "sum"`，声明处实线框，另外两处用到的地方虚线框，行尾 `Pi` 标签；
-- "Smoke Build 报了什么错" → `read_output` 读到测试写入输出通道的 `error E1234`；
-- "user shell 终端里刚跑的命令输出了什么" → 读到命令、stdout、stderr 和 `exit code 2`；
-- "calc.js 第 11 行打断点，用 Run main 启动调试" → `set_breakpoint` + `debug_start`，返回 `Paused (breakpoint) in global.average at calc.js:11`，局部变量 `sum = 0; values = (0) []`，Pi 焦点在 `calc.js:11`；
-- `debug_inspect` 求值 `[sum, values.length]` → `[0, 0]`；stepOut → `main.js:3`；continue → 跑完，Debug Console 里是 `average of scores: NaN`；之后 `read_output` 读 `Debug Console` 得到同样内容。
-
-**已知限制**：
-- 退出码只有适配器发 `exited` 事件时才有，js-debug 实测没有发；
-- 求值只在栈顶帧，不看你在调用栈视图里选的帧；
-- 终端输出只从扩展启动后开始记。
-
-## 13. 结对模式的文件操作（已实现，2026-09-26）
-
-代码在 `fileHands.ts`，路由和删除确认在 `hostTools.ts`。这些工具都只在结对模式可用；主动开口的轮次不能用。`create_file`、`rename_file`、`delete_file` 和 `edit_file` 一样，worker 正在干活时拒绝执行。
-
-| 工具 | 实现 | 说明 |
-|---|---|---|
-| `create_file` `{path, content?}` | `WorkspaceEdit.createFile(…, { contents })` | 文件已存在就报错。缺的上级文件夹会自动建。建好后在你的编辑器栏打开，并显示 `Pi · writing` 高亮 |
-| `create_folder` `{path}` | `workspace.fs.createDirectory` | 已存在就直接报告 |
-| `rename_file` `{from, to}` | `WorkspaceEdit.renameFile(…, { overwrite: false })` | 能改名或移动文件、文件夹。目标已存在就报错，从不覆盖。不能改工作区根目录 |
-| `delete_file` `{path, recursive?}` | 见下文 | 要先确认 |
-| `save_file` `{path?}` | `TextDocument.save()` | 不给 path 时保存所有有未保存改动的工作区文件。会连你自己的改动一起存盘，提示词要求只在你开口时才用 |
-| `close_editor` `{path}` | `window.tabGroups.close` | 关闭这个文件在所有编辑器组里的标签；有未保存改动时拒绝 |
-
-`edit_file` 不再新建文件，新建统一用 `create_file`。
-
-**路径检查**（`FileHands.resolve`，所有文件工具和 `edit_file` 都经过它）：
-- 路径按第一个工作区文件夹解析，结果必须落在某个 `file:` 工作区文件夹里。判断用 `pairText.ts` 的 `insideFolder`，所以 `..cache` 这样的名字算在工作区内，`../x` 和 `/ws2` 不算。
-- 路径中已经存在的最深一级，用 `fs.realpath` 解开符号链接后，仍然必须在工作区内。指向工作区外面的链接会被拒绝。
-
-**删除**：
-- **两步确认，由宿主强制执行**：
-  - 第一次调用只做检查，然后记下待删除项；返回的文字说明要删什么，文件夹会写明里面有几个文件。
-  - 之后用户的某一轮里，再用同样的 path 和 recursive 调用，才会真正删除。
-  - 换一个路径、换一个 recursive、切换模式、切换语音上下文，都会重新开始。
-  - 待删除项每一轮都以 `<pending-delete path="…"/>` 出现在消息里。
-- **拒绝删除**：工作区根目录；`.git` 目录及其中的内容；自己或里面的文件有未保存改动的；文件夹没给 `recursive: true` 的。
-- **优先放回收站**：`workspace.fs.delete(uri, { recursive, useTrash: true })`。
-- **回收站失败时先备份**：把原文件或文件夹用 `fs.cp` 复制到 `<系统临时目录>/oh-my-pi-chater-deleted/<时间戳>/<工作区相对路径>`，符号链接照原样复制成链接；备份成功后，才用 `useTrash: false` 永久删除。备份失败就不删。工具结果里写明备份位置。
-- **删除后**：关掉被删内容的编辑器标签，它们没有未保存的改动。
-
-**实测**（脚本 `/tmp/voice-smoke/suite-files.js`，真实 VS Code + omp；用 `XDG_DATA_HOME` 把回收站指到测试目录）：
-- 新建 `src/util.js`，带内容，`src` 文件夹自动建好 → 在编辑器里打开，显示 `Pi · writing`；
-- 新建文件夹 `lib`；把 `src/util.js` 移到 `lib/math.js`；
-- 让它删 `lib/math.js` → 第一轮只询问，文件还在；确认后删除，文件出现在回收站的 `files/math.js`，标签被关闭；
-- 删 `lib` 文件夹 → 询问时说明"里面有 2 个文件"，确认后整个文件夹进回收站；
-- 在指向工作区外的链接 `escape/` 下新建文件 → 被宿主拒绝；
-- 删工作区外的文件 → 模型自己拒绝了，没有调用工具，文件还在；
-- 回收站不可用（让 `$XDG_DATA_HOME/Trash` 是一个普通文件）→ 回收站报 `Failed to move item to trash`；文件先备份到 `/tmp/oh-my-pi-chater-deleted/<时间戳>/notes/todo.txt`，内容一致，然后删除；回复里告诉了用户备份在哪。
-
-**已知限制**：
-- 备份在系统临时目录里，重启后可能被清空。
-- 只支持本地的 `file:` 工作区，远程工作区的文件夹会被当作工作区外。
-- 删除的确认不在语音面板上显示卡片，只靠语音或文字确认。
+**Known limitations**:
+- Backups are in the system temp directory and may be cleared on reboot.
+- Only local `file:` workspaces are supported; remote workspace folders are treated as outside the workspace.
+- Delete confirmation shows no card in the voice panel; it relies only on voice or text confirmation.

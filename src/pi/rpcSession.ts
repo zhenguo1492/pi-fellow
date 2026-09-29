@@ -27,6 +27,7 @@ import { isVscodeOnlySlash, tryHandleSlashCommand } from './slashCommandRouter';
 import { buildImplementPlanPrompt } from './planModeState';
 import { readAllowedTools, readDefaultPermissionLevel } from './permissionGate';
 import type { PermissionGateState } from './permissionPolicy';
+import type { WorkerEditLocks } from './workerEdits';
 import {
     enrichUserMessagesWithForkEntryIds,
     findPrecedingUserMessageIndex,
@@ -115,6 +116,11 @@ export class PiRpcSessionManager {
         this._bridge.setPermission(state);
         // Auto also answers omp's own approval prompts (tools.approvalMode other than yolo).
         this._rpcUi.autoApproveTools = state.level === 'auto';
+    }
+
+    /** The files the worker's current task changes, reported by the permission gate before each change; undefined without the gate. */
+    workerEdits(): WorkerEditLocks | undefined {
+        return this._bridge.workerEdits();
     }
 
     get session(): RpcSessionShim | undefined {
@@ -271,6 +277,10 @@ export class PiRpcSessionManager {
         }
         if (agentEvent.type === 'agent_end' && this._shim) {
             this._shim.isStreaming = false;
+        }
+        // The task is over (a retry continues it): the files it changed are free for the voice agent again.
+        if (agentEvent.type === 'agent_end' && agentEvent.willRetry !== true) {
+            this._bridge.clearWorkerEdits();
         }
 
         this.events.dispatch(agentEvent);

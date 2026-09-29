@@ -1,7 +1,8 @@
 /**
- * Dry-run dialogs of the settings' Voice tab. The extension host does the work (the webview cannot
- * open the microphone): STT records one sentence and the transcript shows here; TTS synthesizes a
- * text and the WAV comes back as a data URL for an <audio> player.
+ * Dry-run dialogs of the settings' Voice tab, and the dialog frame the voiceprint's share. The
+ * extension host does the work (the webview cannot open the microphone): STT records one sentence
+ * and the transcript shows here; TTS synthesizes a text and the WAV comes back as a data URL for an
+ * <audio> player.
  */
 import type { SettingsClientMessage, SettingsServerMessage, SttDryRunEvent, VoiceSettings } from '../shared/protocol';
 import type { TtsConfig } from '../voiceAgent/tts';
@@ -35,7 +36,7 @@ interface TtsUi {
 let stt: SttUi | undefined;
 let tts: TtsUi | undefined;
 
-function button(label: string, className: string): HTMLButtonElement {
+export function button(label: string, className: string): HTMLButtonElement {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `setting-btn ${className}`;
@@ -44,7 +45,7 @@ function button(label: string, className: string): HTMLButtonElement {
 }
 
 /** Opens a modal (closing any other); Escape, the × and a click on the backdrop close it. */
-function openDialog(title: string, meta: string, onClose: () => void): { body: HTMLElement; footer: HTMLElement } {
+export function openDialog(title: string, meta: string, onClose: () => void): { body: HTMLElement; footer: HTMLElement } {
     closeCurrent?.();
     const backdrop = document.createElement('div');
     backdrop.className = 'voice-dialog-backdrop';
@@ -87,7 +88,7 @@ function openDialog(title: string, meta: string, onClose: () => void): { body: H
     return { body: backdrop.querySelector<HTMLElement>('.voice-dialog-body')!, footer };
 }
 
-function setStatus(el: HTMLElement, state: 'busy' | 'ok' | 'error' | 'idle', text: string): void {
+export function setStatus(el: HTMLElement, state: 'busy' | 'ok' | 'error' | 'idle', text: string): void {
     el.dataset.state = state;
     el.textContent = text;
 }

@@ -1,12 +1,13 @@
-import { VOICE_MODE_LABEL, type VoiceAttachments, type VoiceCallUsage, type VoiceObservationKind, type VoiceUsageTotals } from '../shared/voiceViewProtocol';
+import type { VoiceAttachments, VoiceCallUsage, VoiceObservationKind, VoiceUsageTotals } from '../shared/voiceViewProtocol';
 import type { ImageContent } from '../shared/piTypes';
 import { AnchorStream, type CodeAnchor } from './codeAnchors';
 import { FloorArbiter, type ArbiterSettings, type ArbiterView, type Observation } from './floorArbiter';
-import { HostToolRouter, VOICE_HOST_TOOLS, type AgentMode, type EditorHands, type Proposal, type ToolResult, type ToolTurn } from './hostTools';
+import { HostToolRouter, VOICE_HOST_TOOLS, type EditorHands, type Proposal, type ToolResult, type ToolTurn } from './hostTools';
 import { readTarget, type FocusTarget } from './piFocus';
 import { ResearchRunner, type ResearchJob } from './research';
 import { VoiceLlm, type VoiceSkill } from './voiceLlm';
-import { SilenceGate, VOICE_SYSTEM_PROMPT, buildTurnMessage, type EditorSnapshot, type OpeningReason, type TurnInput } from './voicePrompt';
+import { ToneDial, type Humor } from './tone';
+import { SilenceGate, buildTurnMessage, tuiQuestionLine, voiceSystemPrompt, type EditorSnapshot, type OpeningReason, type TurnInput } from './voicePrompt';
 import { provisionalTaskKey, taskKey, type WorkerController, type WorkerTask } from './workerController';
 import { WorkerDigest, clip, type DigestEntry } from './workerDigest';
 
@@ -22,6 +23,8 @@ export interface VoiceAgentOptions {
     thinking: string;
     /** The skills to load, asked each time the process starts; absent loads none. Research never gets skills. */
     skills?: () => Promise<VoiceSkill[]>;
+    /** The user's extra system prompt instructions (`voiceAgent.extraPrompt`), read each time the process starts; see `restartProcess`. */
+    extraPrompt?: () => string;
     confirmBeforeDispatch: () => boolean;
     /** Read at every decision, so settings changes apply right away. */
     arbiter: () => ArbiterSettings;
@@ -39,12 +42,12 @@ export interface VoiceAgentOptions {
     editor?: () => EditorSnapshot | undefined;
     /** The agent reads this file itself (Pi focus). */
     onRead?: (target: FocusTarget) => void;
-    /** Its hands in the user's VS Code: open_file, list_viewers, open_with and read_output, and in pair mode editing and managing files, the terminal and the debugger. */
+    /** Its hands in the user's VS Code: open_file, list_viewers, open_with and read_output, editing and managing files, the terminal and the debugger. */
     hands?: EditorHands;
-    /** Switched between omp and pair mode, by a tool call or setMode. */
-    onModeChange?: (mode: AgentMode) => void;
     /** The names set for the voice agent and the user, read at every turn. */
     names?: () => { bot: string; user: string };
+    /** `voiceAgent.humor`, read at every turn; absent is off: no `<tone>`. */
+    humor?: () => Humor;
     log: (line: string) => void;
 }
 
@@ -193,6 +196,8 @@ export class VoiceAgent {
     private _usage: VoiceUsageTotals | undefined;
     /** Voice came on and the agent has not spoken first yet; dropped once the user speaks. */
     private _opening: Opening | undefined;
+    /** The voice's mood across turns and tasks: one voice, one mood. */
+    private readonly _tone = new ToneDial();
 
     constructor(private readonly _options: VoiceAgentOptions) {
         const { worker } = _options;
@@ -204,10 +209,6 @@ export class VoiceAgent {
             _options.confirmBeforeDispatch,
             (tabId, question) => this._startResearch(tabId, question),
             _options.hands,
-            (mode) => {
-                this._options.log(`Voice agent now in ${VOICE_MODE_LABEL[mode]} mode.`);
-                this._options.onModeChange?.(mode);
-            },
         );
         // The user answered one of the voice agent's approval cards: say what came of it.
         this._router.onApprovalSettled = () => {
@@ -270,11 +271,6 @@ export class VoiceAgent {
         });
     }
 
-    /** omp (default): it directs the worker. pair: it edits and runs commands itself. */
-    get mode(): AgentMode {
-        return this._router.mode;
-    }
-
     /** The voice model in use (`provider/id`); undefined until the omp process has started. */
     get model(): string | undefined {
         return this._model;
@@ -283,11 +279,6 @@ export class VoiceAgent {
     /** Token totals and context window use of the loaded voice context; undefined before it has one. */
     get usage(): VoiceUsageTotals | undefined {
         return this._usage;
-    }
-
-    /** The user switched from the UI. */
-    setMode(mode: AgentMode): void {
-        this._router.setMode(mode);
     }
 
     /** New tasks waiting on the user's go-ahead (voice panel cards). */
@@ -375,6 +366,31 @@ export class VoiceAgent {
         await llm?.stop();
     }
 
+    /**
+     * Stops the voice process between turns and starts a new one, so a changed system prompt applies;
+     * each task's voice context is a session file, loaded again by the next turn. Not started: nothing to do.
+     */
+    restartProcess(): Promise<void> {
+        if (this._stopped || !this._llm) {
+            return Promise.resolve();
+        }
+        return this._enqueue(async () => {
+            const llm = await this._llm?.catch(() => undefined);
+            if (this._stopped || !llm) {
+                return;
+            }
+            this._llm = undefined;
+            this._loadedKey = undefined;
+            await llm.stop();
+            this._options.log('Voice agent restarting for its new instructions.');
+            // Started again at once: proactive turns only run while a process is up.
+            const task = this._options.worker.activeTask();
+            if (task) {
+                await this._ensureLlm(task).catch(() => undefined);
+            }
+        });
+    }
+
     /** Turns run one at a time (§7.7 invariant 1). */
     private _enqueue<T>(work: () => Promise<T>): Promise<T> {
         this._inFlight++;
@@ -421,7 +437,7 @@ export class VoiceAgent {
         const context = this._contexts.get(key)!;
         const digest = this._digest(task.tabId);
         const requests = worker.pendingRequests(task.tabId);
-        const message = buildTurnMessage({
+        const input: TurnInput = {
             trigger: { kind: 'user', text, source, files: options.attachments?.files },
             status: worker.status(task.tabId),
             updates: digest.since(context.seenSeq),
@@ -434,10 +450,11 @@ export class VoiceAgent {
             pendingDelete: this._router.pendingDelete,
             research: context.research,
             editor: this._editorFor(context),
-            mode: this._router.mode,
             names: this._options.names?.(),
             interrupted: this._takeInterrupted(options.interrupted),
-        });
+        };
+        input.tone = this._tone.next(input, this._options.humor?.() ?? 'off');
+        const message = buildTurnMessage(input);
         context.seenSeq = digest.lastSeq;
         // A finished job is shown once; running ones keep appearing with their elapsed time.
         context.research = context.research.filter((job) => job.status === 'running');
@@ -487,7 +504,7 @@ export class VoiceAgent {
         } else {
             return undefined;
         }
-        const message = buildTurnMessage({
+        const input: TurnInput = {
             trigger,
             status: worker.status(task.tabId),
             updates: digest.since(context.seenSeq),
@@ -500,10 +517,11 @@ export class VoiceAgent {
             pendingDelete: this._router.pendingDelete,
             research,
             editor: this._editorFor(context),
-            mode: this._router.mode,
             names: this._options.names?.(),
             interrupted: this._takeInterrupted(),
-        });
+        };
+        input.tone = this._tone.next(input, this._options.humor?.() ?? 'off');
+        const message = buildTurnMessage(input);
         context.seenSeq = digest.lastSeq;
         context.research = context.research.filter((job) => job.status === 'running' || !research.includes(job));
         const hooks = this._options.onProactiveTurn?.(observation?.kind ?? 'opening', task);
@@ -547,6 +565,11 @@ export class VoiceAgent {
                 return this._options.worker.status(observation.tabId).fromVoice
                     ? 'The task you sent is waiting on the request above. Remind the user: they answer it in the chat (Approve or Deny for a tool approval), or tell you their answer.'
                     : 'The worker is waiting on the request above.';
+            case 'stopped':
+                return (
+                    `The worker's TUI stopped working: it finished, or it is waiting on a question such as a tool approval. ${tuiQuestionLine(observation.question)}The last lines of its screen:\n${observation.screen || '(blank)'}\n` +
+                    'Tell the user in a sentence or two what it finished, or what it asks and the choices. Answer it only with their own answer, in their next message.'
+                );
             case 'error':
                 return `The worker stopped with an error: ${clip(observation.detail, 300)}`;
             case 'done': {
@@ -673,7 +696,15 @@ export class VoiceAgent {
             const { cwd, sessionDir, model, thinking, log, skills } = this._options;
             const started = (skills?.() ?? Promise.resolve([])).then((chosen) =>
                 VoiceLlm.start(
-                    { cwd, sessionDir, systemPrompt: VOICE_SYSTEM_PROMPT, model: model || task.model, thinking, tools: VOICE_HOST_TOOLS, skills: chosen },
+                    {
+                        cwd,
+                        sessionDir,
+                        systemPrompt: voiceSystemPrompt(this._options.extraPrompt?.() ?? ''),
+                        model: model || task.model,
+                        thinking,
+                        tools: VOICE_HOST_TOOLS,
+                        skills: chosen,
+                    },
                     (error) => {
                         log(`Voice agent process exited${error ? `: ${error.message}` : ''}; it restarts on the next message.`);
                         this._llm = undefined;
