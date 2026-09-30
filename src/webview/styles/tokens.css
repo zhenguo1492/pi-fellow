@@ -1,0 +1,59 @@
+/*
+ * Design tokens shared by the chat and settings webviews. Colors come from the VS Code theme
+ * (--vscode-*, injected into every webview) so each one holds on light, dark and high-contrast
+ * themes; the fallbacks are Dark+ values. Modules use these names, not color literals.
+ */
+
+:root {
+    --bg: var(--vscode-editor-background, #1e1e1e);
+    --fg: var(--vscode-editor-foreground, #cccccc);
+    --muted: var(--vscode-descriptionForeground, #999);
+    --input-bg: var(--vscode-input-background, #3c3c3c);
+    --input-fg: var(--vscode-input-foreground, #cccccc);
+    --input-border: var(--vscode-input-border, #3c3c3c);
+    --focus-border: var(--vscode-focusBorder, #007acc);
+    --btn-bg: var(--vscode-button-background, #0e639c);
+    --btn-fg: var(--vscode-button-foreground, #ffffff);
+    --btn-hover: var(--vscode-button-hoverBackground, #1177bb);
+    --border: var(--vscode-panel-border, #2d2d2d);
+    --card-bg: var(--vscode-editorWidget-background, #252526);
+    --badge-bg: var(--vscode-badge-background, #4d4d4d);
+    --badge-fg: var(--vscode-badge-foreground, #fff);
+    --error-fg: var(--vscode-errorForeground, #f48771);
+    --success-fg: var(--vscode-testing-iconPassed, #73c991);
+    --warning-fg: var(--vscode-editorWarning-foreground, #cca700);
+    --link: var(--vscode-textLink-foreground, #3794ff);
+    --scrollbar: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.4));
+    --code-bg: var(--vscode-textCodeBlock-background, #2a2a2a);
+    /* Brand violet: the user's accent and extension UI cards. */
+    --violet: #8b5cf6;
+    --user-accent: color-mix(in srgb, var(--focus-border) 55%, var(--violet));
+    --user-card-bg: color-mix(in srgb, var(--user-accent) 7%, var(--card-bg));
+    --user-card-border: color-mix(in srgb, var(--user-accent) 22%, var(--border));
+    --user-sticky-bg: color-mix(in srgb, var(--bg) 88%, transparent);
+    --surface-raised: color-mix(in srgb, var(--fg) 3%, var(--card-bg));
+    /* Hover and selection tints: the text color over the surface, so they show on any theme. */
+    --tint-faint: color-mix(in srgb, var(--fg) 4%, transparent);
+    --tint: color-mix(in srgb, var(--fg) 6%, transparent);
+    --tint-strong: color-mix(in srgb, var(--fg) 10%, transparent);
+    /* The terminal's ANSI palette, for views that mirror the Pi CLI's TUI (the session tree). */
+    --ansi-blue: var(--vscode-terminal-ansiBlue, #2472c8);
+    --ansi-cyan: var(--vscode-terminal-ansiCyan, #11a8cd);
+    --ansi-green: var(--vscode-terminal-ansiGreen, #0dbc79);
+    --ansi-yellow: var(--vscode-terminal-ansiYellow, #e5e510);
+    --ansi-magenta: var(--vscode-terminal-ansiMagenta, #bc3fbc);
+    --ansi-bright-magenta: var(--vscode-terminal-ansiBrightMagenta, #d670d6);
+    --ansi-bright-red: var(--vscode-terminal-ansiBrightRed, #f14c4c);
+    /* The voice agent's colour; the voice panel (voice.css) uses it too. */
+    --voice-accent: #ff8a5c;
+    --font-mono: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, 'Courier New', monospace);
+    --radius: 8px;
+    --radius-lg: 12px;
+    --chat-font: 11.5px;
+    --chat-line: 1.5;
+    --chat-pad-x: 12px;
+    --chat-pad-y: 8px;
+}
+body.vscode-light { --voice-accent: #d9480f; }
+body.vscode-high-contrast { --voice-accent: #ffa07a; }
+body.vscode-high-contrast-light { --voice-accent: #b33c00; }

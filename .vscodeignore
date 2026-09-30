@@ -1,7 +1,7 @@
 .vscode/**
 .vscode-test/**
 .pi/**
-# Styles ship as out/webview/styles/ after npm run compile (see esbuild.js copyStyles).
+# Styles ship as out/webview/styles/ after npm run compile (see esbuild.js stylesConfig).
 src/**
 .github/**
 docs/**

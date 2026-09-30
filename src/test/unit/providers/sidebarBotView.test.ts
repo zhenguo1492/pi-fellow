@@ -44,12 +44,6 @@ describe('SidebarBotView in a tab showing its TUI', () => {
         expect(botView.showsBotView()).toBe(false);
     });
 
-    it('locks the composer in the Bot view while the voice agent is off, as in a chat tab', async () => {
-        const { botView, toggle } = setup(true);
-        await toggle();
-        expect(botView.composerLocked()).toBe(true);
-    });
-
     it('opens the Bot view when asked, but not on its own for a TUI tab, whose work the RPC session cannot see', async () => {
         const automatic = setup(true);
         await automatic.botView.showBotView(true, { onlyIfWorkerUnused: true });
@@ -81,5 +75,30 @@ describe('SidebarBotView in a tab showing its TUI', () => {
         chat.tab.botView = true;
         await chat.showTui('tab-1');
         expect(chat.tab.botView).toBe(true);
+    });
+});
+
+describe('SidebarBotView in a chat tab', () => {
+    it('toggles between the conversation and the Bot view on each click of the avatar button', async () => {
+        const { tab, host, botView, toggle } = setup(false);
+        await toggle();
+        expect(tab.botView).toBe(true);
+        expect(botView.showsBotView()).toBe(true);
+        expect(host.sendStateSync).toHaveBeenCalledTimes(1);
+
+        await toggle();
+        expect(tab.botView).toBe(false);
+        expect(botView.showsBotView()).toBe(false);
+        expect(host.sendStateSync).toHaveBeenCalledTimes(2);
+    });
+
+    it('switches to a tab that is not active and shows its Bot view', async () => {
+        const { host, tabs, botView } = setup(false);
+        const other = { id: 'tab-2', tuiMode: false, botView: false } as unknown as TabState;
+        host.tabs.set(other.id, other);
+        await botView.handlers().toggleBotView!({ type: 'toggleBotView', tabId: 'tab-2' } as never, other);
+        expect(other.botView).toBe(true);
+        expect(tabs.switchTab).toHaveBeenCalledExactlyOnceWith('tab-2');
+        expect(host.sendStateSync).not.toHaveBeenCalled();
     });
 });

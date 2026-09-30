@@ -1,0 +1,104 @@
+/* Welcome screen and the restored-conversation placeholder. */
+
+/* ── Welcome ── */
+.welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    text-align: center;
+    flex: 1;
+}
+
+/* A restored conversation loading (window startup), in place of the welcome. */
+.history-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 40px 20px;
+    flex: 1;
+    color: var(--muted);
+}
+.history-loading-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: connection-spin 0.8s linear infinite;
+}
+.history-loading-title {
+    font-size: 13px;
+}
+
+.welcome-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    font-weight: 700;
+    opacity: 0.3;
+}
+
+.welcome-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.welcome-subtitle {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 24px;
+    max-width: 260px;
+    line-height: 1.5;
+}
+
+.welcome-meta {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 12px;
+    row-gap: 4px;
+    margin: 0 0 24px;
+    padding: 8px 12px;
+    max-width: 320px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--input-bg);
+    font-size: 12px;
+    text-align: left;
+}
+.welcome-meta dt { color: var(--muted); }
+.welcome-meta dd {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+}
+.welcome-meta-empty { color: var(--muted); font-style: italic; font-family: inherit; }
+.welcome-backend-badge {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--focus-border);
+    border: 1px solid color-mix(in srgb, var(--focus-border) 50%, transparent);
+}
+.welcome-backend-badge--omp {
+    color: var(--user-accent);
+    border-color: color-mix(in srgb, var(--user-accent) 50%, transparent);
+}
+
+.welcome-hints { display: flex; flex-direction: column; gap: 6px; }
+.welcome-hint { font-size: 12px; color: var(--muted); }
+.welcome-hint kbd {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+}

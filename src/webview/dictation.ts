@@ -6,7 +6,7 @@
  * waveform show (voiceWave.ts): the microphone's while open, the bot's while it speaks.
  */
 import type { DictationStatus, VoiceServiceCheck } from '../shared/protocol';
-import { VOICE_OFFLINE_SEND_TITLE, voiceIsOn, type VoiceStatus } from '../shared/voiceViewProtocol';
+import { voiceIsOn, type VoiceStatus } from '../shared/voiceViewProtocol';
 import { setWaveOpen } from './voiceWave';
 import { vscode } from './vscodeApi';
 
@@ -17,8 +17,6 @@ let status: DictationStatus = { recording: false, speaking: false, pending: 0 };
 let stt: VoiceServiceCheck | undefined;
 /** The voice agent's state; while it is on or starting it owns the microphone. */
 let voice: VoiceStatus | undefined;
-/** The composer is locked (Bot view, voice agent offline): nothing to dictate into. */
-let locked = false;
 
 export function setSttCheck(next: VoiceServiceCheck): void {
     stt = next;
@@ -28,13 +26,6 @@ export function setSttCheck(next: VoiceServiceCheck): void {
 export function applyVoiceMicStatus(next: VoiceStatus | undefined): void {
     voice = next;
     renderMicButton();
-}
-
-export function setMicLocked(next: boolean): void {
-    if (next !== locked) {
-        locked = next;
-        renderMicButton();
-    }
 }
 
 const MIC_PATH = '<rect x="5.5" y="1.75" width="5" height="8" rx="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M3.25 7.5a4.75 4.75 0 009.5 0M8 12.25v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>';
@@ -65,9 +56,6 @@ export function bindMicButton(): void {
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', (e) => {
         e.preventDefault();
-        if (locked) {
-            return;
-        }
         if (!voiceIsOn(voice)) {
             vscode.postMessage({ type: 'toggleDictation' });
         } else if (voice && voice.phase !== 'standby' && !voice.starting) {
@@ -97,10 +85,10 @@ function renderMicButton(): void {
     // Stopped with speech still being transcribed: a spinner, and no new recording until it lands.
     const busy = !status.recording && status.pending > 0;
     btn.hidden = stt === undefined;
-    btn.disabled = busy || locked;
+    btn.disabled = busy;
     btn.classList.remove('is-voice', 'is-muted');
-    btn.classList.toggle('is-unavailable', unavailable && !locked);
-    btn.setAttribute('aria-disabled', String(unavailable || busy || locked));
+    btn.classList.toggle('is-unavailable', unavailable);
+    btn.setAttribute('aria-disabled', String(unavailable || busy));
     // Recording: a green stop button; a click stops it and transcribes what was said.
     btn.classList.toggle('is-recording', status.recording);
     btn.classList.toggle('is-live', status.recording);
@@ -109,15 +97,13 @@ function renderMicButton(): void {
     btn.setAttribute('aria-busy', String(busy));
     renderStatusLine();
     setWaveOpen({ user: status.recording, bot: false });
-    const label = locked
-        ? VOICE_OFFLINE_SEND_TITLE
-        : unavailable
-          ? (stt?.reason ?? 'Speech-to-text is unavailable.')
-          : status.recording
-            ? 'Stop voice input and transcribe'
-            : busy
-              ? 'Transcribing…'
-              : 'Voice input';
+    const label = unavailable
+        ? (stt?.reason ?? 'Speech-to-text is unavailable.')
+        : status.recording
+          ? 'Stop voice input and transcribe'
+          : busy
+            ? 'Transcribing…'
+            : 'Voice input';
     btn.title = label;
     btn.setAttribute('aria-label', label);
     btn.setAttribute('aria-pressed', status.recording ? 'true' : 'false');

@@ -1,0 +1,73 @@
+/* Plan panel above the input. */
+
+.plan-panel {
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, var(--fg) 6%);
+    padding: 8px 10px 10px;
+    background: color-mix(in srgb, var(--user-accent) 4%, var(--surface-raised));
+}
+
+.plan-panel-header {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 6px;
+}
+
+.plan-panel-title {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+}
+
+.plan-panel-status {
+    font-size: 11px;
+    color: var(--fg);
+    line-height: 1.4;
+}
+
+.plan-panel-preview {
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: color-mix(in srgb, var(--fg) 85%, var(--muted));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 6%);
+    margin-bottom: 8px;
+    max-height: 96px;
+    overflow-y: auto;
+}
+
+.plan-panel-more {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--muted);
+}
+
+.plan-panel-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    font-weight: 500;
+    padding: 5px 10px;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--border) 85%, var(--fg) 10%);
+    background: color-mix(in srgb, var(--fg) 5%, var(--card-bg));
+    color: var(--fg);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.plan-panel-open:hover {
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--focus-border) 35%, var(--border));
+}
+
+.plan-panel-hint-only .plan-panel-status {
+    font-size: 10.5px;
+    color: var(--muted);
+}
+

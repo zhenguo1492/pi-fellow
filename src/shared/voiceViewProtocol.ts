@@ -47,15 +47,10 @@ export interface VoiceStatus {
     unavailable?: VoiceUnavailable;
 }
 
-/** Voice mode is on or starting: the composer's text can go to the voice agent. */
+/** Voice mode is on or starting: it owns the microphone. */
 export function voiceIsOn(status: VoiceStatus | undefined): boolean {
     return status !== undefined && (status.phase !== 'off' || status.starting);
 }
-
-/** The Bot view with the voice agent offline: the composer is locked, and its placeholder says why. */
-export const VOICE_OFFLINE_SEND_HINT = 'The voice agent must be online to send messages';
-export const VOICE_OFFLINE_SEND_TITLE =
-    'The voice agent must be online to send messages here: start it with the robot above, or go back to the worker conversation.';
 
 /** A request from the chat's voice controls to the voice agent. */
 export type VoiceAgentAction =
@@ -87,7 +82,10 @@ export function voiceUserText(text: string, attachments?: VoiceAttachments): str
     return [text, ...names].filter(Boolean).join(' ');
 }
 
-/** Tokens of one LLM call of the voice agent (omp `message_end` usage). */
+/**
+ * Tokens of one LLM call of the voice agent (omp `message_end` usage). All four token counts
+ * together are the context the call left, which the next call reads.
+ */
 export interface VoiceCallUsage {
     at: number;
     input: number;
@@ -96,7 +94,22 @@ export interface VoiceCallUsage {
     cacheWrite: number;
     /** USD. */
     cost: number;
+    /** The model's context window in tokens; absent when the agent did not report it (and in older transcripts). */
+    contextWindow?: number;
 }
+
+/**
+ * What voice mode sent to STT and TTS in one conversation, successful requests only. Speech
+ * services bill by audio length or characters and rarely report tokens: only STT servers that
+ * return OpenAI's `usage` (gpt-4o-transcribe) give `input` / `output` tokens.
+ */
+export interface VoiceSpeechUsage {
+    stt?: { calls: number; audioMs: number; input?: number; output?: number };
+    tts?: { calls: number; chars: number; audioMs: number };
+}
+
+/** One STT or TTS request's use, as `VoiceSpeechUsage` adds it up. */
+export type VoiceSpeechCall = { service: 'stt'; audioMs: number; input?: number; output?: number } | { service: 'tts'; chars: number; audioMs: number };
 
 /** How long one spoken user turn took to be heard, in ms; each part only when both of its ends were seen. */
 export interface VoiceHearing {
@@ -249,6 +262,8 @@ export interface VoiceViewState {
     engines: VoiceEngines;
     /** The loaded voice context's totals; absent before its first turn. */
     usage?: VoiceUsageTotals;
+    /** The shown conversation's STT and TTS use; absent before its first request. */
+    speech?: VoiceSpeechUsage;
     session: {
         id: string;
         title: string;
@@ -269,21 +284,27 @@ export interface VoiceViewState {
  * A sentence, as TTS reads it, and where it is: `range` in the text it is in as shown (start
  * inclusive, end exclusive), or `sentence`, which of a Bot view reply's spoken sentences
  * (`VoiceEntry.sentences`) it is when the view shows those one by one. Exactly one of them is set.
+ * A paragraph or a selection is several sentences read one after another: `parts` are they, each
+ * as TTS reads it (and as the speech cache keeps it), and `text` is them joined.
  */
 export interface VoiceReplayPiece {
     text: string;
     range?: [start: number, end: number];
     sentence?: number;
+    parts?: string[];
 }
 
 /**
- * A sentence being read aloud: `loading` while it is with TTS, `queued` until its audio starts,
- * `playing` while the speakers play it, as the audio reports.
+ * A read aloud: `loading` while the sentence it starts with is with TTS, `queued` until its audio
+ * starts, `playing` while the speakers play it, as the audio reports; `paused` until it resumes
+ * (the speakers are let go meanwhile). `part`: which of `piece.parts` is being read (or is next
+ * when paused); 0 for a single sentence.
  */
 export interface VoiceReplay {
     entryId: string;
     piece: VoiceReplayPiece;
-    phase: 'loading' | 'queued' | 'playing';
+    phase: 'loading' | 'queued' | 'playing' | 'paused';
+    part: number;
 }
 
 /** A sentence's translation into the `translateTo` language. */
@@ -318,12 +339,27 @@ export type VoiceViewClientMessage =
     /** The history button: pick a past voice session to read. */
     | { type: 'history' }
     /**
-     * Alt+click on a sentence: read it aloud, or stop if it is the one playing. `surface: 'bot'`:
-     * `entryId` is the Bot view entry it is in; `chat`: a key for the chat text it is in (its
-     * audio is cached under it).
+     * Alt+click on a sentence (Alt+Shift+click: its paragraph), Read aloud on a selection, or a
+     * click (double-click: `from` the word) on the picked text once nothing reads it: read it
+     * aloud, or stop if it is the one playing. `surface: 'bot'`: `entryId` is the Bot view entry it
+     * is in; `chat`: a key for the chat text it is in; `selection`: a key for the selected text (its
+     * audio is cached under the key). `from`: start `fraction` (0..1, by characters) into `part`.
      */
-    | { type: 'replay'; entryId: string; piece: VoiceReplayPiece; surface: 'bot' | 'chat' }
+    | { type: 'replay'; entryId: string; piece: VoiceReplayPiece; surface: 'bot' | 'chat' | 'selection'; from?: { part: number; fraction: number } }
     | { type: 'replayClipStarted'; clipId: number }
     | { type: 'replayClipEnded'; clipId: number }
-    /** Alt+right-click on a sentence: translate this text into `to` (the `translateTo` language as shown), answered by `translation`. */
-    | { type: 'translate'; requestId: number; text: string; to: string };
+    /**
+     * Alt+right-click on a sentence (Alt+Shift: its paragraph), or Translate on a selection:
+     * translate this text into `to` (the `translateTo` language as shown), answered by `translation`.
+     */
+    | { type: 'translate'; requestId: number; text: string; to: string }
+    /**
+     * The read aloud now, as a playback control: a click on it pauses or resumes it; a click
+     * elsewhere or Escape stops it.
+     */
+    | { type: 'replayControl'; action: 'pause' | 'resume' | 'stop' }
+    /**
+     * A double-click in the read aloud now: read on from `fraction` (0..1, by characters) into its
+     * `part`, playing even when it was paused.
+     */
+    | { type: 'replaySeek'; part: number; fraction: number };

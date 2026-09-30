@@ -353,17 +353,30 @@ async function getJson(fetchImpl: typeof fetch, url: string, headers: Record<str
     return res.json();
 }
 
+/** Refresh when the stored token expires within this margin, so it cannot lapse mid-request. */
+const TOKEN_EXPIRY_MARGIN_MS = 60_000;
+
+/** First pi release with `pi auth print-bearer-token`; older pi reads `auth …` as a prompt. */
+const PI_BEARER_TOKEN_MIN_VERSION = [0, 83, 0];
+
+/** Whether pi `version` (e.g. `0.99.1`) has `pi auth print-bearer-token`. */
+export function piSupportsPrintBearerToken(version: string): boolean {
+    const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim())?.slice(1).map(Number);
+    if (!parts) return false;
+    for (let i = 0; i < PI_BEARER_TOKEN_MIN_VERSION.length; i++) {
+        if (parts[i] !== PI_BEARER_TOKEN_MIN_VERSION[i]) return parts[i] > PI_BEARER_TOKEN_MIN_VERSION[i];
+    }
+    return true;
+}
+
 /**
- * pi has no usage command: read its OAuth token from `auth.json` and query the provider directly.
- * Never refreshes — pi owns token rotation, and refreshing here would invalidate its refresh token.
+ * Prints a valid bearer token for `provider` (`pi auth print-bearer-token`); pi refreshes an
+ * expired OAuth credential under its own lock and writes it back to `auth.json`. Rejects when the
+ * CLI cannot (older pi, provider unknown to the auth command, revoked refresh token).
  */
-export async function fetchPiProviderUsage(
-    agentDir: string,
-    provider: string,
-    fetchImpl: typeof fetch = fetch,
-    nowMs = Date.now(),
-): Promise<ProviderAccountUsage[] | null> {
-    if (provider !== 'anthropic' && provider !== 'openai-codex' && provider !== 'antigravity') return null;
+export type BearerTokenReader = (provider: string) => Promise<string>;
+
+async function readPiOAuth(agentDir: string, provider: string): Promise<PiOAuthCredential | null> {
     let auth: Record<string, PiOAuthCredential | undefined> | null;
     try {
         auth = JSON.parse(await fs.readFile(path.join(agentDir, 'auth.json'), 'utf8'));
@@ -371,25 +384,60 @@ export async function fetchPiProviderUsage(
         return null;
     }
     const cred = auth?.[provider];
-    if (cred?.type !== 'oauth' || typeof cred.access !== 'string' || !cred.access) {
-        return null;
+    return cred?.type === 'oauth' && typeof cred.access === 'string' && cred.access ? cred : null;
+}
+
+/** Antigravity's `access` is JSON `{ token, projectId }`; older credentials are a bare token. */
+function parseAntigravityAccess(access: string): { token?: string; projectId?: string } {
+    let stored: { token?: unknown; projectId?: unknown } | null;
+    try {
+        stored = JSON.parse(access);
+    } catch {
+        return { token: access };
     }
+    return {
+        token: typeof stored?.token === 'string' && stored.token ? stored.token : undefined,
+        projectId: typeof stored?.projectId === 'string' && stored.projectId ? stored.projectId : undefined,
+    };
+}
+
+/**
+ * pi has no usage command: read its OAuth token from `auth.json` and query the provider directly.
+ * Never refreshes itself — refreshing here would invalidate pi's refresh token. A token that is
+ * expired (or about to be) comes from `readBearerToken` instead, which lets pi refresh it; without
+ * a reader, or when it fails, the expiry is reported.
+ */
+export async function fetchPiProviderUsage(
+    agentDir: string,
+    provider: string,
+    fetchImpl: typeof fetch = fetch,
+    nowMs = Date.now(),
+    readBearerToken?: BearerTokenReader,
+): Promise<ProviderAccountUsage[] | null> {
+    if (provider !== 'anthropic' && provider !== 'openai-codex' && provider !== 'antigravity') return null;
+    let cred = await readPiOAuth(agentDir, provider);
+    if (!cred) return null;
+    /** The CLI's token when the stored one was expired; `cred` then holds pi's rewritten credential. */
+    let bearer: string | undefined;
     const expires = finite(cred.expires);
-    if (expires !== undefined && expires <= nowMs) {
-        throw new Error('OAuth token expired; pi refreshes it on the next request');
+    if (expires !== undefined && expires - TOKEN_EXPIRY_MARGIN_MS <= nowMs) {
+        const expired = new Error('OAuth token expired; pi refreshes it on the next request');
+        if (!readBearerToken) throw expired;
+        try {
+            bearer = (await readBearerToken(provider)).trim();
+        } catch {
+            throw expired;
+        }
+        if (!bearer) throw expired;
+        // pi wrote the refreshed credential back: pick up a rotated accountId / projectId.
+        cred = (await readPiOAuth(agentDir, provider)) ?? cred;
     }
     if (provider === 'antigravity') {
-        // The plugin stores JSON { token, projectId } in `access`; older credentials may be a bare token.
-        let token = cred.access;
-        let projectId = 'aicode-consumers';
-        try {
-            const stored = JSON.parse(cred.access);
-            if (typeof stored?.token !== 'string' || !stored.token) return null;
-            token = stored.token;
-            if (typeof stored.projectId === 'string' && stored.projectId) projectId = stored.projectId;
-        } catch {
-            // Bare OAuth token.
-        }
+        const stored = parseAntigravityAccess(cred.access!);
+        const printed = bearer === undefined ? undefined : parseAntigravityAccess(bearer);
+        const token = printed?.token ?? stored.token;
+        if (!token) return null;
+        const projectId = printed?.projectId ?? stored.projectId ?? 'aicode-consumers';
         const res = await fetchImpl(ANTIGRAVITY_QUOTA_URL, {
             method: 'POST',
             headers: {
@@ -404,15 +452,16 @@ export async function fetchPiProviderUsage(
         const quota = parseAntigravityQuota(await res.json());
         return quota ? [quota] : null;
     }
+    const token = bearer ?? cred.access!;
     if (provider === 'anthropic') {
         const payload = await getJson(fetchImpl, CLAUDE_USAGE_URL, {
-            authorization: `Bearer ${cred.access}`,
+            authorization: `Bearer ${token}`,
             'anthropic-beta': 'oauth-2025-04-20',
         });
         const windows = parseClaudeUsage(payload);
         return windows.length > 0 ? [{ windows }] : null;
     }
-    const headers: Record<string, string> = { authorization: `Bearer ${cred.access}` };
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     if (typeof cred.accountId === 'string' && cred.accountId) {
         headers['chatgpt-account-id'] = cred.accountId;
     }

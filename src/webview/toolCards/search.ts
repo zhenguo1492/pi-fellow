@@ -1,4 +1,4 @@
-/** `grep` (legacy `search`) and `glob` (legacy `find`): workspace search cards. */
+/** `grep` (legacy `search`), `glob` (pi and legacy `find`) and pi's `ls`: workspace search cards. */
 import { badge, badges, h, inline, invalidArg, note, resultText } from './parts';
 import type { Child, ToolRenderer } from './types';
 import { detailsRecord, isRecord, num, plural, resultTextOf, scopePaths, shortenPath, str, strings, truncate } from './util';
@@ -56,7 +56,13 @@ export const globRenderer: ToolRenderer = {
     summary({ args }) {
         const raw = args.path ?? args.paths;
         if (raw !== undefined && typeof raw !== 'string' && !Array.isArray(raw)) return [invalidArg('path')];
-        return [h('span', 'tv-pattern', truncate(scopePaths(args).map(shortenPath).join(', ') || '*', 120))];
+        const scope = scopePaths(args).map(shortenPath).join(', ');
+        // pi's `find` takes the glob in `pattern` and the directory in `path`; omp's `glob` has the globs in `path`.
+        const pattern = str(args.pattern);
+        if (pattern !== null) {
+            return [h('span', 'tv-pattern', truncate(pattern, 120)), h('span', 'tv-muted', 'in'), h('span', 'tv-path', scope || '.')];
+        }
+        return [h('span', 'tv-pattern', truncate(scope || '*', 120))];
     },
 
     body({ args, result }) {
@@ -88,6 +94,28 @@ export const globRenderer: ToolRenderer = {
             ]),
             missing.length > 0 && note('warn', `skipped missing: ${missing.join(', ')}`),
             error !== null && !result?.isError && note('err', error),
+            resultText(result, { maxLines: 12 }),
+        ];
+    },
+};
+
+/** pi's `ls`: one directory's entries, `/` after directories. */
+export const lsRenderer: ToolRenderer = {
+    summary({ args }) {
+        const path = args.path === undefined ? '.' : str(args.path);
+        return [path === null ? invalidArg('path') : h('span', 'tv-path', shortenPath(path))];
+    },
+
+    body({ args, result }) {
+        const details = detailsRecord(result);
+        const limit = num(args.limit);
+        const entryLimit = num(details?.entryLimitReached);
+        return [
+            badges([
+                limit !== null && `limit ${limit}`,
+                (entryLimit !== null || isRecord(details?.truncation)) &&
+                    badge(entryLimit !== null ? `truncated at ${entryLimit}` : 'truncated', 'warn'),
+            ]),
             resultText(result, { maxLines: 12 }),
         ];
     },

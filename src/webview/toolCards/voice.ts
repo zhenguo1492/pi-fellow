@@ -2,8 +2,9 @@
  * The Bot view's cards for the voice agent's host tools (src/voiceAgent/hostTools.ts). Its own
  * lookups (read, grep, glob, web_search) are the worker's tools and use the registry's renderers.
  */
+import { copyPlainText } from '../chat/toast';
 import { bashRenderer } from './bash';
-import { badges, codeBlock, diffBlock, invalidArg, note, output, pathText, resultText } from './parts';
+import { badges, codeBlock, diffBlock, h, invalidArg, note, output, pathText, resultText } from './parts';
 import type { Child, ToolRenderer } from './types';
 import { display, languageFromPath, normalizeWs, num, resultTextOf, str, truncate } from './util';
 
@@ -90,11 +91,39 @@ const createFileRenderer: ToolRenderer = {
     },
 };
 
+/** Lines a show_text card shows before "more lines". */
+const SHOWN_LINES = 40;
+
+/** Text shown instead of spoken: open from the start, highlighted when it has a language, with a Copy button. */
+const showTextRenderer: ToolRenderer = {
+    summary({ args }) {
+        const text = str(args.text) ?? '';
+        const title = str(args.title)?.trim() || str(args.language)?.trim() || text.trim().split('\n', 1)[0];
+        return [truncate(normalizeWs(title ?? ''), SUMMARY_CHARS)];
+    },
+
+    body({ args, result }) {
+        const text = str(args.text) ?? '';
+        const lang = str(args.language)?.trim() || null;
+        let shown: HTMLElement | null = null;
+        if (text) {
+            shown = output(text, { lang, variant: lang ? 'code' : 'plain', maxLines: SHOWN_LINES });
+            const copy = h('button', 'tv-copy', 'copy');
+            copy.type = 'button';
+            copy.title = 'Copy to the clipboard';
+            copy.addEventListener('click', () => copyPlainText(text));
+            shown.append(copy);
+        }
+        return [shown, result?.isError === true && resultText(result)];
+    },
+};
+
 const RENDERERS: Record<string, ToolRenderer> = {
     research: researchRenderer,
     edit_file: editFileRenderer,
     create_file: createFileRenderer,
     run_in_terminal: bashRenderer,
+    show_text: showTextRenderer,
 };
 
 export function voiceToolRenderer(name: string): ToolRenderer {

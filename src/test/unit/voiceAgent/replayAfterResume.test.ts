@@ -88,6 +88,7 @@ describe('Bot view replay of a reply spoken after the window reloaded', () => {
             onError: (message) => {
                 throw new Error(message);
             },
+            onLevel: () => {},
             log: () => {},
         });
         let send: (message: VoiceViewClientMessage) => void = () => {};

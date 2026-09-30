@@ -92,11 +92,12 @@ export interface VoiceAgentWiring {
  * the Bot view, which a chat tab shows in place of its conversation when its icon is clicked (design
  * §11), and, as a log, in the "PI Buddy: Voice Agent"
  * output channel.
- * - Chat: the robot above the composer starts voice mode and, while it is on, shows its phase and
- *   stops it; the follow button next to it sets whether the editor follows Pi's focus (remembered in
- *   the `followPi` setting); the composer mic shows the microphone level and mutes; in the Bot view the composer
- *   sends typed text to the voice agent (and is locked while it is offline), in the conversation to omp.
- * - `oh-my-pi-chater.voiceAgent.start` / `stop` (robot, palette): voice mode, i.e. microphone and
+ * - Chat: the phone button above the composer starts voice mode and, while it is on, hangs up; the
+ *   avatar and status text next to it show its phase and switch the tab to the Bot view and back;
+ *   the follow button sets whether the editor follows Pi's focus (remembered in the `followPi`
+ *   setting); the composer mic shows the microphone level and mutes; in the Bot view the composer
+ *   sends typed text to the voice agent (a text turn while voice mode is off), in the conversation to omp.
+ * - `oh-my-pi-chater.voiceAgent.start` / `stop` (phone button, palette): voice mode, i.e. microphone and
  *   speaker through a hidden Chrome (design §5.1); stop also ends the omp process. A speech service
  *   that does not work is left out rather than failing the start: without STT the user types, without
  *   TTS replies are shown as text (§5.13). Voice contexts stay on disk with the workspace: the next
@@ -238,7 +239,8 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
 
     /**
      * Alt+click on a sentence (Bot view or chat). In voice mode a replay plays on its audio page (echo
-     * cancelled, microphone input held); otherwise in the webview, with dictation paused meanwhile.
+     * cancelled, microphone input held); otherwise in the webview, with dictation paused while it
+     * plays (a paused read plays nothing).
      */
     const replay = new ReplayPlayer({
         cache: speechCache,
@@ -246,10 +248,12 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         tts: () => resolveTtsConfig(readTtsSettings()),
         output: (text): ReplayOutput | string => voiceMode?.beginReplay(text) ?? view.audio.output(),
         onChange: (current) => {
-            chat.setDictationPaused(current !== undefined);
+            chat.setDictationPaused(current !== undefined && current.phase !== 'paused');
             view.refresh();
         },
         onError: (message) => chat.postVoice({ type: 'replayError', message }),
+        // The bot's voice as the reply's is: the voice bar's wave and the talking avatar.
+        onLevel: (level, wave) => chat.postVoiceLevel(level, 'bot', wave),
         log,
     });
 
@@ -545,6 +549,11 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                         log(`Replay cache: reply ${turnId} spoken live, stored as ${entryId}: ${texts}`);
                     } else {
                         log(`Replay cache: reply ${turnId} spoken live but no transcript entry for it, not stored: ${texts}`);
+                    }
+                },
+                onSpeechUsage: (usage) => {
+                    if (generation === startGeneration) {
+                        store.addSpeechUsage(usage);
                     }
                 },
                 onServiceError: (service, message) =>

@@ -1,4 +1,4 @@
-import { AVATAR_PRESET_PREFIX } from './avatarPresets';
+import { AVATAR_PRESET_PREFIX, type AvatarThinking } from './avatarPresets';
 
 /**
  * Who talks in the Bot view: the user and the voice agent, each with a name and an avatar
@@ -17,12 +17,11 @@ export const MAX_SPEAKER_NAME = 40;
 const MAX_AVATAR_CHARS = 2;
 
 /**
- * `text`: an emoji or initials; `image`: a data URI of the picture (`mouthSrcs`: a pixel-art
- * preset's talking frames, half then wide open, shown while the voice agent speaks); `icon`: one of
- * the default line icons (the person or the robot), drawn in the avatar box's colour. Absent: the
- * speaker's own default icon.
+ * `text`: an emoji or initials; `image`: a data URI of the picture (`think`: a pixel-art preset's
+ * thinking animation); `icon`: one of the default line icons (the person or the robot), drawn in
+ * the avatar box's colour. Absent: the speaker's own default icon.
  */
-export type VoiceAvatar = { kind: 'text'; text: string } | { kind: 'image'; src: string; mouthSrcs?: string[] } | { kind: 'icon'; icon: VoiceSpeakerId };
+export type VoiceAvatar = { kind: 'text'; text: string } | { kind: 'image'; src: string; think?: AvatarThinking } | { kind: 'icon'; icon: VoiceSpeakerId };
 
 export interface VoiceSpeaker {
     name: string;

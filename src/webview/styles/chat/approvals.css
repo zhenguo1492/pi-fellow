@@ -1,0 +1,71 @@
+/* Tool approval cards. */
+
+/* ── Tool approval card ── */
+.tool-approval-card {
+    margin: 4px 16px 8px;
+    border: 1px solid var(--warning-fg);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--warning-fg) 6%, transparent);
+    overflow: hidden;
+}
+
+.tool-approval-card .tool-header {
+    padding: 8px 12px;
+}
+
+/* Voice-agent approvals sit at the top of the input box (visible in the chat and the Bot view). */
+.tool-approval-host:empty {
+    display: none;
+}
+.tool-approval-host .tool-approval-card {
+    margin: 8px 10px 0;
+}
+
+.approval-args {
+    padding: 6px 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 120px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    line-height: 1.5;
+}
+.approval-args:empty {
+    display: none;
+}
+
+.approval-actions {
+    display: flex;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+}
+
+.approval-btn {
+    padding: 5px 16px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    font-weight: 500;
+    transition: background 0.15s;
+}
+.approval-btn.approve {
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+}
+.approval-btn.approve:hover {
+    background: var(--btn-hover);
+}
+.approval-btn.reject {
+    background: transparent;
+    color: var(--error-fg);
+    border: 1px solid color-mix(in srgb, var(--error-fg) 30%, transparent);
+}
+.approval-btn.reject:hover {
+    background: color-mix(in srgb, var(--error-fg) 10%, transparent);
+}

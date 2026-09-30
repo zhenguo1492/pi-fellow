@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceStatus } from '../../../shared/voiceViewProtocol';
 
@@ -27,11 +29,10 @@ beforeEach(() => {
 describe('voice bar with a speech service not working', () => {
     it('starts the voice agent when both services fail, and shows why in two grey tags', () => {
         setVoiceReadiness({ stt: { ok: false, reason: STT_DOWN }, tts: { ok: false, reason: TTS_DOWN } });
-        const robot = $<HTMLButtonElement>('[data-act="robot"]');
-        expect(robot.getAttribute('aria-disabled')).toBe('false');
-        expect($('.voice-bar-robot').classList.contains('is-unavailable')).toBe(false);
+        const call = $<HTMLButtonElement>('[data-act="call"]');
+        expect(call.getAttribute('aria-disabled')).toBe('false');
 
-        robot.click();
+        call.click();
         expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'voiceAgent', action: { type: 'start' } });
 
         expect(tag('stt').hidden).toBe(false);
@@ -60,7 +61,7 @@ describe('voice bar with a speech service not working', () => {
         setVoiceReadiness({ stt: { ok: false, reason: STT_DOWN }, tts: { ok: true } });
         applyVoiceBarStatus(on({ unavailable: { stt: STT_DOWN } }));
         expect(label()).toBe('Online');
-        expect($('[data-act="robot"]').title).toMatch(/can't hear you: type to it/);
+        expect($('[data-act="view"]').title).toMatch(/can't hear you: type to it/);
         expect(tag('stt').hidden).toBe(false);
         expect(tag('tts').hidden).toBe(true);
 
@@ -70,7 +71,7 @@ describe('voice bar with a speech service not working', () => {
 
     it('while on without TTS, thinking says the reply shows as text', () => {
         applyVoiceBarStatus(on({ phase: 'thinking', unavailable: { tts: TTS_DOWN } }));
-        expect($('[data-act="robot"]').title).toMatch(/shows as text/);
+        expect($('[data-act="view"]').title).toMatch(/shows as text/);
         expect(tag('tts').hidden).toBe(false);
         applyVoiceBarStatus(on({ unavailable: { tts: TTS_DOWN } }));
         expect(label()).toBe('Listening');
@@ -108,57 +109,89 @@ describe('voice bar label', () => {
     });
 });
 
-describe('voice bar robot button', () => {
-    const toggles = () => vscode.postMessage.mock.calls.filter(([msg]) => msg.type === 'toggleBotView').length;
+describe('voice bar phone button', () => {
+    const call = () => $<HTMLButtonElement>('[data-act="call"]');
 
-    it('switches to the Bot view on start and back to the worker view on stop', () => {
-        const robot = $<HTMLButtonElement>('[data-act="robot"]');
-        setBotViewShown(false);
-        robot.click();
-        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'voiceAgent', action: { type: 'start' } });
-        expect(toggles()).toBe(1);
+    it('calls while voice mode is off, hangs up while it is on, and does nothing while it connects; never switches the view', () => {
+        call().click();
+        expect(vscode.postMessage.mock.calls).toEqual([[{ type: 'voiceAgent', action: { type: 'start' } }]]);
+        expect(call().getAttribute('aria-pressed')).toBe('false');
 
-        // Starting while already in the Bot view stays there.
-        setBotViewShown(true);
-        vscode.postMessage.mockClear();
-        robot.click();
-        expect(toggles()).toBe(0);
-
-        // Stopping from the Bot view goes back to the worker view.
-        applyVoiceBarStatus(on());
-        robot.click();
-        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'voiceAgent', action: { type: 'stop' } });
-        expect(toggles()).toBe(1);
-
-        // Stopping from the worker view stays there.
-        setBotViewShown(false);
-        vscode.postMessage.mockClear();
-        robot.click();
-        expect(toggles()).toBe(0);
-
-        // Still starting: no start or stop, but the conversation is shown.
-        setBotViewShown(false);
         applyVoiceBarStatus(on({ phase: 'off', starting: true }));
         vscode.postMessage.mockClear();
-        robot.click();
-        expect(vscode.postMessage.mock.calls).toEqual([[{ type: 'toggleBotView' }]]);
+        call().click();
+        expect(vscode.postMessage).not.toHaveBeenCalled();
+        expect(call().getAttribute('aria-disabled')).toBe('true');
+
+        applyVoiceBarStatus(on());
+        expect(call().getAttribute('aria-pressed')).toBe('true');
+        expect(call().getAttribute('aria-label')).toBe('Hang up');
+        call().click();
+        expect(vscode.postMessage.mock.calls).toEqual([[{ type: 'voiceAgent', action: { type: 'stop' } }]]);
+    });
+
+    it('swaps the handset for a hung-up one while voice mode is on, and back once it is off', () => {
+        const callIcon = call().innerHTML;
+        expect(callIcon).toContain('<svg');
+
+        applyVoiceBarStatus(on({ phase: 'off', starting: true }));
+        expect(call().innerHTML).toBe(callIcon);
+
+        applyVoiceBarStatus(on({ phase: 'speaking' }));
+        const hangUpIcon = call().innerHTML;
+        expect(hangUpIcon).not.toBe(callIcon);
+        expect(call().title).toMatch(/^Hang up/);
+
+        applyVoiceBarStatus(on({ phase: 'off' }));
+        expect(call().innerHTML).toBe(callIcon);
+        expect(call().getAttribute('aria-pressed')).toBe('false');
+        expect(call().title).toMatch(/^Call /);
     });
 });
 
-describe('voice bar Bot view button in a TUI tab', () => {
-    const panel = () => $<HTMLButtonElement>('[data-act="panel"]');
+describe('voice bar avatar button', () => {
+    const view = () => $<HTMLButtonElement>('[data-act="view"]');
 
-    it('shows the Bot view over the terminal and says the way back leads to the running TUI', () => {
+    it('switches the Bot view, whether voice mode is on or off, and never starts or stops it', () => {
+        for (const status of [undefined, on(), on({ phase: 'off', starting: true })]) {
+            applyVoiceBarStatus(status);
+            vscode.postMessage.mockClear();
+            view().click();
+            expect(vscode.postMessage.mock.calls).toEqual([[{ type: 'toggleBotView' }]]);
+        }
+    });
+
+    it('says where a click leads: the Bot view, back to the running TUI, or back to the worker conversation', () => {
         setBotViewShown(false, true);
-        expect(panel().title).toMatch(/^Show the voice agent conversation/);
-        panel().click();
-        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'toggleBotView' });
+        expect(view().title).toMatch(/^Show the conversation with/);
+        expect(view().getAttribute('aria-pressed')).toBe('false');
 
         setBotViewShown(true, true);
-        expect(panel().title).toBe('Back to the terminal (TUI); it kept running');
-        expect(panel().getAttribute('aria-pressed')).toBe('true');
+        expect(view().title).toBe('Back to the terminal (TUI); it kept running');
+        expect(view().getAttribute('aria-pressed')).toBe('true');
 
         setBotViewShown(true, false);
-        expect(panel().title).toBe('Back to the worker conversation');
+        expect(view().title).toBe('Back to the worker conversation');
+    });
+});
+
+describe('voice bar avatar button while the Bot view is shown', () => {
+    const view = () => $<HTMLButtonElement>('[data-act="view"]');
+    const css = readFileSync(join(__dirname, '../../../webview/styles/chat/voiceBar.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+    it('is selected (aria-pressed) whatever voice mode does, and not once the tab goes back', () => {
+        for (const status of [undefined, on(), on({ phase: 'off', starting: true }), on({ phase: 'speaking' })]) {
+            applyVoiceBarStatus(status);
+            setBotViewShown(true);
+            expect(view().getAttribute('aria-pressed')).toBe('true');
+            setBotViewShown(false);
+            expect(view().getAttribute('aria-pressed')).toBe('false');
+        }
+    });
+
+    it('highlights the selected state with a neutral tint, not the red/orange voice or error colours', () => {
+        const pressed = [...css.matchAll(/([^{}]*\.voice-bar-toggle\[aria-pressed='true'\][^{}]*)\{([^}]*)\}/g)].map((m) => m[2]).join('\n');
+        expect(pressed).toMatch(/background\s*:/);
+        expect(pressed).not.toMatch(/--voice-accent|--error-fg|--ansi-bright-red|--warning-fg|#[0-9a-f]{3,8}\b|\bred\b/i);
     });
 });

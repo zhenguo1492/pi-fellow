@@ -5,7 +5,7 @@ import { editRenderer } from './edit';
 import { lspRenderer } from './lsp';
 import { output, resultImages, resultText } from './parts';
 import { readRenderer } from './read';
-import { globRenderer, grepRenderer } from './search';
+import { globRenderer, grepRenderer, lsRenderer } from './search';
 import { taskRenderer, todoRenderer } from './task';
 import type { ToolRenderer } from './types';
 import { argsDigest } from './util';
@@ -42,6 +42,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
     search: grepRenderer,
     glob: globRenderer,
     find: globRenderer,
+    ls: lsRenderer,
     ast_grep: astGrepRenderer,
     ast_edit: astEditRenderer,
     lsp: lspRenderer,

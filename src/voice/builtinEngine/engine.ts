@@ -1,6 +1,7 @@
 /**
- * Runs the built-in voice engine (./server.ts) for the extension host: downloads its models on first
- * use, starts it as a child process (VS Code's Electron as Node) and starts it again when it crashes.
+ * Runs the built-in voice engine (./server.ts) for the extension host: downloads its native runtime
+ * (./runtime.ts) and models on first use, starts it as a child process (VS Code's Electron as Node)
+ * and starts it again when it crashes.
  * A server loads only the models of the features it is started with (speech-to-text, the voice, the
  * voiceprint, noise reduction); asked for one it lacks, it is started again with it added.
  * No `vscode` import: the host passes in what it needs, so scripts can drive it too.
@@ -8,7 +9,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import * as readline from 'node:readline';
-import { FEATURE_MODELS, downloadModels, installedBytes, isInstalled, modelDir, planModelDownload, type EngineFeature } from './models';
+import { FEATURE_MODELS, directoryBytes, downloadModels, installedBytes, isInstalled, modelDir, planModelDownload, type EngineFeature } from './models';
+import { downloadRuntime, isRuntimeInstalled, planRuntimeDownload, runtimeDir, sherpaModulePath } from './runtime';
 import type { BuiltinVoiceStatus } from '../../shared/protocol';
 import type { EngineConfig } from './server';
 
@@ -16,12 +18,14 @@ export interface EngineHost {
     /** out/voice-engine/server.js */
     serverPath: string;
     modelRoot: string;
+    /** Where the sherpa-onnx runtime is installed (./runtime.ts). */
+    runtimeRoot: string;
     /** The features the voice settings use now: a (re)start loads these too, so one server serves them all. */
     features(): readonly EngineFeature[];
     log(line: string): void;
     /**
-     * Runs the model download of `totalBytes`, showing its progress (bytes done of total) and letting
-     * the user cancel it.
+     * Runs the download (runtime and models) of `totalBytes`, showing its progress (bytes done of
+     * total) and letting the user cancel it.
      */
     withDownloadProgress(totalBytes: number, download: (report: (done: number, total: number) => void, signal: AbortSignal) => Promise<void>): PromiseLike<void>;
 }
@@ -81,20 +85,28 @@ export class BuiltinVoiceEngine {
         this._stopChild();
     }
 
-    /** Whether the models of `features` are downloaded, and their size (on disk, or to download). */
+    /** Whether the runtime and the models of `features` are downloaded, and their size (on disk, or to download). */
     async status(features: readonly EngineFeature[]): Promise<BuiltinVoiceStatus> {
-        const { modelRoot } = this._host;
+        const { modelRoot, runtimeRoot } = this._host;
         const specs = specsOf(features);
-        // Up, or starting (downloading its models first), with these features.
+        // Up, or starting (downloading first), with these features.
         const running = this._url !== undefined && features.every((f) => this._features.has(f));
-        const downloaded = (await Promise.all(specs.map((spec) => isInstalled(modelRoot, spec)))).every(Boolean);
-        if (downloaded) {
-            return { downloaded, bytes: await installedBytes(modelRoot, specs), running };
+        let runtime: string | undefined;
+        try {
+            runtime = runtimeDir(runtimeRoot);
+        } catch {
+            // An unsupported platform: nothing to install, and starting says why.
+        }
+        const downloaded =
+            runtime !== undefined && (await isRuntimeInstalled(runtime)) && (await Promise.all(specs.map((spec) => isInstalled(modelRoot, spec)))).every(Boolean);
+        if (runtime !== undefined && downloaded) {
+            return { downloaded, bytes: (await directoryBytes(runtime)) + (await installedBytes(modelRoot, specs)), running };
         }
         const key = [...new Set(features)].sort().join();
         let pending = this._downloadBytes.get(key);
         if (!pending) {
-            pending = planModelDownload(modelRoot, specs, AbortSignal.timeout(10_000)).then((plan) => plan.total);
+            const signal = AbortSignal.timeout(10_000);
+            pending = Promise.all([planRuntimeDownload(runtimeRoot, signal), planModelDownload(modelRoot, specs, signal)]).then(([r, m]) => r.total + m.total);
             this._downloadBytes.set(key, pending);
         }
         const bytes = await pending.catch(() => {
@@ -106,17 +118,23 @@ export class BuiltinVoiceEngine {
 
     /** Downloads what `features` lack, then replaces the running server (if any) with one loading them all. */
     private async _start(features: ReadonlySet<EngineFeature>): Promise<string> {
-        const { modelRoot } = this._host;
-        const plan = await planModelDownload(modelRoot, specsOf(features), AbortSignal.timeout(30_000));
-        if (plan.items.length > 0) {
-            await this._host.withDownloadProgress(plan.total, (report, signal) => downloadModels(modelRoot, plan, report, signal));
+        const { modelRoot, runtimeRoot } = this._host;
+        const planned = AbortSignal.timeout(30_000);
+        const [runtime, models] = await Promise.all([planRuntimeDownload(runtimeRoot, planned), planModelDownload(modelRoot, specsOf(features), planned)]);
+        if (runtime.packages.length > 0 || models.items.length > 0) {
+            const total = runtime.total + models.total;
+            await this._host.withDownloadProgress(total, async (report, signal) => {
+                // The runtime first: the models are of no use without it.
+                await downloadRuntime(runtime, (done) => report(done, total), signal);
+                await downloadModels(modelRoot, models, (done) => report(runtime.total + done, total), signal);
+            });
             this._downloadBytes.clear();
         }
         if (this._disposed) {
             throw new Error('The built-in voice engine is shut down');
         }
         this._stopChild();
-        return this._spawn(features);
+        return this._spawn(features, runtime.dir);
     }
 
     private _stopChild(): void {
@@ -125,11 +143,12 @@ export class BuiltinVoiceEngine {
         child?.kill();
     }
 
-    private _spawn(features: ReadonlySet<EngineFeature>): Promise<string> {
+    private _spawn(features: ReadonlySet<EngineFeature>, runtime: string): Promise<string> {
         const dir = (feature: EngineFeature) => (features.has(feature) ? modelDir(this._host.modelRoot, FEATURE_MODELS[feature]) : undefined);
         const config: EngineConfig = {
             token: this._token,
             port: this._port,
+            sherpaPath: sherpaModulePath(runtime),
             sttDir: dir('stt'),
             ttsDir: dir('tts'),
             speakerDir: dir('speaker'),

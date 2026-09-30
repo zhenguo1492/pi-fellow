@@ -1,10 +1,13 @@
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { cliCommand, getAgentLayout, piCliChildEnv, resolvePiCliInvocation } from '../pi/piCliPaths';
 import {
     fetchPiProviderUsage,
     parseOmpUsage,
+    piSupportsPrintBearerToken,
     ProviderUsageTracker,
     statusBarWindows,
     usageDetails,
@@ -20,10 +23,26 @@ const execFileAsync = promisify(execFile);
 /** Background poll so reset countdowns and usage from other clients stay current while idle. */
 const USAGE_POLL_MS = 5 * 60_000;
 
+/**
+ * `pi auth print-bearer-token`: pi refreshes an expired OAuth token (under its own lock) and
+ * prints it. Gated on pi's version — older pi would read `auth …` as a prompt.
+ */
+async function printPiBearerToken(provider: string): Promise<string> {
+    const invocation = await resolvePiCliInvocation('pi');
+    if (invocation.backend !== 'pi') throw new Error('pi CLI not available');
+    const pkg = JSON.parse(await fs.readFile(path.join(path.dirname(invocation.cliJsPath), '..', 'package.json'), 'utf8'));
+    if (typeof pkg?.version !== 'string' || !piSupportsPrintBearerToken(pkg.version)) {
+        throw new Error('pi has no `auth print-bearer-token` command');
+    }
+    const [command, argv] = cliCommand(invocation, ['auth', 'print-bearer-token', '--provider', provider, '--min-expiry', '2m']);
+    const { stdout } = await execFileAsync(command, argv, { timeout: 20_000, env: piCliChildEnv(invocation) });
+    return stdout;
+}
+
 /** omp owns multi-provider usage (token refresh, multi-account); pi gets a direct OAuth fetch. */
 async function fetchUsage(target: UsageTarget): Promise<ProviderAccountUsage[] | null> {
     if (target.backend === 'pi') {
-        return fetchPiProviderUsage(getAgentLayout('pi').agentDir, target.provider);
+        return fetchPiProviderUsage(getAgentLayout('pi').agentDir, target.provider, fetch, Date.now(), printPiBearerToken);
     }
     const invocation = await resolvePiCliInvocation('omp');
     const [command, argv] = cliCommand(invocation, ['usage', '--json', '--provider', target.provider]);

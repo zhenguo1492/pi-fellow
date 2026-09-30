@@ -2,11 +2,11 @@
  * The chat's text for the Alt gestures (sentenceActions.ts): prompts, replies and summaries
  * (`.message-content`), Thought blocks (`.thinking-content`), and the text in tool cards
  * (`.tv-out`, such as a task's assignment). A sentence is cut, as TTS reads it, from the paragraph
- * it is in: a paragraph, list item, heading, table cell, or a card's text block. Code blocks are
- * left out. The chat redraws its history on every state sync, so a sentence is found again by the
- * text of its paragraph.
+ * it is in: a paragraph, list item, heading, table cell, or a card's text block (in which blank
+ * lines part paragraphs, for Alt+Shift). Code blocks are left out. The chat redraws its history on
+ * every state sync, so a sentence is found again by the text of its paragraph.
  */
-import { pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from '../sentencePick';
+import { paragraphPieces, pickedOf, pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from '../sentencePick';
 
 const ROOTS = '.message-content, .thinking-content, .tv-out';
 /** Paragraphs of their own. */
@@ -48,7 +48,7 @@ function findParagraph(text: string): Element | undefined {
 
 export const chatSentences: SentenceSurface = {
     name: 'chat',
-    pick(node, offset) {
+    pick(node, offset, scope) {
         const parent = node.parentElement;
         const root = parent?.closest(ROOTS);
         if (!parent || !root || parent.closest(SKIP)) {
@@ -64,13 +64,15 @@ export const chatSentences: SentenceSurface = {
             at += t.length;
         }
         const text = paragraphText(nodes);
-        const piece = pieceAt(text, at);
-        if (!piece) {
-            return undefined;
+        const pieces = scope === 'paragraph' ? paragraphPieces(text, at) : [pieceAt(text, at)].filter((p) => p !== undefined);
+        const sentence = pickedOf(chatSentences, KEY_PREFIX + text, text, pieces);
+        for (const picked of sentence ? [sentence, ...(sentence.parts ?? [])] : []) {
+            paragraphs.set(picked, block);
         }
-        const sentence: PickedSentence = { surface: chatSentences, entryId: KEY_PREFIX + text, piece, source: text.slice(...piece.range!) };
-        paragraphs.set(sentence, block);
         return sentence;
+    },
+    holds(node) {
+        return (node instanceof Element ? node : node.parentElement)?.closest(ROOTS) != null;
     },
     rangeOf(sentence) {
         const text = sentence.entryId.slice(KEY_PREFIX.length);

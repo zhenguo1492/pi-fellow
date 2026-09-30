@@ -203,6 +203,7 @@ export class VoicePanel implements vscode.Disposable {
             phase: this._controller.phase(),
             engines: this._controller.engines(),
             usage: live ? agent?.usage : undefined,
+            speech: session?.speech,
             session: session
                 ? { id: session.id, title: session.title, startedAt: session.startedAt, readonly: !live }
                 : { id: '', title: 'Voice', startedAt: 0, readonly: false },
@@ -304,12 +305,12 @@ export class VoicePanel implements vscode.Disposable {
                 void this.pickSession();
                 return;
             case 'replay': {
-                const { entryId, piece } = message;
+                const { entryId, piece, from } = message;
                 if (message.surface === 'bot' && !this._showsEntry(entryId)) {
                     this._view.postVoice({ type: 'replayError', message: 'This message is no longer shown.' });
                     return;
                 }
-                void this._controller.replay.toggle(entryId, piece);
+                void this._controller.replay.toggle(entryId, piece, from);
                 return;
             }
             case 'replayClipStarted':
@@ -317,6 +318,18 @@ export class VoicePanel implements vscode.Disposable {
                 return;
             case 'replayClipEnded':
                 this.audio.clipEnded(message.clipId);
+                return;
+            case 'replayControl':
+                if (message.action === 'pause') {
+                    this._controller.replay.pause();
+                } else if (message.action === 'resume') {
+                    this._controller.replay.resume();
+                } else {
+                    this._controller.replay.stop();
+                }
+                return;
+            case 'replaySeek':
+                this._controller.replay.seek(message.part, message.fraction);
                 return;
             case 'translate':
                 void this._translate(message.requestId, message.text, message.to);

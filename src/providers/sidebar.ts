@@ -31,7 +31,6 @@ import type {
 } from '../voiceAgent/workerController';
 import type { VoiceChatControls } from '../voiceAgent/voiceAgentCommands';
 import {
-    voiceIsOn,
     type VoiceAgentAction,
     type VoiceStatus,
     type VoiceViewClientMessage,
@@ -265,11 +264,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._tabs.subscribeMissing();
 
         webviewView.webview.onDidReceiveMessage((received: ClientMessage) => {
-            const route = routeComposerSend(
-                received,
-                this._botView.showsBotView(),
-                voiceIsOn(this._botView.voiceStatus),
-            );
+            const route = routeComposerSend(received, this._botView.showsBotView());
             if ('refuse' in route) {
                 this._post({ type: 'toast', message: route.refuse, variant: 'error' });
                 void this.pushStateSync();
@@ -536,10 +531,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._tabs.schedulePersistOpenTabs();
         this._queue.maybeDrainQueuedMessages(tab, true);
         this._botView.syncBotViewVisibility();
-        // Dictation types into the composer: it ends when the composer locks.
-        if (this._botView.composerLocked() && this.voiceInput.isRecording) {
-            void this.voiceInput.toggle();
-        }
     }
 
     toggleDictation(): Promise<void> {

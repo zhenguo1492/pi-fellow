@@ -1,9 +1,7 @@
-import { VOICE_OFFLINE_SEND_HINT, VOICE_OFFLINE_SEND_TITLE } from '../../shared/voiceViewProtocol';
-import { setMicLocked } from '../dictation';
-import { composerLocked, composerTarget, sendToVoice } from '../voiceBar';
+import { composerTarget, sendToVoice } from '../voiceBar';
 import { vscode } from '../vscodeApi';
 import { updateConnectionBanner } from './banners';
-import { updateAttachmentsStrip } from './composerChips';
+import { updateComposerChips } from './composerChips';
 import { findLastUserMessageIndex, getUserMessagePlainForCopy } from './messageContent';
 import { updateQueuedMessageBanner } from './queuedBanner';
 import { resetUserScroll, updateScrollButton } from './scroll';
@@ -79,10 +77,9 @@ export function hasSendableInput(text: string): boolean {
 export function updateComposerToolbar(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
-    const locked = composerLocked();
     // The Bot view's text and attachments go to the voice agent; it neither steers nor interrupts omp.
     const toVoice = composerTarget() === 'voice';
-    const canSend = hasSendableInput(text) && !locked;
+    const canSend = hasSendableInput(text);
 
     const steerBtn = document.getElementById('btn-steer');
     const sendBtn = document.getElementById('btn-send') as HTMLButtonElement | null;
@@ -90,12 +87,8 @@ export function updateComposerToolbar(): void {
     if (steerBtn) {
         steerBtn.hidden = !state.isStreaming || toVoice;
     }
-    const attachBtn = document.getElementById('btn-attach') as HTMLButtonElement | null;
-    if (attachBtn) {
-        attachBtn.disabled = locked;
-    }
     if (sendBtn) {
-        // Nothing to send (or locked): a running worker can still be stopped.
+        // Nothing to send: a running worker can still be stopped.
         const showStop = state.isStreaming && !composerEdit && !canSend;
         const showInterruptSend = state.isStreaming && !composerEdit && canSend && !toVoice;
         sendBtn.classList.toggle('composer-action-btn--as-stop', showStop);
@@ -114,9 +107,6 @@ export function updateComposerToolbar(): void {
         } else if (showStop) {
             sendBtn.title = 'Stop (Esc)';
             sendBtn.setAttribute('aria-label', 'Stop generation');
-        } else if (locked) {
-            sendBtn.title = VOICE_OFFLINE_SEND_TITLE;
-            sendBtn.setAttribute('aria-label', VOICE_OFFLINE_SEND_TITLE);
         } else if (showInterruptSend) {
             sendBtn.title = 'Send now (interrupt current work)';
             sendBtn.setAttribute('aria-label', 'Send now and interrupt current work');
@@ -133,11 +123,11 @@ export function updateComposerToolbar(): void {
     }
 }
 
-/** The Bot view: sends the composer's text and attachments to the voice agent and clears them. False when there is nothing to send or nobody online. */
+/** The Bot view: sends the composer's text and attachments to the voice agent and clears them. False when there is nothing to send. */
 export function sendComposerToVoice(): boolean {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     const text = input?.value.trim() ?? '';
-    if (!input || !hasSendableInput(text) || composerLocked()) {
+    if (!input || !hasSendableInput(text)) {
         return false;
     }
     // The host sends the tab's pending attachments along and clears them there.
@@ -145,7 +135,7 @@ export function sendComposerToVoice(): boolean {
     input.value = '';
     input.style.height = 'auto';
     state.pendingAttachments = [];
-    updateAttachmentsStrip();
+    updateComposerChips();
     updateComposerToolbar();
     return true;
 }
@@ -159,7 +149,7 @@ export function submitWhileStreaming(mode: 'queue' | 'interrupt'): void {
     const attachmentCount = state.pendingAttachments.length;
     const slashOnly = attachmentCount === 0 && text.startsWith('/');
     state.pendingAttachments = [];
-    updateAttachmentsStrip();
+    updateComposerChips();
     if (slashOnly) {
         vscode.postMessage({ type: 'slashCommand', text });
     } else if (mode === 'queue') {
@@ -231,23 +221,16 @@ export function handleSteerButtonClick(): void {
 export function updateInputArea(): void {
     updateComposerEditBanner();
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
-    const locked = composerLocked();
-    document.querySelector('.input-area')?.classList.toggle('is-locked', locked);
-    setMicLocked(locked);
     if (input) {
-        input.disabled = locked;
-        input.title = locked ? VOICE_OFFLINE_SEND_TITLE : '';
-        input.placeholder = locked
-            ? VOICE_OFFLINE_SEND_HINT
-            : composerEdit
-              ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
-              : composerTarget() === 'voice'
-                ? 'Talk to the voice agent…'
-                : state.isStreaming
-                  ? 'Enter to queue · ↑ send now · Ctrl+Enter steer · Esc stop...'
-                  : state.planMode.enabled
-                    ? 'Plan mode: describe what to build (read-only until you implement)...'
-                    : 'Ask Pi anything...';
+        input.placeholder = composerEdit
+            ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
+            : composerTarget() === 'voice'
+              ? 'Talk to the voice agent…'
+              : state.isStreaming
+                ? 'Enter to queue · ↑ send now · Ctrl+Enter steer · Esc stop...'
+                : state.planMode.enabled
+                  ? 'Plan mode: describe what to build (read-only until you implement)...'
+                  : 'Ask Pi anything...';
     }
 
     updateComposerToolbar();
@@ -270,7 +253,7 @@ export function sendMessage(): void {
     input.value = '';
     input.style.height = 'auto';
     state.pendingAttachments = [];
-    updateAttachmentsStrip();
+    updateComposerChips();
     resetUserScroll();
     updateScrollButton();
     const slashOnly = attachmentCount === 0 && text.startsWith('/');

@@ -41,7 +41,7 @@ Three sub-tabs (`src/webview/settings/voiceTabs.ts`, ARIA tablist; arrows / Home
 
 Voice engine has three cards — **Built-in**, **Cloud service**, **My own server** — that only map onto the existing settings (`deriveVoiceSetup` infers the current card from settings).
 
-- **Built-in** shows whether models are downloaded and their size, with "Download now" (`builtinVoiceStatus` / `prepareBuiltinVoice`).
+- **Built-in** shows whether the engine and its models are downloaded and their size, with "Download now" (`builtinVoiceStatus` / `prepareBuiltinVoice`).
 - **Cloud** picks OpenAI or Groq from `src/shared/voicePresets.ts` (`CLOUD_PROVIDERS` includes the key page; `VOICE_PRESETS` holds each service's URL/models).
   - Groq's voice is Orpheus: English only, at most 200 characters per request (`VoicePreset.maxInputChars` → `TtsRequestConfig.maxInputChars`). `TtsClient` splits longer sentences at punctuation/spaces, requests each part, and concatenates.
   - "Get API key" opens via the host's `openExternal`.
@@ -58,14 +58,16 @@ Service failures (unreachable, 401/403, 404, timeout, 429, 5xx) are turned into 
 
 ## Built-in engine (`src/voice/builtinEngine/`)
 
-Zero-install: Moonshine base (English STT), Piper en_US lessac (English TTS), a speaker embedding model (3D-Speaker CAM++ zh+en, 192-dim, 28 MB, the voiceprint) and GTCRN (0.5 MB, noise reduction) via sherpa-onnx-node (N-API prebuilt). esbuild copies it and this platform's binary package to `out/voice-engine/node_modules`, because the VSIX is packaged with `--no-dependencies`.
+Zero-install: Moonshine base (English STT), Piper en_US lessac (English TTS), a speaker embedding model (3D-Speaker CAM++ zh+en, 192-dim, 28 MB, the voiceprint) and GTCRN (0.5 MB, noise reduction) via sherpa-onnx-node (N-API prebuilt). Neither the runtime nor the models ship in the VSIX, so one universal VSIX serves every platform.
 
 - `server.ts` is bundled to `out/voice-engine/server.js` and started by `engine.ts` (`BuiltinVoiceEngine`) as a child process using `process.execPath` + `ELECTRON_RUN_AS_NODE=1`.
 - Listens on 127.0.0.1 on a random port; paths carry a random token (`/<token>/v1/models`, `/audio/transcriptions`, `/audio/speech`), OpenAI-compatible like `SttClient` / `TtsClient`; plus private `POST /speaker/embed` (WAV → `{ model, embedding }`) and `POST /audio/denoise` (WAV → WAV), each model on its own serial queue so a check never waits behind a transcription.
 - **Features** (`EngineFeature`: `stt`, `tts`, `speaker`, `denoise`): a server loads only the models it is started with; the others' endpoints answer 503. `builtinVoiceEngineUrl(features)` starts it with those plus what the settings use (`builtinEngineFeatures`), and restarts it on the same port with a feature added when one is missing. With a custom STT and TTS and the voiceprint on, it runs the speaker model alone.
 - Exits when stdin closes. After a crash it restarts on the same port and token, with the same features; more than 3 crashes within a minute waits for the next use.
 - In Electron, TTS must use `enableExternalBuffer: false`.
-- Models are not bundled. On first use (dictation, voice mode, settings Test / Dry run, voiceprint recording) the ones a feature needs are downloaded (`downloadModels`, `models.ts`) to `globalStorage/voice-models` from Hugging Face at a pinned commit. Each file is verified against that commit's sha256 (LFS) / git blob sha1; only when all pass is `.partial` renamed into place. The progress notification title shows the real total size (files are listed first by `planModelDownload`); it can be cancelled.
+- **Runtime** (`runtime.ts`): sherpa-onnx-node and this platform's binary package (`sherpa-onnx-<win|linux|darwin>-<arch>`, from `platformPackage`) at `SHERPA_ONNX_VERSION` (exact, the one constant to bump). On first use `planRuntimeDownload` looks both up in the npm registry (`registry.npmjs.org/<pkg>/<version>`); `downloadRuntime` fetches each tarball, checks it against the registry's `dist.integrity` (sha512), unpacks it (built-in tar reader: regular files and directories only, paths confined to the package) and publishes `globalStorage/voice-runtime/<version>-<platform>-<arch>/node_modules/` by renaming its `.partial` directory once both packages are in. The binary package sits beside sherpa-onnx-node, where its loader looks. Platforms without a binary package (e.g. Windows on ARM) fail before anything downloads, pointing to a custom server. `server.ts` requires the absolute path it gets in `EngineConfig.sherpaPath`; when the addon does not load, its last stderr line (what the start error shows) names the folder to delete so it downloads again.
+- Models are not bundled. On first use (dictation, voice mode, settings Test / Dry run, voiceprint recording) the ones a feature needs are downloaded (`downloadModels`, `models.ts`) to `globalStorage/voice-models` from Hugging Face at a pinned commit. Each file is verified against that commit's sha256 (LFS) / git blob sha1; only when all pass is `.partial` renamed into place.
+- One progress notification covers both, runtime first (the models are no use without it). Its title shows the real total (runtime unpacked size from the registry, model files listed by `planModelDownload`); it can be cancelled. The settings status counts both too.
 
 ## Engine selection
 

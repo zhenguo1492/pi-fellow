@@ -26,7 +26,7 @@ export function pendingMessageRowHtml(kind: 'steer' | 'followup', text: string, 
 
 function applyPendingClamp(text: HTMLElement, toggle: HTMLButtonElement, expanded: boolean): void {
     text.classList.toggle('pending-message-text--collapsed', !expanded);
-    // Unpins the prompt group a steer sits in (see main.css), as an expanded prompt does.
+    // Unpins the prompt group a steer sits in (see styles/chat/transcript.css), as an expanded prompt does.
     text.closest('.pending-message')?.classList.toggle('pending-message--expanded', expanded);
     toggle.textContent = expanded ? 'Show less' : 'Show more';
     toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');

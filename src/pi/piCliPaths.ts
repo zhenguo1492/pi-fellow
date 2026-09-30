@@ -15,6 +15,11 @@ export interface PiNodeInvocation {
     cliJsPath: string;
     /** Directory containing the CLI executable (prepended to PATH for child processes). */
     binDir: string;
+    /**
+     * `<agent dir>/install` when `cliJsPath` is one of pi's managed releases: pi's own launcher exports it as
+     * PI_MANAGED_INSTALL_ROOT, which pi needs to update and clean up that install.
+     */
+    managedInstallRoot?: string;
 }
 
 /** omp is a self-contained binary: spawned directly, no Node involved. */
@@ -34,20 +39,25 @@ interface CliTarget {
 }
 
 /** Install locations checked when the extension host PATH lacks the CLI (e.g. GUI-launched editors). */
-const FALLBACK_CLI_PATHS: Record<AgentBackend, string[]> = {
-    omp: [
-        path.join(os.homedir(), '.local/bin/omp'),
-        path.join(os.homedir(), '.bun/bin/omp'),
-        '/opt/homebrew/bin/omp',
-        '/usr/local/bin/omp',
-    ],
-    pi: [
-        path.join(os.homedir(), '.pi/agent/bin/pi'),
-        path.join(os.homedir(), '.nvm/versions/node/v22.22.2/bin/pi'),
-        '/opt/homebrew/bin/pi',
-        '/usr/local/bin/pi',
-    ],
-};
+function fallbackCliPaths(backend: AgentBackend): string[] {
+    const home = os.homedir();
+    return backend === 'omp'
+        ? [path.join(home, '.local/bin/omp'), path.join(home, '.bun/bin/omp'), '/opt/homebrew/bin/omp', '/usr/local/bin/omp']
+        : [path.join(home, '.pi/agent/bin/pi'), ...nvmBinaries('pi'), '/opt/homebrew/bin/pi', '/usr/local/bin/pi'];
+}
+
+/** `name` in each nvm-installed Node's bin/, newest Node first. */
+function nvmBinaries(name: string): string[] {
+    const nvmDir = path.join(os.homedir(), '.nvm/versions/node');
+    try {
+        return fs
+            .readdirSync(nvmDir)
+            .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+            .map((v) => path.join(nvmDir, v, 'bin', name));
+    } catch {
+        return [];
+    }
+}
 
 /** First executable named `name` on PATH (sync `which`; honours PATHEXT on Windows). */
 function findOnPath(name: string): string | undefined {
@@ -94,7 +104,7 @@ function findCliTarget(setting: BackendSetting, configured: string): CliTarget {
 
     const order: AgentBackend[] = setting === 'auto' ? ['omp', 'pi'] : [setting];
     for (const backend of order) {
-        const found = findOnPath(backend) ?? FALLBACK_CLI_PATHS[backend].find((p) => fs.existsSync(p));
+        const found = findOnPath(backend) ?? fallbackCliPaths(backend).find((p) => fs.existsSync(p));
         if (found) {
             return { backend, cliPath: found };
         }
@@ -305,18 +315,7 @@ function findNodeBinary(binDir: string): string | undefined {
     }
 
     // nvm: check current alias, and scan installed versions
-    staticCandidates.push(path.join(home, '.nvm/current/bin/node'));
-    const nvmDir = path.join(home, '.nvm/versions/node');
-    if (fs.existsSync(nvmDir)) {
-        try {
-            const versions = fs.readdirSync(nvmDir).sort().reverse();
-            for (const v of versions) {
-                staticCandidates.push(path.join(nvmDir, v, 'bin/node'));
-            }
-        } catch {
-            /* ignore */
-        }
-    }
+    staticCandidates.push(path.join(home, '.nvm/current/bin/node'), ...nvmBinaries('node'));
 
     for (const candidate of staticCandidates) {
         if (fs.existsSync(candidate)) {
@@ -433,7 +432,11 @@ export async function resolvePiCliInvocation(preferredBackend?: AgentBackend): P
     }
 
     const cliJsPath = await resolvePiCliJsPath(nodePath, cliPath, binDir);
-    return { backend, nodePath, cliJsPath, binDir };
+    // <root>/releases/<version>/node_modules/@earendil-works/pi-coding-agent/dist/cli.js
+    const root = path.resolve(path.dirname(cliJsPath), '../../../../../..');
+    const managed =
+        path.relative(root, cliJsPath).startsWith(`releases${path.sep}`) && fs.existsSync(path.join(root, 'current-version'));
+    return { backend, nodePath, cliJsPath, binDir, managedInstallRoot: managed ? root : undefined };
 }
 
 /** Command + argv that run the CLI with `args`. */
@@ -462,7 +465,8 @@ export function piCliChildEnv(invocation: PiCliInvocation): NodeJS.ProcessEnv {
         }
     }
     const merged = existing.includes(prefix) ? existing : `${prefix}${path.delimiter}${existing}`;
-    return { ...process.env, [pathKey]: merged };
+    const managed = invocation.backend === 'pi' && invocation.managedInstallRoot;
+    return { ...process.env, [pathKey]: merged, ...(managed ? { PI_MANAGED_INSTALL_ROOT: managed } : {}) };
 }
 
 export async function verifyPiCliAvailable(outputChannel: vscode.OutputChannel): Promise<boolean> {

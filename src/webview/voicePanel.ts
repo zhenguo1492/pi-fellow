@@ -7,14 +7,15 @@
  * running CSS animations intact.
  */
 import { escapeHtml } from '../shared/html';
-import type { ClientMessage } from '../shared/protocol';
+import type { ClientMessage, VoiceReadiness, VoiceServiceCheck } from '../shared/protocol';
 import {
-    type VoiceCallUsage,
     type VoiceEntry,
     type VoiceProposalCard,
     type VoiceResearchCard,
     type VoiceSentence,
     type VoiceToolEntry,
+    type VoiceReplayPiece,
+    type VoiceEngines,
     type VoiceViewClientMessage,
     type VoiceViewHostMessage,
     type VoiceViewState,
@@ -27,14 +28,12 @@ import { handleSentenceMessage } from './sentenceActions';
 import { voiceToolRenderer } from './toolCards/voice';
 import type { ToolResultPayload } from './toolCards/types';
 import { createToolView, toToolResult, updateToolView, type ToolViewPayload } from './toolView';
-import { setVoiceBarBot } from './voiceBar';
-import { pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from './sentencePick';
+import { ICON_CALL, callVoiceAgent, setVoiceBarBot } from './voiceBar';
+import { paragraphPieces, pickedOf, pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from './sentencePick';
 import { vscode } from './vscodeApi';
 
 /** Within this many pixels of the bottom, the transcript follows new content. */
 const FOLLOW_SLACK_PX = 40;
-/** LLM calls listed under the token totals, newest first. */
-const CALLS_SHOWN = 50;
 /** A speaker's turns this close together share one avatar and header, as in Slack. */
 const GROUP_MS = 5 * 60_000;
 
@@ -54,11 +53,8 @@ const HISTORY_ICON =
 
 const SVG_OPEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
 
-/** Avatars of the turns that are not the user's or the voice agent's replies. */
-const AVATAR: Record<'narr' | 'sys', string> = {
-    narr: `${SVG_OPEN}<path d="M3 12h10l-1.25-1.5V7a3.75 3.75 0 0 0-7.5 0v3.5z"/><path d="M6.5 13.75a1.5 1.5 0 0 0 3 0"/></svg>`,
-    sys: `${SVG_OPEN}<path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>`,
-};
+/** Avatar of a setting change turn. */
+const SETTING_AVATAR = `${SVG_OPEN}<path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>`;
 
 /**
  * The user's and the voice agent's names (escaped) and avatar markup, as set; built once per
@@ -115,6 +111,25 @@ function shortUrl(url: string): string {
     return url.replace(/^https?:\/\//, '').replace(/\/$/, '') || 'not set';
 }
 
+/** A model id without its provider or organisation: `anthropic/claude-opus-5-5` → `claude-opus-5-5`. */
+function shortModel(model: string): string {
+    return model.slice(model.lastIndexOf('/') + 1) || model;
+}
+
+/** Audio length: `12.3s`, `4m 05s`. */
+function audioLength(ms: number): string {
+    const s = Math.round(ms / 100) / 10;
+    if (s < 60) {
+        return `${s.toFixed(1)}s`;
+    }
+    const whole = Math.round(s);
+    return `${Math.floor(whole / 60)}m ${String(whole % 60).padStart(2, '0')}s`;
+}
+
+function count(n: number, noun: string): string {
+    return `${n.toLocaleString()} ${noun}${n === 1 ? '' : 's'}`;
+}
+
 /** Last assigned markup per element, so unchanged parts are not re-parsed (which would reset animations and selection). */
 const htmlCache = new WeakMap<Element, string>();
 
@@ -133,15 +148,9 @@ root.dataset.state = 'off';
 root.setAttribute('aria-label', 'Voice agent');
 root.innerHTML = `
 <div class="vp-head">
-    <button type="button" class="vp-sum" aria-expanded="false" title="Show engines and token use"><span class="vp-sum-v"></span><span class="vp-car">▶</span></button>
+    <button type="button" class="vp-sum" aria-expanded="false" title="Show token use"><span class="vp-sum-v"></span><span class="vp-car">▶</span></button>
     <button type="button" class="vp-hist" title="Past voice conversations" aria-label="Past voice conversations">${HISTORY_ICON}</button>
-    <div class="vp-detail">
-        <div class="vp-eng"></div>
-        <details class="vp-tokens">
-            <summary title="Every LLM call of the voice agent in this session"><span class="vp-k">Tokens</span><span class="vp-tok-sum"></span><span class="vp-car">▶</span></summary>
-            <div class="vp-calls"></div>
-        </details>
-    </div>
+    <div class="vp-detail"></div>
 </div>
 <div class="vp-cards"></div>
 <div class="vp-banner">Viewing a past session — read only</div>
@@ -151,13 +160,10 @@ const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
 const headEl = q('.vp-head');
 const sumBtn = q<HTMLButtonElement>('.vp-sum');
 const sumEl = q('.vp-sum-v');
-const engEl = q('.vp-eng');
-const tokensEl = q<HTMLDetailsElement>('.vp-tokens');
-const tokSumEl = q('.vp-tok-sum');
-const callsEl = q('.vp-calls');
+const detailEl = q('.vp-detail');
 const cardsEl = q('.vp-cards');
 const stream = q('.vp-stream');
-/** Stays last in the stream, shown only while there are no turns. */
+/** Stays last in the stream, shown only while there are no turns: a new conversation's welcome, or a note on a past one. */
 const emptyEl = q('.vp-empty');
 
 function isFollowing(): boolean {
@@ -189,84 +195,129 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// ── Header: engines, context window, tokens ──
+// ── Header: the engines on one line (full settings on hover); details: context window, token use ──
 
-function row(key: string, value: string, title = ''): string {
-    return `<div class="vp-row"${title ? ` title="${escapeHtml(title)}"` : ''}><span class="vp-k">${escapeHtml(key)}</span><span class="vp-v">${value}</span></div>`;
+/** `sub`: a detail of the row above, indented under it. */
+function row(key: string, value: string, title = '', sub = false): string {
+    return `<div class="vp-row${sub ? ' vp-sub' : ''}"${title ? ` title="${escapeHtml(title)}"` : ''}><span class="vp-k">${escapeHtml(key)}</span><span class="vp-v">${value}</span></div>`;
+}
+
+const SEP = '<span class="vp-sep">·</span>';
+
+/** One engine as a short name; the full settings show on hover. */
+function engine(key: string, name: string, details: string[]): string {
+    return `<span title="${escapeHtml(details.join(' · '))}"><span class="vp-sk">${key}</span> ${escapeHtml(name)}</span>`;
 }
 
 function renderHead(s: VoiceViewState): void {
     const { llm, stt, tts, running } = s.engines;
-    const sep = '<span class="vp-sep">·</span>';
-    const rows = [
-        row(
-            'LLM',
-            [escapeHtml(llm.model ?? 'the chat tab’s model'), `thinking ${escapeHtml(llm.thinking)}`].join(sep),
-            'oh-my-pi-chater.voiceAgent.model / thinking',
-        ),
-        row('STT', [escapeHtml(shortUrl(stt.url)), escapeHtml(stt.model), `language ${escapeHtml(stt.language)}`].join(sep), 'oh-my-pi-chater.voice.*'),
-        row(
-            'TTS',
-            [escapeHtml(tts.engine), escapeHtml(shortUrl(tts.url)), escapeHtml(tts.model), `voice ${escapeHtml(tts.voice)}`, `speed ${tts.speed}`, `language: ${escapeHtml(tts.language)}`].join(sep),
-            'oh-my-pi-chater.voiceAgent.tts.*',
-        ),
-    ];
-    const context = s.usage?.context;
-    if (context && context.contextWindow > 0) {
-        const pct = context.percent === null ? undefined : Math.max(0, Math.min(100, context.percent));
+    const llmModel = llm.model ?? 'chat tab’s model';
+    const off = running ? [] : ['voice mode is off: the settings it will use'];
+    const context = contextUse(s);
+    const pct = context?.percent == null ? undefined : Math.max(0, Math.min(100, context.percent));
+    const pctText = pct === undefined ? undefined : `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
+    const engines = [
+        engine('LLM', shortModel(llmModel), [llmModel, `thinking ${llm.thinking}`, ...off]),
+        ...(pctText === undefined ? [] : [`<span title="Context window use of the voice LLM"><span class="vp-sk">ctx</span> ${pctText}</span>`]),
+        engine('STT', shortModel(stt.model), [shortUrl(stt.url), stt.model, `language ${stt.language}`, ...off]),
+        engine('TTS', shortModel(tts.model), [tts.engine, shortUrl(tts.url), tts.model, `voice ${tts.voice}`, `speed ${tts.speed}`, `language: ${tts.language}`, ...off]),
+    ].join(SEP);
+    root.classList.toggle('vp-configured', !running);
+
+    const llmTokens = llmUsage(s);
+    const rows: string[] = [];
+    if (context) {
         const used = context.tokens === null ? '—' : formatTokenCount(context.tokens);
         rows.push(
             row(
                 'Context',
-                `<span class="vp-meter-bar"><i style="width:${pct ?? 0}%"></i></span>${pct === undefined ? '' : `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%${sep}`}${used} / ${formatTokenCount(context.contextWindow)}`,
-                'How much of the voice model’s context window this task’s voice context uses',
+                `<span class="vp-meter-bar"><i style="width:${pct ?? 0}%"></i></span>${pctText === undefined ? '' : `${pctText}${SEP}`}${used} / ${formatTokenCount(context.contextWindow)}`,
+                'How much of the voice model’s context window the voice conversation uses',
             ),
         );
     }
-    setHtml(engEl, rows.join(''));
-    root.classList.toggle('vp-configured', !running);
-    engEl.title = running ? '' : 'Voice mode is off: these are the settings it will use.';
-
-    const calls = s.entries.flatMap((e) =>
-        e.kind === 'assistant' ? (e.usage ?? []).map((u) => ({ u, who: e.proactive ? `Update · ${e.proactive}` : 'Reply' })) : [],
+    // Like the worker's model status: one short row each, so nothing is cut off at the panel's edge.
+    rows.push(
+        row(
+            'LLM',
+            llmTokens
+                ? [count(llmTokens.calls, 'call'), `in ${formatTokenCount(llmTokens.input)}`, `out ${formatTokenCount(llmTokens.output)}`, cost(llmTokens.cost)].join(SEP)
+                : 'no calls yet',
+            'Tokens of the voice agent’s LLM calls in this conversation: input not read from cache, output, and their cost',
+        ),
+        ...(llmTokens && (llmTokens.cacheRead > 0 || llmTokens.cacheWrite > 0)
+            ? [row('Cache', [`read ${formatTokenCount(llmTokens.cacheRead)}`, `write ${formatTokenCount(llmTokens.cacheWrite)}`].join(SEP), 'Prompt tokens the voice LLM read from and wrote to the provider’s cache', true)]
+            : []),
+        row(
+            'STT',
+            s.speech?.stt
+                ? [
+                      count(s.speech.stt.calls, 'request'),
+                      `${audioLength(s.speech.stt.audioMs)} audio`,
+                      ...(s.speech.stt.input !== undefined ? [`in ${formatTokenCount(s.speech.stt.input)}`] : []),
+                      ...(s.speech.stt.output !== undefined ? [`out ${formatTokenCount(s.speech.stt.output)}`] : []),
+                  ].join(SEP)
+                : 'no requests yet',
+            'Audio sent to speech-to-text in this conversation. Tokens show only when the server reports them (OpenAI’s gpt-4o-transcribe does, Whisper servers do not).',
+        ),
+        row(
+            'TTS',
+            s.speech?.tts
+                ? [count(s.speech.tts.calls, 'request'), count(s.speech.tts.chars, 'char'), `${audioLength(s.speech.tts.audioMs)} audio`].join(SEP)
+                : 'no requests yet',
+            'Characters sent to text-to-speech in this conversation and the audio it returned; speech servers report no tokens.',
+        ),
     );
-    const u = s.usage;
-    tokensEl.hidden = !u && calls.length === 0;
-    const tokens = u
-        ? [
-              `in ${formatTokenCount(u.input)}`,
-              `out ${formatTokenCount(u.output)}`,
-              `cache read ${formatTokenCount(u.cacheRead)}`,
-              `write ${formatTokenCount(u.cacheWrite)}`,
-              cost(u.cost),
-          ].join(sep)
-        : `${calls.length} call${calls.length === 1 ? '' : 's'} in this session`;
-    setHtml(tokSumEl, tokens);
-    setHtml(callsEl, callsTable(calls.slice(-CALLS_SHOWN).reverse()));
+    setHtml(detailEl, rows.join(''));
 
-    const brief = (key: string, value: string) => `<span class="vp-sk">${key}</span> ${value}`;
-    setHtml(
-        sumEl,
-        [
-            brief('LLM', escapeHtml(llm.model ?? 'chat tab’s model')),
-            brief('STT', escapeHtml(shortUrl(stt.url))),
-            brief('TTS', escapeHtml(shortUrl(tts.url))),
-            ...(u ? [brief('Tokens', `${formatTokenCount(u.input + u.output)}${sep}${cost(u.cost)}`)] : calls.length ? [brief('Tokens', `${calls.length} call${calls.length === 1 ? '' : 's'}`)] : []),
-        ].join(sep),
-    );
+    setHtml(sumEl, [engines, ...(llmTokens ? [`<span class="vp-sk">Tokens</span> ${formatTokenCount(llmTokens.input + llmTokens.output)}${SEP}${cost(llmTokens.cost)}`] : [])].join(SEP));
 }
 
-function callsTable(calls: Array<{ u: VoiceCallUsage; who: string }>): string {
-    if (calls.length === 0) {
-        return '<div class="vp-calls-empty">No LLM calls yet.</div>';
+/**
+ * The voice LLM's context window use: omp's figure for the loaded voice context while live, else
+ * what the conversation's last call left (all its tokens) against the window it reported.
+ * Undefined when neither is known (before the first call; transcripts from before calls recorded the window).
+ */
+function contextUse(s: VoiceViewState): { tokens: number | null; contextWindow: number; percent: number | null } | undefined {
+    const live = s.usage?.context;
+    if (live && live.contextWindow > 0) {
+        return live;
     }
-    const body = calls
-        .map(
-            ({ u, who }) =>
-                `<tr><td>${new Date(u.at).toLocaleTimeString()}</td><td>${escapeHtml(who)}</td><td>${formatTokenCount(u.input)}</td><td>${formatTokenCount(u.cacheRead)}</td><td>${formatTokenCount(u.cacheWrite)}</td><td>${formatTokenCount(u.output)}</td><td>${cost(u.cost)}</td></tr>`,
-        )
-        .join('');
-    return `<table><thead><tr><th>Time</th><th>For</th><th>In</th><th>Cache read</th><th>Cache write</th><th>Out</th><th>Cost</th></tr></thead><tbody>${body}</tbody></table>`;
+    for (let i = s.entries.length - 1; i >= 0; i--) {
+        const e = s.entries[i];
+        const last = e.kind === 'assistant' ? e.usage?.at(-1) : undefined;
+        if (last) {
+            if (!last.contextWindow) {
+                return undefined;
+            }
+            const tokens = last.input + last.output + last.cacheRead + last.cacheWrite;
+            return { tokens, contextWindow: last.contextWindow, percent: (tokens / last.contextWindow) * 100 };
+        }
+    }
+    return undefined;
+}
+
+/**
+ * The voice LLM's tokens: the loaded voice context's totals while live, else the sum of the
+ * conversation's calls; `calls` counts the calls. Undefined before the first call.
+ */
+function llmUsage(s: VoiceViewState): { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | undefined {
+    const calls = s.entries.flatMap((e) => (e.kind === 'assistant' ? (e.usage ?? []) : []));
+    if (s.usage) {
+        return { ...s.usage, calls: calls.length };
+    }
+    if (calls.length === 0) {
+        return undefined;
+    }
+    const sum = { calls: calls.length, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    for (const c of calls) {
+        sum.input += c.input;
+        sum.output += c.output;
+        sum.cacheRead += c.cacheRead;
+        sum.cacheWrite += c.cacheWrite;
+        sum.cost += c.cost;
+    }
+    return sum;
 }
 
 // ── Transcript: Slack-style messages, avatar + name and time over the text ──
@@ -304,6 +355,24 @@ const openTimings = new Set<string>();
 /** Entry ids of long user / setting turns the user expanded. */
 const expandedTurns = new Set<string>();
 let sessionId: string | undefined;
+/** The avatar animated (`.av-motion`): of the reply being read aloud, else of the latest reply; undefined when neither is shown. */
+let liveAvatar: HTMLElement | undefined;
+/** The latest entry's group avatar when that entry is a reply. */
+let latestReplyAvatar: HTMLElement | undefined;
+/** Each reply's group avatar (grouped turns leave theirs out), by entry id. */
+const replyAvatars = new Map<string, HTMLElement>();
+/** The entry being read aloud (Alt+click), as the host last said. */
+let readEntryId: string | undefined;
+
+/** One talking avatar in the Bot view: the reply being read aloud's, else the latest reply's (avatarMotion.ts). */
+function placeLiveAvatar(): void {
+    const live = (readEntryId !== undefined ? replyAvatars.get(readEntryId) : undefined) ?? latestReplyAvatar;
+    if (live !== liveAvatar) {
+        liveAvatar?.classList.remove('av-motion');
+        live?.classList.add('av-motion');
+        liveAvatar = live;
+    }
+}
 
 function createTurn(): TurnView {
     const el = document.createElement('div');
@@ -332,9 +401,12 @@ function createTurn(): TurnView {
     };
 }
 
-/** Who said a turn, for grouping: a user's spoken and typed turns get separate headers (the header shows the source). */
+/**
+ * Who said a turn, for grouping: a user's spoken and typed turns get separate headers (the header
+ * shows the source); the voice agent's replies, asked for or on its own, are one speaker.
+ */
 function speaker(entry: VoiceEntry): string {
-    return entry.kind === 'user' ? `user:${entry.source}` : entry.kind === 'system' ? 'sys' : entry.proactive ? 'narr' : 'bot';
+    return entry.kind === 'user' ? `user:${entry.source}` : entry.kind === 'system' ? 'sys' : 'bot';
 }
 
 function renderStream(s: VoiceViewState): void {
@@ -357,6 +429,9 @@ function renderStream(s: VoiceViewState): void {
     }
     let prev: Element | null = null;
     let prevEntry: VoiceEntry | undefined;
+    /** The turn showing the avatar of the latest entry's group (grouped turns leave it out). */
+    let header: TurnView | undefined;
+    replyAvatars.clear();
     for (const entry of entries) {
         let view = turns.get(entry.id);
         if (!view) {
@@ -366,6 +441,12 @@ function renderStream(s: VoiceViewState): void {
         updateTurn(view, entry, s.debug);
         const grouped = prevEntry !== undefined && speaker(prevEntry) === speaker(entry) && entry.at - prevEntry.at < GROUP_MS;
         view.el.classList.toggle('cont', grouped);
+        if (!grouped) {
+            header = view;
+        }
+        if (entry.kind === 'assistant') {
+            replyAvatars.set(entry.id, header!.avatar);
+        }
         prevEntry = entry;
         const expected: Element | null = prev ? prev.nextElementSibling : stream.firstElementChild;
         if (expected !== view.el) {
@@ -378,17 +459,76 @@ function renderStream(s: VoiceViewState): void {
         prev = view.el;
     }
     emptyEl.hidden = entries.length > 0;
-    const emptyText = s.session.readonly
-        ? 'Nothing was said in this session.'
-        : s.phase === 'off'
-          ? 'Voice mode is off. Start it with the robot above the chat’s input box.'
-          : 'Say something, or type in the chat’s input box.';
-    if (emptyEl.textContent !== emptyText) {
-        emptyEl.textContent = emptyText;
+    latestReplyAvatar = prevEntry?.kind === 'assistant' ? header?.avatar : undefined;
+    placeLiveAvatar();
+    if (entries.length === 0) {
+        emptyEl.classList.toggle('vp-welcome', !s.session.readonly);
+        setHtml(emptyEl, s.session.readonly ? 'Nothing was said in this session.' : welcomeHtml(s));
     }
     if (follow) {
         stream.scrollTop = stream.scrollHeight;
     }
+}
+
+/** Green check: a speech service that answered its last check. */
+const ICON_SVC_OK = `${SVG_OPEN}<path d="M3.5 8.5l3 3 6-7"/></svg>`;
+/** Red cross: a speech service not set up, or failing. */
+const ICON_SVC_BAD = `${SVG_OPEN}<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>`;
+
+/** STT and TTS readiness from the host (chat `stateSync`); absent until it reports them. */
+let readiness: VoiceReadiness | undefined;
+
+/** The host's STT and TTS readiness changed: the welcome's service rows follow it. */
+export function setVoicePanelReadiness(next: VoiceReadiness): void {
+    if (JSON.stringify(next) === JSON.stringify(readiness)) {
+        return;
+    }
+    readiness = next;
+    if (lastState) {
+        renderStream(lastState);
+    }
+}
+
+/** One speech service in the welcome: what is configured, and whether it works (click: Settings → Voice). */
+function serviceHtml(label: string, service: 'stt' | 'tts', config: VoiceEngines['stt'] | VoiceEngines['tts'], check: VoiceServiceCheck | undefined): string {
+    const state = !check || check.checking ? 'checking' : check.ok ? 'ok' : 'bad';
+    const icon = state === 'ok' ? ICON_SVC_OK : state === 'bad' ? ICON_SVC_BAD : '<span class="vp-svc-spin" aria-hidden="true"></span>';
+    const status = state === 'ok' ? 'Ready' : state === 'bad' ? (check?.reason ?? 'Unavailable.') : 'Checking…';
+    const setup = `${shortModel(config.model)} · ${shortUrl(config.url)}`;
+    return `<button type="button" class="vp-svc" data-service="${service}" data-state="${state}" title="${escapeHtml(`${label}: ${setup}\n${status}\nClick to open Settings → Voice`)}">
+<span class="vp-svc-ic">${icon}</span><span class="vp-svc-body"><span class="vp-svc-head"><span class="vp-svc-k">${label}</span><span class="vp-svc-v">${escapeHtml(setup)}</span></span>${
+        state === 'ok' ? '' : `<span class="vp-svc-why">${escapeHtml(status)}</span>`
+    }${state === 'bad' ? '<span class="vp-svc-link">Open Settings → Voice to set it up</span>' : ''}</span></button>`;
+}
+
+/** A new conversation's empty Bot view: who the voice agent is, what it does, whether its speech services work, and how to start talking. */
+function welcomeHtml(s: VoiceViewState): string {
+    const bot = speakerView.bot;
+    const phase = s.phase;
+    const start =
+        phase === 'off'
+            ? `<button type="button" class="vp-welcome-call" title="Start voice mode: microphone, speech services and voice model">${ICON_CALL}<span>Call ${bot.name}</span></button>
+<div class="vp-welcome-hint">Or type in the input box below: without a call it is a text chat.</div>`
+            : phase === 'standby'
+              ? '<div class="vp-welcome-hint">Voice mode is on, but another VS Code window has the microphone: focus this window to talk here.</div>'
+              : phase === 'muted'
+                ? '<div class="vp-welcome-hint">Voice mode is on and the microphone is muted: unmute it with the mic in the input box, or type there.</div>'
+                : '<div class="vp-welcome-hint">Voice mode is on: just start talking, or type in the input box below.</div>';
+    return `<div class="vp-welcome-av">${bot.avatar}</div>
+<div class="vp-welcome-title">${bot.name}</div>
+<div class="vp-welcome-sub">Your voice pair programmer. Talk through the code out loud while the agent in this tab does the heavy lifting.</div>
+<ul class="vp-welcome-list">
+<li><b>Talks in real time.</b> Speak naturally and cut in any time: it stops and listens.</li>
+<li><b>Sees what you see.</b> Your open file, cursor and selection; it points at the lines it explains.</li>
+<li><b>Reads and changes code.</b> Looks things up, makes small edits, runs commands in the terminal.</li>
+<li><b>Directs the agent.</b> Hands big jobs to this tab's agent, keeps you posted, and passes on its questions and approvals.</li>
+<li><b>Researches.</b> Digs through the codebase in the background and reports back.</li>
+</ul>
+<div class="vp-welcome-svcs">
+${serviceHtml('Speech-to-text', 'stt', s.engines.stt, readiness?.stt)}
+${serviceHtml('Text-to-speech', 'tts', s.engines.tts, readiness?.tts)}
+</div>
+${start}`;
 }
 
 function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
@@ -433,7 +573,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     }
     if (entry.kind === 'system') {
         view.el.className = 'vp-turn sys';
-        setHtml(view.avatar, AVATAR.sys);
+        setHtml(view.avatar, SETTING_AVATAR);
         setHtml(view.who, 'Setting');
         setHtml(view.attach, '');
         setHtml(view.pre, '');
@@ -446,11 +586,11 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         return;
     }
 
-    const kind = entry.proactive ? 'narr' : 'bot';
-    view.el.className = `vp-turn ${kind}${entry.silent ? ' silent' : ''}`;
+    // A reply the agent started on its own is still the agent's: its kind shows as a tag before the text.
+    view.el.className = `vp-turn bot${entry.silent ? ' silent' : ''}`;
     setClampText(view, undefined);
-    setHtml(view.avatar, entry.proactive ? AVATAR.narr : speakerView.bot.avatar);
-    setHtml(view.who, `<span class="vp-nm">${entry.proactive ? 'Update' : speakerView.bot.name}</span><span class="vp-badge">AI</span>`);
+    setHtml(view.avatar, speakerView.bot.avatar);
+    setHtml(view.who, `<span class="vp-nm">${speakerView.bot.name}</span><span class="vp-badge">AI</span>`);
     setHtml(view.attach, debug && entry.input ? escapeHtml(entry.input) : '');
     setHtml(view.pre, entry.proactive ? `<span class="vp-kind ${escapeHtml(entry.proactive)}">${escapeHtml(entry.proactive)}</span>` : '');
 
@@ -672,6 +812,8 @@ function toolLook(tool: VoiceToolEntry): { label: string; kind: string } {
             return { label: 'Research', kind: 'research' };
         case 'worker_status':
             return { label: 'Checked worker', kind: 'status' };
+        case 'show_text':
+            return { label: 'Snippet', kind: 'snippet' };
         // Lookups saved as descriptions only, before they were tool entries.
         case 'lookup':
             return { label: 'Looked up', kind: 'read' };
@@ -700,6 +842,8 @@ function toolCard(tool: VoiceToolEntry, label: string): ToolViewPayload {
         running: tool.running === true || research?.status === 'running',
         // Lookups are the worker's own tools; host tools have renderers of their own.
         renderer: tool.id === undefined ? voiceToolRenderer(tool.name) : undefined,
+        // Shown instead of spoken: open from the start. Others keep whether the user opened them.
+        defaultOpen: tool.id === undefined && tool.name === 'show_text' ? true : undefined,
     };
 }
 
@@ -728,6 +872,14 @@ function renderTools(container: HTMLElement, entryId: string, tools: VoiceToolEn
 }
 
 stream.addEventListener('click', (e) => {
+    if ((e.target as Element).closest('.vp-welcome-call')) {
+        callVoiceAgent();
+        return;
+    }
+    if ((e.target as Element).closest('.vp-svc')) {
+        vscode.postMessage({ type: 'openSettings', section: 'voice' } satisfies ClientMessage);
+        return;
+    }
     const clampButton = (e.target as Element).closest<HTMLButtonElement>('.vp-more, .vp-copy');
     const id = clampButton?.closest<HTMLElement>('.vp-turn')?.dataset.id;
     const view = id ? turns.get(id) : undefined;
@@ -756,19 +908,19 @@ stream.addEventListener('click', (e) => {
 
 /**
  * The Bot view's user turns and replies, for the Alt gestures (sentenceActions.ts): plain text cut
- * into sentences as TTS reads it, or a spoken reply's own sentences, one span each. Setting lines
- * are left out.
+ * into sentences as TTS reads it, or a spoken reply's own sentences, one span each. A paragraph
+ * (Alt+Shift) is the message's text up to a blank line. Setting lines are left out.
  */
 export const botSentences: SentenceSurface = {
     name: 'bot',
-    pick(node, offset) {
+    pick(node, offset, scope) {
         const body = node.parentElement?.closest<HTMLElement>('.vp-body');
         const turn = body?.closest<HTMLElement>('.vp-turn');
         const entryId = turn?.dataset.id;
         if (!body || !turn || !entryId || turn.classList.contains('sys') || !stream.contains(turn)) {
             return undefined;
         }
-        if (body.dataset.mode === 'sentences') {
+        if (body.dataset.mode === 'sentences' && scope === 'sentence') {
             const span = node.parentElement!.closest('.vp-s');
             const index = span ? Array.prototype.indexOf.call(body.children, span) : -1;
             const text = span?.firstChild;
@@ -778,15 +930,33 @@ export const botSentences: SentenceSurface = {
         }
         const nodes = textNodesIn(body);
         const shown = nodes.map((n) => n.data).join('');
-        let at = offset;
-        for (const t of nodes) {
-            if (t === node) {
-                break;
+        let pieces: VoiceReplayPiece[];
+        if (body.dataset.mode === 'sentences') {
+            // A spoken reply is one paragraph (voice mode's sentences hold no blank lines), read
+            // sentence by sentence as it was spoken, so each comes from the audio kept of it.
+            pieces = [];
+            let seen = 0;
+            for (const t of nodes) {
+                if (t.parentElement?.parentElement === body && t.parentElement.firstChild === t && t.data.trim()) {
+                    pieces.push({ text: t.data, range: [seen, seen + t.length] });
+                }
+                seen += t.length;
             }
-            at += t.length;
+        } else {
+            let at = offset;
+            for (const t of nodes) {
+                if (t === node) {
+                    break;
+                }
+                at += t.length;
+            }
+            pieces = scope === 'paragraph' ? paragraphPieces(shown, at) : [pieceAt(shown, at)].filter((p) => p !== undefined);
         }
-        const piece = pieceAt(shown, at);
-        return piece && { surface: botSentences, entryId, piece, source: shown.slice(...piece.range!) };
+        return pickedOf(botSentences, entryId, shown, pieces);
+    },
+    holds(node) {
+        const turn = (node instanceof Element ? node : node.parentElement)?.closest('.vp-body')?.closest('.vp-turn');
+        return turn != null && !turn.classList.contains('sys') && stream.contains(turn);
     },
     rangeOf({ entryId, piece, source }: PickedSentence) {
         const body = stream.querySelector<HTMLElement>(`.vp-turn[data-id="${CSS.escape(entryId)}"] .vp-body`);
@@ -802,7 +972,8 @@ export const botSentences: SentenceSurface = {
             range.selectNodeContents(node);
             return range;
         }
-        const nodes = body.dataset.mode === 'text' && piece.range ? textNodesIn(body) : [];
+        // A range is in the text as shown, whether plain or a spoken reply's spans (its paragraph).
+        const nodes = piece.range ? textNodesIn(body) : [];
         return nodes.map((n) => n.data).join('').slice(...piece.range!) === source && nodes.length > 0 ? rangeInNodes(nodes, ...piece.range!) : undefined;
     },
 };
@@ -945,6 +1116,10 @@ export function handleVoiceMessage(msg: VoiceViewHostMessage): void {
         void applySpeakers(msg.speakers);
     } else {
         handleSentenceMessage(msg);
+        if (msg.type === 'sentenceActions') {
+            readEntryId = msg.replay?.entryId;
+            placeLiveAvatar();
+        }
     }
 }
 

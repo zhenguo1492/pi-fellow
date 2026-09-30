@@ -67,11 +67,11 @@ src/
     ├── toolCards/          # Per-tool renderers; registry.ts; parts.ts DOM blocks; util.ts pure helpers
     ├── modelPicker.ts / modelStatus.ts  # Favorite-model chip; model status bar
     ├── fileMentionMenu.ts / fileDropReaders.ts  # @ mentions; drag-and-drop files/images
-    ├── voiceBar.ts / voicePanel.ts / dictation.ts / sentence*.ts / translatePopup.ts  # Voice UI
+    ├── voiceBar.ts / voicePanel.ts / dictation.ts / sentence*.ts / selectionToolbar.ts / readAlong.ts / translatePopup.ts  # Voice UI
     ├── avatar.ts / avatarMotion.ts  # Avatar markup; the voice bar avatar talking (bot level) and thinking
     ├── vscodeApi.ts        # acquireVsCodeApi singleton
     ├── tsconfig.json       # Webview typecheck (DOM lib)
-    └── styles/             # main.css, toolCards.css, voice.css, settings.css
+    └── styles/             # main.css / settings.css: entries esbuild bundles; tokens.css (shared theme tokens); chat/*.css modules (toolCards.css, voice.css = Bot view, …)
 ```
 
 ## 3. Architecture and data flow
@@ -114,6 +114,7 @@ src/
 - **Permission gate tiers** (`toolTier` in `src/pi/permissionPolicy.ts`, enforced by `src/piExtension/permissionGate.ts` in every worker): `read` always allowed; `write` (file-content edits) allowed in Edit automatically / Auto; `exec` (everything else, including edits that delete/move files) allowed only in Auto; Manual asks for both; Plan blocks both. The mode file is reread on every call. Details: [docs/permissions.md](docs/permissions.md).
 - **Worker file lock.** Before a worker tool call that changes files runs (every call it does not block), the gate appends the absolute paths (`modifiedPaths`) to the edits file (`VSCODE_PI_EDITS_FILE`); `PermissionGateFile.edits()` reads it synchronously, `PiChatSession` clears it on `agent_end`. `HostToolRouter` refuses the voice agent's `edit_file` / `create_file` / `rename_file` / `delete_file` / `save_file` on overlapping paths via `WorkerController.lockedPaths`. Not reported: bash commands, and TUI tabs (no gate; there any running task blocks the voice agent's file changes). Details: [docs/voice-pair-agent-cursor.md](docs/voice-pair-agent-cursor.md) §11.
 - **Webview modules have one-way dependencies.** `src/webview/chat/` has no import cycles; module-local UI state stays private behind functions, only `state.ts` is shared.
+- **Stylesheets: import order is the cascade; colors come from tokens.** `styles/main.css` and `styles/settings.css` only `@import` modules (`tokens.css`, `chat/*.css`, xterm's CSS) that esbuild bundles into one file each; between rules of equal specificity the later module wins, so moving rules across modules can change the look. No `@layer`: VS Code before 1.104 injects its default webview styles unlayered, and they would beat every layered rule. Colors use `tokens.css` names (theme-derived) instead of literals so light and high-contrast themes work; `npm run lint:css` enforces it, `src/test/unit/webview/styles.test.ts` rejects undefined custom properties and classes no code renders.
 - **Model/skill lists load in the background.** `get_available_models` waits for provider discovery; never block initialization on it (`_refreshModelsAndSkills`, `onDidChangeCatalog`).
 - **TUI tabs own their session file.** The idle RPC worker behind a TUI tab is never used: `SidebarWorker` drives the TUI itself (prompts typed in, Escape to stop, the screen read through `ScreenReader` in `src/pi/terminalScreen.ts`). See [docs/tabs-and-tui.md](docs/tabs-and-tui.md#tui-tabs-and-the-voice-agent).
 - **API keys never reach settings.json or the webview.** Voice keys live in SecretStorage; the user's own server never receives a key.
@@ -145,10 +146,11 @@ src/
 
 ## 6. Build, typecheck, and dev
 
-- **Build:** `npm run compile` (`node esbuild.js`, bundles `src/extension.ts`, the webviews, the CLI extensions in `src/piExtension/`, and the voice engine into `out/`). Watch: `npm run watch`.
+- **Build:** `npm run compile` (`node esbuild.js`, bundles `src/extension.ts`, the webviews and their stylesheets, the CLI extensions in `src/piExtension/`, and the voice engine into `out/`). Watch: `npm run watch` (CSS included).
+- **CSS lint:** `npm run lint:css` (stylelint, `.stylelintrc.json`).
 - **Typecheck:** esbuild does not typecheck. Run `npm run typecheck` (host `tsconfig.json` + `src/webview/tsconfig.json`) after changes.
 - **Tests:** `npm run test:unit` (vitest, `src/test/unit/`); `npm run test:integration` runs in VS Code from `out/test/integration/`.
-- **Package:** `npm run package` builds a VSIX with `--no-dependencies`; native/runtime deps (VAD WASM, sherpa-onnx) are copied into `out/` by esbuild.
+- **Package:** `npm run package` builds one universal VSIX with `--no-dependencies`; esbuild copies the VAD WASM into `out/`. No native binaries ship: the built-in voice engine's sherpa-onnx runtime downloads on first use (`src/voice/builtinEngine/runtime.ts`); `npm run package:verify` fails if a VSIX contains any.
 - **Runtime requirement:** an `omp` or `pi` CLI on PATH, or set `oh-my-pi-chater.cliPath`. `oh-my-pi-chater.backend` (`auto` / `omp` / `pi`) picks the family; `auto` prefers omp. State lives in `~/.omp/agent` or `~/.pi/agent`.
 - **Thinking level:** `oh-my-pi-chater.thinkingLevel` (`off`, `minimal`, `low`, `medium`, `high`) is passed to the CLI; only reasoning models emit thinking.
 
@@ -162,6 +164,6 @@ src/
 | [docs/model-status.md](docs/model-status.md) | Model status bar, quota sources, favorite models, logged-in provider filter |
 | [docs/voice.md](docs/voice.md) | Dictation, STT/TTS services, built-in engine, API keys, Voice settings tab, readiness, error messages |
 | [docs/voice-agent.md](docs/voice-agent.md) | Voice agent implementation: Bot view, worker control, voice mode, text fallback, multi-window, pairing, names/avatars |
-| [docs/sentence-replay.md](docs/sentence-replay.md) | Alt+click read-aloud and Alt+right-click translation of sentences in chat and Bot view |
+| [docs/sentence-replay.md](docs/sentence-replay.md) | Alt+click read-aloud and Alt+right-click translation of sentences (Alt+Shift: paragraphs) and of mouse selections (selection bar) in chat and Bot view; the picked text stays the region (click: pause/resume or read again, double-click: read from a word, right-click: translate); read-along sentence highlight |
 | [docs/voice-agent-design.md](docs/voice-agent-design.md) | Voice agent design and rationale (§5.12 multi-session rules, §5.13 text fallback, §14.1 progress) |
 | [docs/voice-pair-agent-cursor.md](docs/voice-pair-agent-cursor.md) | Pair design: agent cursor, Follow Pi, editing by hand (§11 worker file lock) |

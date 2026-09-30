@@ -7,6 +7,7 @@ import {
     fetchPiProviderUsage,
     parseCodexUsage,
     parseOmpUsage,
+    piSupportsPrintBearerToken,
     ProviderUsageTracker,
     statusBarWindows,
     type ProviderAccountUsage,
@@ -255,5 +256,90 @@ describe('fetchPiProviderUsage', () => {
         } finally {
             await fs.rm(agentDir, { recursive: true, force: true });
         }
+    });
+
+    it('uses the token pi prints when the stored one expired, with the accountId pi wrote back', async () => {
+        const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-usage-'));
+        const writeAuth = (access: string, accountId: string) => fs.writeFile(path.join(agentDir, 'auth.json'), JSON.stringify({
+            'openai-codex': { type: 'oauth', access, expires: 1_000, accountId },
+        }));
+        try {
+            await writeAuth('stale-token', 'old-account');
+            const asked: string[] = [];
+            const readBearerToken = async (provider: string) => {
+                asked.push(provider);
+                await writeAuth('fresh-token', 'new-account');
+                return 'fresh-token\n';
+            };
+            let headers: Headers | undefined;
+            const fetchUsage = (async (_url: string | URL | Request, init?: RequestInit) => {
+                headers = new Headers(init?.headers);
+                return new Response(JSON.stringify({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18_000 } } }));
+            }) as typeof fetch;
+            const accounts = await fetchPiProviderUsage(agentDir, 'openai-codex', fetchUsage, 5_000, readBearerToken);
+            expect(asked).toEqual(['openai-codex']);
+            expect(headers?.get('authorization')).toBe('Bearer fresh-token');
+            expect(headers?.get('chatgpt-account-id')).toBe('new-account');
+            expect(accounts?.[0].windows[0].usedPercent).toBe(10);
+        } finally {
+            await fs.rm(agentDir, { recursive: true, force: true });
+        }
+    });
+
+    it('reports the expired token when pi cannot print a fresh one', async () => {
+        const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-usage-'));
+        try {
+            await fs.writeFile(path.join(agentDir, 'auth.json'), JSON.stringify({
+                anthropic: { type: 'oauth', access: 'stale-token', expires: 1_000 },
+            }));
+            let fetched = false;
+            const fetchUsage = (async () => {
+                fetched = true;
+                return new Response('{}');
+            }) as typeof fetch;
+            const failing = async (): Promise<string> => {
+                throw new Error('Unknown provider');
+            };
+            await expect(fetchPiProviderUsage(agentDir, 'anthropic', fetchUsage, 5_000, failing))
+                .rejects.toThrow('OAuth token expired; pi refreshes it on the next request');
+            await expect(fetchPiProviderUsage(agentDir, 'anthropic', fetchUsage, 5_000, async () => '  \n'))
+                .rejects.toThrow('OAuth token expired');
+            expect(fetched).toBe(false);
+        } finally {
+            await fs.rm(agentDir, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps the Antigravity projectId when pi prints a bare refreshed token', async () => {
+        const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-usage-'));
+        const writeAuth = (token: string) => fs.writeFile(path.join(agentDir, 'auth.json'), JSON.stringify({
+            antigravity: { type: 'oauth', access: JSON.stringify({ token, projectId: 'test-project' }), expires: 1_000 },
+        }));
+        try {
+            await writeAuth('stale-token');
+            let request: RequestInit | undefined;
+            const fetchQuota = (async (_url: string | URL | Request, init?: RequestInit) => {
+                request = init;
+                return new Response(JSON.stringify({ groups: [] }));
+            }) as typeof fetch;
+            await fetchPiProviderUsage(agentDir, 'antigravity', fetchQuota, 5_000, async () => {
+                await writeAuth('fresh-token');
+                return 'fresh-token';
+            });
+            expect(new Headers(request?.headers).get('authorization')).toBe('Bearer fresh-token');
+            expect(request?.body).toBe(JSON.stringify({ project: 'test-project' }));
+        } finally {
+            await fs.rm(agentDir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('piSupportsPrintBearerToken', () => {
+    it('requires pi 0.83.0 or newer', () => {
+        expect(piSupportsPrintBearerToken('0.82.9')).toBe(false);
+        expect(piSupportsPrintBearerToken('0.83.0')).toBe(true);
+        expect(piSupportsPrintBearerToken('0.99.1')).toBe(true);
+        expect(piSupportsPrintBearerToken('1.0.0')).toBe(true);
+        expect(piSupportsPrintBearerToken('unknown')).toBe(false);
     });
 });

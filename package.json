@@ -526,7 +526,7 @@
         "oh-my-pi-chater.voiceAgent.messageButtons": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Voice view: read aloud and translate sentences in the Bot view and the chat (prompts, replies, Thought blocks, tool card text). Hold Alt to highlight the sentence under the pointer; Alt+click reads it aloud with the configured text-to-speech, Alt+right-click shows its translation into `#oh-my-pi-chater.voiceAgent.translateTo#` in a floating panel (the sentence is sent to Google Translate)."
+          "markdownDescription": "Voice view: read aloud and translate sentences in the Bot view and the chat (prompts, replies, Thought blocks, tool card text). Hold Alt to highlight the sentence under the pointer; Alt+click reads it aloud with the configured text-to-speech, Alt+right-click shows its translation into `#oh-my-pi-chater.voiceAgent.translateTo#` in a floating panel (the text is sent to Google Translate). Alt+Shift does the same with the whole paragraph. Selecting text with the mouse shows Read aloud and Translate buttons for the selection. While text is read aloud, the sentence being read is highlighted; click the text to pause or resume, double-click a word to read on from there, click elsewhere or press Escape to stop."
         },
         "oh-my-pi-chater.voiceAgent.translateTo": {
           "type": "string",
@@ -554,7 +554,7 @@
             "Thai · ไทย",
             "Polish · Polski"
           ],
-          "markdownDescription": "Voice view: the language Alt+right-click translates a sentence into (with `#oh-my-pi-chater.voiceAgent.messageButtons#` on)."
+          "markdownDescription": "Voice view: the language Alt+right-click (or Translate on a selection) translates into (with `#oh-my-pi-chater.voiceAgent.messageButtons#` on)."
         },
         "oh-my-pi-chater.voiceAgent.replayCacheSize": {
           "type": "integer",
@@ -592,10 +592,11 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit -p . && tsc -p src/webview",
+    "lint:css": "stylelint \"src/webview/styles/**/*.css\"",
     "vscode:prepublish": "npm run compile",
     "package": "npm run compile && npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository",
     "publish": "npx @vscode/vsce publish --no-dependencies --allow-missing-repository",
-    "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons'",
+    "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons' && ! unzip -l oh-my-pi-chater-*.vsix | grep -E 'sherpa-onnx|\\.(node|so|dylib|dll)$'",
     "test": "vitest",
     "test:unit": "vitest run",
     "eval:voice": "vitest run -c vitest.eval.config.ts",
@@ -605,7 +606,6 @@
   "dependencies": {
     "marked": "^18.0.2",
     "proper-lockfile": "^4.1.2",
-    "sherpa-onnx-node": "^1.13.8",
     "ws": "^8.21.3"
   },
   "devDependencies": {
@@ -623,6 +623,8 @@
     "jsdom": "^26.1.0",
     "mocha": "^11.0.0",
     "onnxruntime-web": "^1.30.0",
+    "stylelint": "^17.15.0",
+    "stylelint-config-recommended": "^18.0.0",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   }

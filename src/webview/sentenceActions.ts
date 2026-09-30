@@ -1,14 +1,17 @@
 /**
  * Reading aloud and translating sentences with Alt (`voiceAgent.messageButtons`), wherever the
  * webview shows them: the Bot view and the chat's messages and cards (the surfaces). Holds what
- * the host says about them (`sentenceActions`: on or off, the language, the sentence being read),
- * asks the host to read or translate, plays what it reads when voice mode is off, and highlights
- * the sentence being read. The gestures are sentencePick.ts, the translation translatePopup.ts.
+ * the host says about them (`sentenceActions`: on or off, the language, the read in progress),
+ * asks the host to read or translate, and plays what it reads when voice mode is off. The gestures
+ * are sentencePick.ts, the bar over a mouse selection selectionToolbar.ts, the picked text (the
+ * region), its highlights and playback control readAlong.ts, the translation translatePopup.ts.
  */
 import type { ClientMessage } from '../shared/protocol';
 import type { VoiceViewClientMessage, VoiceViewHostMessage } from '../shared/voiceViewProtocol';
-import { installSentencePick, paintSentence, type PickedSentence, type SentencePick, type SentenceSurface } from './sentencePick';
+import { installSentencePick, type PickedSentence, type SentencePick, type SentenceSurface } from './sentencePick';
 import { showToast } from './chat/toast';
+import { createReadAlong } from './readAlong';
+import { installSelectionToolbar, type SelectionToolbar } from './selectionToolbar';
 import { createTranslationPopup } from './translatePopup';
 import { vscode } from './vscodeApi';
 
@@ -17,29 +20,23 @@ function post(message: VoiceViewClientMessage): void {
 }
 
 let current: Extract<VoiceViewHostMessage, { type: 'sentenceActions' }> = { type: 'sentenceActions', enabled: false, translateTo: '' };
-/** The sentence last sent to be read aloud: where the host's `replay` is shown. */
-let reading: PickedSentence | undefined;
 
 let pick: SentencePick | undefined;
+let toolbar: SelectionToolbar | undefined;
 const popup = createTranslationPopup({
     target: () => current.translateTo,
     request: (requestId, text, to) => post({ type: 'translate', requestId, text, to }),
 });
-
-/** Highlights `reading` while the host reads it: `loading` until it is heard, then `playing`. */
-function paintReplay(): void {
-    const replay = current.replay;
-    const same =
-        reading !== undefined &&
-        replay !== undefined &&
-        replay.entryId === reading.entryId &&
-        replay.piece.text === reading.piece.text &&
-        replay.piece.sentence === reading.piece.sentence &&
-        replay.piece.range?.join() === reading.piece.range?.join();
-    const range = same ? reading!.surface.rangeOf(reading!) : undefined;
-    paintSentence('vp-sentence-loading', replay?.phase !== 'playing' ? range : undefined);
-    paintSentence('vp-sentence-playing', replay?.phase === 'playing' ? range : undefined);
+/** Reads `sentence` aloud (from `fraction` into its sentence `part`, else from its start); it becomes the region. */
+function read(sentence: PickedSentence, from?: { part: number; fraction: number }): void {
+    // Created on the click, so the webview lets it play.
+    replayAudio ??= new AudioContext();
+    void replayAudio.resume();
+    readAlong.start(sentence);
+    post({ type: 'replay', entryId: sentence.entryId, piece: sentence.piece, surface: sentence.surface.name, from });
 }
+/** The picked text: its highlights, and the region as a playback control. */
+const readAlong = createReadAlong({ post, read, translate: popup.open });
 
 let frame = 0;
 /** After a surface was drawn: finds the highlighted sentences again (their text may be new nodes). */
@@ -48,27 +45,27 @@ function refresh(): void {
         frame = 0;
         pick?.refresh();
         popup.refresh();
-        paintReplay();
+        readAlong.refresh();
     });
 }
 
-/** Starts the gestures over `surfaces`; once, at startup. */
+/** Starts the gestures and the selection bar over `surfaces`; once, at startup. */
 export function installSentenceActions(surfaces: readonly SentenceSurface[]): void {
+    const enabled = (): boolean => current.enabled;
     pick = installSentencePick(surfaces, {
-        enabled: () => current.enabled,
-        read: (sentence) => {
-            // Created on the click, so the webview lets it play.
-            replayAudio ??= new AudioContext();
-            void replayAudio.resume();
-            reading = sentence;
-            post({ type: 'replay', entryId: sentence.entryId, piece: sentence.piece, surface: sentence.surface.name });
+        enabled,
+        read,
+        // Alt+right-click picks the text too: a click reads it, a right-click translates it again.
+        translate: (sentence) => {
+            readAlong.select(sentence);
+            popup.open(sentence);
         },
-        translate: (sentence) => popup.open(sentence),
     });
+    toolbar = installSelectionToolbar(surfaces, { enabled, read, translate: popup.open });
     // Surfaces redraw on their own schedules (snapshots, state syncs, streaming); only what is
     // highlighted needs finding again, and only while something is.
     new MutationObserver(() => {
-        if (pick?.active() || popup.isOpen() || current.replay) {
+        if (pick?.active() || popup.isOpen() || readAlong.shown() || current.replay) {
             refresh();
         }
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -81,10 +78,10 @@ export function handleSentenceMessage(msg: Exclude<VoiceViewHostMessage, { type:
             current = msg;
             if (!msg.enabled) {
                 popup.close();
+                toolbar?.hide();
+                readAlong.clear();
             }
-            if (!msg.replay) {
-                reading = undefined;
-            }
+            readAlong.update(msg.replay);
             refresh();
             return;
         case 'translation':

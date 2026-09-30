@@ -127,8 +127,18 @@ function limitRunLength(run: SpeechRun, max: number | undefined): SpeechRun[] {
     return rest ? [...pieces, { text: rest, chinese: run.chinese }] : pieces;
 }
 
+/** One speech request's use: the characters sent and the audio back. */
+export interface TtsUsage {
+    chars: number;
+    audioMs: number;
+}
+
 export class TtsClient {
-    constructor(private readonly _config: TtsRequestConfig) {}
+    constructor(
+        private readonly _config: TtsRequestConfig,
+        /** Each request that returned audio; a mixed-language sentence takes one per run. */
+        private readonly _onUsage?: (usage: TtsUsage) => void,
+    ) {}
 
     /** One sentence; mixed-language text is synthesized run by run and joined. */
     async synthesize(text: string, signal: AbortSignal): Promise<Pcm> {
@@ -168,7 +178,9 @@ export class TtsClient {
         if (!res.ok) {
             throw new Error(`POST ${endpoint} → HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
         }
-        return parseWav(Buffer.from(await res.arrayBuffer()));
+        const pcm = parseWav(Buffer.from(await res.arrayBuffer()));
+        this._onUsage?.({ chars: run.text.length, audioMs: (pcm.data.length / 2 / pcm.rate) * 1000 });
+        return pcm;
     }
 }
 

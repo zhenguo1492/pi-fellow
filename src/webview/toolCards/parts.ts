@@ -1,5 +1,5 @@
 /**
- * DOM building blocks for tool cards (the `tv-` classes in styles/toolCards.css).
+ * DOM building blocks for tool cards (the `tv-` classes in styles/chat/toolCards.css).
  * Everything renders synchronously, so a card has its final height on insertion.
  */
 import { el } from '../chat/helpers';

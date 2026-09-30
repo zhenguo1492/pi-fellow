@@ -80,6 +80,14 @@ describe('SpeechCache', () => {
         expect(ttsCacheKey({ ...custom, engine: 'builtin', url: '' })).toBe(ttsCacheKey({ ...custom, engine: 'builtin', url: 'http://ignored' }));
     });
 
+    it("finds a sentence kept under another message in the same voice, its own message's first", () => {
+        const cache = new SpeechCache();
+        cache.put('reply', 'voice-1', [{ text: 'Same words.', pcm: pcmOf(1) }]);
+        cache.put('chat', 'voice-1', [{ text: 'Same words.', pcm: pcmOf(2) }]);
+        expect(cache.piece('selection', 'voice-1', 'Same words.')?.pcm.rate).toBe(1);
+        expect(cache.piece('chat', 'voice-1', 'Same words.')?.pcm.rate).toBe(2);
+        expect(cache.piece('selection', 'voice-2', 'Same words.')).toBeUndefined();
+    });
 });
 
 /** Stubs the TTS server: each sentence comes back as a WAV whose sample rate names it. Returns the inputs asked for. */
@@ -96,29 +104,47 @@ function stubTts(rates: Record<string, number>, fail?: string): string[] {
     return asked;
 }
 
-/** An output whose clips start and end when the test says. */
+/**
+ * Outputs whose clips start and end when the test says: each `output` is a new one, as the
+ * speakers are taken again for each run of a read (start, resume, seek); `start` / `finish` act on
+ * the clips of the newest.
+ */
 function fakeOutput() {
     const ctl = new AbortController();
     const played: number[] = [];
-    const clips: Array<{ start?: () => void; end: () => void }> = [];
+    /** Each clip's samples: a resumed or moved read plays part of a sentence. */
+    const samples: number[] = [];
+    let clips: Array<{ start?: () => void; end: () => void }> = [];
     let ends = 0;
-    const output: ReplayOutput = {
-        signal: ctl.signal,
-        play: (pcm: Pcm, onPlaying?: () => void) => {
-            const { promise, resolve } = Promise.withResolvers<void>();
-            played.push(pcm.rate);
-            clips.push({ start: onPlaying, end: resolve });
-            return promise;
-        },
-        end: () => {
-            ends++;
-            clips.splice(0).forEach((clip) => clip.end());
-        },
+    const take = (): ReplayOutput => {
+        const own: typeof clips = [];
+        clips = own;
+        let ended = false;
+        return {
+            signal: ctl.signal,
+            play: (pcm: Pcm, onPlaying?: () => void) => {
+                const { promise, resolve } = Promise.withResolvers<void>();
+                played.push(pcm.rate);
+                samples.push(pcm.data.length / 2);
+                own.push({ start: onPlaying, end: resolve });
+                return promise;
+            },
+            end: () => {
+                if (!ended) {
+                    ended = true;
+                    ends++;
+                    own.forEach((clip) => clip.end());
+                }
+            },
+        };
     };
     return {
         ctl,
-        output,
+        get output() {
+            return take();
+        },
         played,
+        samples,
         start: (i: number) => clips[i].start?.(),
         finish: (i: number) => clips[i].end(),
         ends: () => ends,
@@ -130,6 +156,7 @@ const sentence = (text: string, start = 0) => ({ text, range: [start, start + te
 function player(output: () => ReplayOutput | string, cache = new SpeechCache(), ttsKey = 'voice-1') {
     const changes: Array<VoiceReplay | undefined> = [];
     const errors: string[] = [];
+    const levels: number[] = [];
     const replay = new ReplayPlayer({
         cache,
         ttsKey: () => ttsKey,
@@ -137,9 +164,10 @@ function player(output: () => ReplayOutput | string, cache = new SpeechCache(), 
         output,
         onChange: (current) => changes.push(current),
         onError: (message) => errors.push(message),
+        onLevel: (level) => levels.push(level),
         log: () => {},
     });
-    return { replay, changes, errors };
+    return { replay, changes, errors, levels };
 }
 
 describe('ReplayPlayer', () => {
@@ -157,6 +185,28 @@ describe('ReplayPlayer', () => {
         await done;
         expect(changes.map((c) => c?.phase)).toEqual(['loading', 'queued', 'playing', undefined]);
         expect(replay.current).toBeUndefined();
+    });
+
+    it('reports the level of the sentence as it plays, and silence once paused', async () => {
+        const cache = new SpeechCache();
+        // One second of loud audio: level 1 all through.
+        cache.put('e1', 'voice-1', [{ text: 'Loud.', pcm: { rate: 16000, data: Buffer.from(new Int16Array(16000).fill(8000).buffer) } }]);
+        const out = fakeOutput();
+        const { replay, levels } = player(() => out.output, cache);
+        void replay.toggle('e1', sentence('Loud.'));
+        await vi.waitFor(() => expect(out.played).toHaveLength(1));
+        vi.useFakeTimers();
+        expect(levels).toEqual([]);
+        out.start(0);
+        vi.advanceTimersByTime(200);
+        expect(levels.length).toBeGreaterThan(0);
+        expect(levels.every((level) => level > 0.9)).toBe(true);
+        replay.pause();
+        expect(levels.at(-1)).toBe(0);
+        const reported = levels.length;
+        vi.advanceTimersByTime(1000);
+        expect(levels).toHaveLength(reported);
+        replay.stop();
     });
 
     it("synthesizes a sentence once per voice, kept with its message's other sentences", async () => {
@@ -193,6 +243,164 @@ describe('ReplayPlayer', () => {
         out.finish(0);
         await done;
         expect(asked).toEqual([]);
+    });
+
+    const paragraph = (parts: string[]) => ({ text: parts.join(' '), range: [0, parts.join(' ').length] as [number, number], parts });
+
+
+    it('reads a paragraph whose sentences voice mode spoke from their audio, in order, without TTS', async () => {
+        const asked = stubTts({});
+        const cache = new SpeechCache();
+        cache.put('e1', 'voice-1', [
+            { text: 'One.', pcm: pcmOf(7001) },
+            { text: 'Two,', pcm: pcmOf(7002) },
+            { text: 'three.', pcm: pcmOf(7003) },
+        ]);
+        const out = fakeOutput();
+        const { replay, changes } = player(() => out.output, cache);
+        const done = replay.toggle('e1', paragraph(['One.', 'Two,', 'three.']));
+        await vi.waitFor(() => expect(out.played).toEqual([7001, 7002, 7003]));
+        out.start(0);
+        out.start(1);
+        [0, 1, 2].forEach(out.finish);
+        await done;
+        expect(asked).toEqual([]);
+        // The sentence being read moves on as each one is heard to start.
+        expect(changes.map((c) => c && `${c.phase} ${c.part}`)).toEqual(['loading 0', 'queued 0', 'playing 0', 'playing 1', undefined]);
+    });
+
+    it('pauses where it is heard, lets the speakers go, and resumes from there, from the kept audio', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(0);
+        const asked = stubTts({});
+        const cache = new SpeechCache();
+        // Two seconds each at 1 kHz.
+        cache.put('e1', 'voice-1', [
+            { text: 'One.', pcm: pcmOf(1000, 2000) },
+            { text: 'Two.', pcm: pcmOf(1001, 2000) },
+        ]);
+        const out = fakeOutput();
+        const { replay, changes } = player(() => out.output, cache);
+        const done = replay.toggle('e1', paragraph(['One.', 'Two.']));
+        await vi.waitFor(() => expect(out.samples).toEqual([2000, 2000]));
+        // vi.waitFor moves faked time on: the clip starts at 0, the pause is a second into it.
+        vi.setSystemTime(0);
+        out.start(0);
+        vi.setSystemTime(1000);
+
+        const ends = out.ends();
+        replay.pause();
+        expect(replay.current).toMatchObject({ phase: 'paused', part: 0 });
+        // The speakers are let go; nothing plays until the resume.
+        expect(out.ends()).toBeGreaterThan(ends);
+        replay.pause();
+        expect(out.samples).toEqual([2000, 2000]);
+
+        replay.resume();
+        // The rest of the first sentence (from a little before the pause), then the second.
+        await vi.waitFor(() => expect(out.samples).toEqual([2000, 2000, 1150, 2000]));
+        out.start(0);
+        out.finish(0);
+        out.start(1);
+        out.finish(1);
+        await done;
+        expect(asked).toEqual([]);
+        expect(changes.map((c) => c && `${c.phase} ${c.part}`)).toEqual([
+            'loading 0',
+            'queued 0',
+            'playing 0',
+            'paused 0',
+            'queued 0',
+            'playing 0',
+            'playing 1',
+            undefined,
+        ]);
+    });
+
+    it('moves to a place in another sentence, playing even when paused, synthesizing only what is missing', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(0);
+        const asked = stubTts({ 'Not kept.': 1000 });
+        const cache = new SpeechCache();
+        cache.put('e1', 'voice-1', [{ text: 'Kept.', pcm: pcmOf(1000, 2000) }]);
+        const out = fakeOutput();
+        const { replay } = player(() => out.output, cache);
+        const done = replay.toggle('e1', paragraph(['Kept.', 'Not kept.', 'Kept.']));
+        await vi.waitFor(() => expect(out.samples).toEqual([2000, 160, 2000]));
+        out.start(0);
+        replay.pause();
+
+        // Halfway into the first sentence: from a little before that place, then the rest.
+        replay.seek(0, 0.5);
+        await vi.waitFor(() => expect(out.samples).toEqual([2000, 160, 2000, 1200, 160, 2000]));
+        expect(replay.current).toMatchObject({ phase: 'queued', part: 0 });
+        // To the third, from its start: what was queued from the first is dropped.
+        replay.seek(2, 0);
+        await vi.waitFor(() => expect(out.samples).toEqual([2000, 160, 2000, 1200, 160, 2000, 2000]));
+        out.start(0);
+        expect(replay.current).toMatchObject({ phase: 'playing', part: 2 });
+        out.finish(0);
+        await done;
+        expect(asked).toEqual(['Not kept.']);
+    });
+
+    it('starts a read at a place in a later sentence, making nothing before it', async () => {
+        const asked = stubTts({ 'Not kept.': 1000 });
+        const cache = new SpeechCache();
+        cache.put('e1', 'voice-1', [{ text: 'Kept.', pcm: pcmOf(1000, 2000) }]);
+        const out = fakeOutput();
+        const { replay } = player(() => out.output, cache);
+        const done = replay.toggle('e1', paragraph(['Not kept.', 'Kept.', 'Kept.']), { part: 1, fraction: 0.5 });
+        // From a little before halfway into the second sentence, then the third.
+        await vi.waitFor(() => expect(out.samples).toEqual([1200, 2000]));
+        expect(replay.current).toMatchObject({ phase: 'queued', part: 1 });
+        out.start(0);
+        out.finish(0);
+        out.start(1);
+        out.finish(1);
+        await done;
+        expect(asked).toEqual([]);
+    });
+
+    it('synthesizes only the sentences of a paragraph not kept, keeps them, and plays the first before the rest are made', async () => {
+        // TTS that answers only when the test says.
+        const asked: string[] = [];
+        const answers: Array<() => void> = [];
+        vi.stubGlobal('fetch', (_url: string, init: { body: string; signal: AbortSignal }) => {
+            const { input }: { input: string } = JSON.parse(init.body);
+            asked.push(input);
+            const { promise, resolve, reject } = Promise.withResolvers<Response>();
+            answers.push(() => resolve(new Response(encodeWav(new Int16Array(160), 9000 + asked.length))));
+            init.signal.addEventListener('abort', () => reject(init.signal.reason));
+            return promise;
+        });
+        const cache = new SpeechCache();
+        cache.put('e1', 'voice-1', [{ text: 'Kept.', pcm: pcmOf(7001) }]);
+        const out = fakeOutput();
+        const { replay } = player(() => out.output, cache);
+
+        const done = replay.toggle('e1', paragraph(['Kept.', 'New one.', 'Kept.']));
+        await vi.waitFor(() => expect(asked).toEqual(['New one.']));
+        // The kept sentence is already on its way while the next one is with TTS.
+        expect(out.played).toEqual([7001]);
+        answers[0]();
+        await vi.waitFor(() => expect(out.played).toEqual([7001, 9001, 7001]));
+        [0, 1, 2].forEach(out.finish);
+        await done;
+        expect(asked).toEqual(['New one.']);
+        expect(cache.piece('e1', 'voice-1', 'New one.')?.pcm.rate).toBe(9001);
+
+        // Stopping mid-paragraph drops the rest: nothing more is played or kept.
+        const out2 = fakeOutput();
+        const second = player(() => out2.output, cache);
+        const stopped = second.replay.toggle('e1', paragraph(['Kept.', 'Never made.', 'New one.']));
+        await vi.waitFor(() => expect(asked).toEqual(['New one.', 'Never made.']));
+        second.replay.stop();
+        await stopped;
+        expect(out2.played).toEqual([7001]);
+        expect(out2.ends()).toBeGreaterThan(0);
+        expect(cache.piece('e1', 'voice-1', 'Never made.')).toBeUndefined();
+        expect(second.errors).toEqual([]);
     });
 
     it('stops when the same sentence is clicked again, even while it is with TTS, and caches nothing half-made', async () => {

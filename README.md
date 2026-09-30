@@ -24,7 +24,7 @@
 1. Install omp or pi (above).
 2. Open the **PI Buddy** view in the Activity Bar.
 3. Sign in to a model provider: type `/login` in the chat, or open Settings → **Configure provider**.
-4. Start chatting. To use voice, fill in Settings → **Voice**, then click the robot button above the chat input.
+4. Start chatting. To use voice, fill in Settings → **Voice**, then click the phone button above the chat input.
 
 ## Features
 
@@ -58,7 +58,7 @@
 
 ### Voice AI pair programmer
 
-Start voice mode with the robot button above the chat input, or run **Voice Agent — Start Voice Mode**. The voice agent is a second omp/pi session, separate from the chat agent. It reads your code, listens to what you say, and answers out loud.
+Start voice mode with the phone button above the chat input (click it again to hang up), or run **Voice Agent — Start Voice Mode**. The avatar button next to it shows the voice agent's conversation (Bot view), where you can also type to it with voice mode off, as a text chat. The voice agent is a second omp/pi session, separate from the chat agent. It reads your code, listens to what you say, and answers out loud.
 
 - **Talk naturally.**
   - Interrupt it at any time. Saying "stop", "wait", 停 or 等等 also works, and so does typing.

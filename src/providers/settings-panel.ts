@@ -412,16 +412,12 @@ export class SettingsPanel {
         if (!isSyncWithPiCli()) {
             return;
         }
-        const loaded = await loadPiAgentConfigForSettings(this._piSession, this._currentBackend);
-        const packages = loaded.config?.packages ?? [];
-        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults, this._currentBackend);
+        const snapshot = await loadMcpSettingsSnapshot(this._mcpProbeResults, this._currentBackend);
         this._post({ type: 'mcpSnapshot', snapshot });
     }
 
     private async _testMcpServer(serverName: string): Promise<void> {
-        const loaded = await loadPiAgentConfigForSettings(this._piSession, this._currentBackend);
-        const packages = loaded.config?.packages ?? [];
-        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults, this._currentBackend);
+        const snapshot = await loadMcpSettingsSnapshot(this._mcpProbeResults, this._currentBackend);
         const server = snapshot.servers.find((s) => s.name === serverName);
         if (!server) {
             this._post({ type: 'error', message: `Unknown MCP server: ${serverName}` });
@@ -437,9 +433,7 @@ export class SettingsPanel {
     }
 
     private async _testAllMcpServers(): Promise<void> {
-        const loaded = await loadPiAgentConfigForSettings(this._piSession, this._currentBackend);
-        const packages = loaded.config?.packages ?? [];
-        const snapshot = await loadMcpSettingsSnapshot(packages, this._mcpProbeResults, this._currentBackend);
+        const snapshot = await loadMcpSettingsSnapshot(this._mcpProbeResults, this._currentBackend);
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -641,7 +635,7 @@ export class SettingsPanel {
         };
 
         if (sync && piConfig) {
-            data.mcpSnapshot = await loadMcpSettingsSnapshot(piConfig.packages, this._mcpProbeResults, backend);
+            data.mcpSnapshot = await loadMcpSettingsSnapshot(this._mcpProbeResults, backend);
             let slash: string[] = [];
             try {
                 slash = (await this._piSession?.listSlashCommands() ?? []).map((c) => c.name.replace(/^skill:/, ''));

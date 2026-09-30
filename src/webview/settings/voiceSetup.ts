@@ -218,7 +218,7 @@ export function applyBuiltinVoiceStatus(msg: Extract<SettingsServerMessage, { ty
 // ── Rendering ──
 
 function megabytes(bytes: number | undefined): string {
-    return bytes === undefined ? 'about 350 MB' : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+    return bytes === undefined ? 'about 385 MB' : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
 }
 
 function renderBuiltinPanel(visible: boolean): void {
@@ -233,13 +233,13 @@ function renderBuiltinPanel(visible: boolean): void {
     }
     const { status: models, busy, error } = settingsState.builtinVoice ?? { busy: false };
     const [state, text] = busy
-        ? ['testing', 'Downloading the models and starting the engine… (progress shows in the notification)']
+        ? ['testing', 'Downloading the engine and its models, then starting it… (progress shows in the notification)']
         : error
           ? ['error', error]
           : !models
-            ? ['testing', 'Checking the models…']
+            ? ['testing', 'Checking the download…']
             : models.downloaded
-              ? ['ok', `Ready. Models downloaded (${megabytes(models.bytes)}).`]
+              ? ['ok', `Ready. Engine and models downloaded (${megabytes(models.bytes)}).`]
               : ['dirty', `Not downloaded yet: ${megabytes(models.bytes)}, fetched once the first time you use voice. Download now to be ready.`];
     status.dataset.state = state;
     status.textContent = text;
@@ -437,7 +437,7 @@ function buildVoiceHelp(): HTMLElement {
         <summary>How to set up voice</summary>
         <p>Voice is two parts: <b>speech-to-text</b> writes what you say (the chat mic, and voice mode), and <b>text-to-speech</b> gives voice mode its voice. Pick one way below, then Save.</p>
         <ul>
-            <li><b>Built-in</b>: nothing to set up. Runs on this computer, English only; about 350 MB of models download once, the first time you use voice.</li>
+            <li><b>Built-in</b>: nothing to set up. Runs on this computer, English only; about 385 MB (the engine and its models) downloads once, the first time you use voice.</li>
             <li><b>Cloud service</b>: OpenAI or Groq. Best quality and many languages; needs an account and an API key (paid by use). Click "Get API key", paste the key, then "Save & test".</li>
             <li><b>My own server</b>: any OpenAI-compatible speech server you run (for example speaches for speech-to-text, Kokoro-FastAPI for the voice). Full control, including models, voices and languages.</li>
         </ul>

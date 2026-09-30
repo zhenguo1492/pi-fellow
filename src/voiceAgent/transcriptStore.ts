@@ -3,7 +3,17 @@ import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { VoiceSessionSummary } from '../pi/sessionCatalog';
-import type { VoiceEntry, VoiceHearing, VoiceLatency, VoiceObservationKind, VoiceSentence, VoiceToolEntry, VoiceToolResearch } from '../shared/voiceViewProtocol';
+import type {
+    VoiceEntry,
+    VoiceHearing,
+    VoiceLatency,
+    VoiceObservationKind,
+    VoiceSentence,
+    VoiceSpeechCall,
+    VoiceSpeechUsage,
+    VoiceToolEntry,
+    VoiceToolResearch,
+} from '../shared/voiceViewProtocol';
 import type { Metrics } from './conversation';
 import type { ResearchJob } from './research';
 import type { VoiceTurnListener, VoiceTurnResult } from './voiceAgent';
@@ -25,6 +35,8 @@ export interface VoiceSessionRecord {
     voiceSessionFile?: string;
     /** `title` names the task's worker session: generated from what the user said, or set by the user. */
     named?: 'auto' | 'user';
+    /** What voice mode sent to STT and TTS in this conversation. */
+    speech?: VoiceSpeechUsage;
 }
 
 /** The slice of `vscode.Memento` the store needs. */
@@ -374,6 +386,28 @@ export class VoiceTranscriptStore {
             total: span(metrics.silenceAt ?? metrics.promptAt, metrics.firstAudioAt),
             cutOff: span(metrics.promptAt, metrics.cutAt),
         });
+        this._changed();
+    }
+
+    /** Voice mode: one STT or TTS request returned; added to the live conversation's totals. */
+    addSpeechUsage(call: VoiceSpeechCall): void {
+        const speech = (this._liveSession().speech ??= {});
+        if (call.service === 'stt') {
+            const stt = (speech.stt ??= { calls: 0, audioMs: 0 });
+            stt.calls++;
+            stt.audioMs += call.audioMs;
+            if (call.input !== undefined) {
+                stt.input = (stt.input ?? 0) + call.input;
+            }
+            if (call.output !== undefined) {
+                stt.output = (stt.output ?? 0) + call.output;
+            }
+        } else {
+            const tts = (speech.tts ??= { calls: 0, chars: 0, audioMs: 0 });
+            tts.calls++;
+            tts.chars += call.chars;
+            tts.audioMs += call.audioMs;
+        }
         this._changed();
     }
 

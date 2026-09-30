@@ -1,0 +1,1052 @@
+/* Composer: input box, @ menu, drag and drop, attachments and editor context chips, model/permission/effort menus, action buttons, mic, slash menu, edit banner. */
+
+/* ── Input container ── */
+.input-container {
+    margin: 8px;
+    border: 1px solid color-mix(in srgb, var(--border) 88%, var(--fg) 8%);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--input-bg) 70%, var(--card-bg));
+    flex-shrink: 0;
+    user-select: none;
+    position: relative;
+    box-shadow:
+        0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent),
+        0 8px 24px color-mix(in srgb, #000 18%, transparent);
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input-container:focus-within {
+    border-color: color-mix(in srgb, var(--focus-border) 45%, var(--border));
+    box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--focus-border) 18%, transparent),
+        0 8px 24px color-mix(in srgb, #000 20%, transparent);
+}
+
+.message-image {
+    display: block;
+    max-width: min(100%, 320px);
+    max-height: 240px;
+    margin-top: 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    object-fit: contain;
+}
+
+.at-menu {
+    max-height: 200px;
+    overflow-y: auto;
+    margin: 0 8px 4px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--vscode-editorWidget-background, #252526);
+}
+
+.at-item {
+    display: block;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.at-item:hover,
+.at-item-active {
+    background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08));
+}
+
+.at-item-path {
+    font-family: var(--vscode-editor-font-family, monospace);
+    color: var(--vscode-foreground, #ccc);
+}
+
+.input-container.drag-over {
+    outline: 1px solid var(--vscode-focusBorder, #007fd4);
+    outline-offset: -1px;
+}
+
+.drop-shift-hint {
+    margin: 0 10px 2px;
+    padding: 5px 8px;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--vscode-descriptionForeground, #999);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--vscode-focusBorder, #007fd4) 8%, transparent);
+}
+
+.drop-shift-hint kbd {
+    display: inline-block;
+    padding: 0 4px;
+    margin: 0 1px;
+    font-size: 10px;
+    font-family: inherit;
+    line-height: 1.4;
+    border-radius: 3px;
+    border: 1px solid color-mix(in srgb, var(--border) 80%, var(--fg) 20%);
+    background: color-mix(in srgb, var(--fg) 6%, var(--bg));
+}
+
+/* ── Input ── */
+.input-area {
+    padding: 8px 10px 6px;
+}
+
+.input-area .composer-toolbar {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.input-area .composer-toolbar-left,
+.input-area .composer-toolbar-right {
+    flex-shrink: 0;
+}
+
+#input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    color: var(--input-fg);
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: var(--chat-font);
+    resize: none;
+    outline: none;
+    transition: border-color 0.15s;
+    min-height: 28px;
+    max-height: 140px;
+    line-height: var(--chat-line);
+    scrollbar-width: none;
+    user-select: text;
+}
+#input::-webkit-scrollbar { display: none; }
+#input::placeholder { color: var(--muted); }
+#input:focus { border-color: color-mix(in srgb, var(--border) 80%, var(--fg) 20%); }
+
+.composer-action-btn--ghost:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.composer-footer {
+    display: flex;
+    align-items: center;
+    /* Room between the mic/send buttons and the model / permission chips below them. */
+    margin-top: 8px;
+    min-width: 0;
+}
+
+/* Voice input status (Listening / Hearing speech / Transcribing), right side of the footer. */
+.dictation-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    padding-left: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.dictation-status[hidden] {
+    display: none;
+}
+
+.dictation-status-icon {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--link);
+    opacity: 0.5;
+}
+
+.dictation-status[data-state='speaking'] {
+    color: var(--link);
+}
+
+.dictation-status[data-state='speaking'] .dictation-status-icon {
+    opacity: 1;
+    animation: pulse-dot 0.9s ease-in-out infinite;
+}
+
+.dictation-status[data-state='transcribing'] {
+    color: var(--fg);
+}
+
+.dictation-status[data-state='transcribing'] .dictation-status-icon {
+    width: 9px;
+    height: 9px;
+    background: none;
+    opacity: 1;
+    border: 1.5px solid color-mix(in srgb, var(--link) 30%, transparent);
+    border-top-color: var(--link);
+    animation: tab-spin 0.7s linear infinite;
+}
+
+.composer-model-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    min-width: 0;
+    height: 20px;
+    padding: 0 6px 0 4px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.composer-model-btn:hover,
+.composer-model-btn[aria-expanded='true'] {
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+    border-color: color-mix(in srgb, var(--border) 85%, var(--fg) 10%);
+    color: var(--fg);
+}
+
+.composer-model-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.composer-model-btn .dropdown-chevron {
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+/* ── Attachments (composer + sent messages) ── */
+/* Editor-context chip + pending attachment chips: one line in the footer, between the model and
+   permission buttons. Chips that do not fit move into .composer-chips-menu (see chat/composerChips.ts). */
+.composer-chips {
+    display: flex;
+    /* Zero basis: the row's width is the free space, never its content, so fitting cannot loop. */
+    flex: 1 1 0;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    margin: 0 6px;
+    overflow: hidden;
+}
+
+/* Two classes: beat the chips' own max-width rules below. */
+.composer-chips > .attachment-chip,
+.composer-chips > .editor-context-chip {
+    flex-shrink: 0;
+    max-width: 160px;
+}
+
+.composer-chips-more {
+    flex-shrink: 0;
+    margin-right: 6px;
+}
+
+.composer-chips-more[hidden] {
+    display: none;
+}
+
+/* Opens above the input box, like the model picker. */
+.composer-chips-menu {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    width: min(320px, 100%);
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    margin-bottom: 4px;
+    padding: 6px;
+    background: var(--vscode-menu-background, var(--card-bg));
+    color: var(--vscode-menu-foreground, var(--fg));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+}
+
+.composer-chips-menu[hidden] {
+    display: none;
+}
+
+.composer-chips-menu > .attachment-chip,
+.composer-chips-menu > .editor-context-chip {
+    flex-shrink: 0;
+    max-width: 100%;
+}
+
+.message-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 260px;
+    min-height: 32px;
+    padding: 4px 6px 4px 4px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    font-size: 12px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    position: relative;
+    user-select: none;
+}
+
+.attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: min(100%, 200px);
+    min-width: 0;
+    height: 22px;
+    padding: 0 2px 0 6px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+    color: var(--fg);
+    font-size: 11px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.attachment-chip:hover,
+.attachment-chip--active {
+    border-color: color-mix(in srgb, var(--focus-border) 45%, var(--border));
+    background: color-mix(in srgb, var(--fg) 7%, var(--bg));
+}
+
+.attachment-chip-glyph {
+    display: flex;
+    flex-shrink: 0;
+}
+
+.attachment-chip-glyph--file {
+    color: color-mix(in srgb, var(--focus-border) 85%, var(--fg));
+}
+
+.attachment-chip-glyph--image {
+    color: color-mix(in srgb, var(--success-fg) 80%, var(--fg));
+}
+
+.attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.attachment-preview {
+    display: flex;
+    justify-content: flex-start;
+    margin: 6px 10px 0;
+    cursor: zoom-out;
+}
+
+.attachment-preview[hidden] {
+    display: none;
+}
+
+.attachment-preview-img {
+    display: block;
+    max-width: 100%;
+    max-height: 200px;
+    object-fit: contain;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+}
+
+.attachment-chip-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    border-radius: 6px;
+    color: var(--muted);
+}
+
+.attachment-chip-icon--file {
+    background: color-mix(in srgb, var(--focus-border) 12%, transparent);
+    color: color-mix(in srgb, var(--focus-border) 85%, var(--fg));
+}
+
+.attachment-chip-icon--image {
+    background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+    color: color-mix(in srgb, var(--success-fg) 80%, var(--fg));
+}
+
+.chip-svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+}
+
+.chip-svg-close {
+    width: 12px;
+    height: 12px;
+}
+
+.attachment-chip-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1;
+}
+
+.message-attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.25;
+}
+
+.attachment-ext {
+    font-size: 10px;
+    line-height: 1.1;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.attachment-ext--muted {
+    text-transform: none;
+    letter-spacing: 0;
+    opacity: 0.85;
+}
+
+.attachment-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.attachment-remove:hover {
+    opacity: 1;
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+/* ── Editor context (active file/selection sent with the prompt) ── */
+.editor-context-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    min-width: 0;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+    color: var(--fg);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+
+.editor-context-chip:hover {
+    border-color: color-mix(in srgb, var(--focus-border) 45%, var(--border));
+    background: color-mix(in srgb, var(--fg) 7%, var(--bg));
+}
+
+.editor-context-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: color-mix(in srgb, var(--focus-border) 85%, var(--fg));
+}
+
+.editor-context-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.editor-context-lines {
+    flex-shrink: 0;
+    color: var(--muted);
+}
+
+.editor-context-chip--off {
+    opacity: 0.55;
+    border-style: dashed;
+}
+
+.editor-context-chip--off .editor-context-name,
+.editor-context-chip--off .editor-context-lines {
+    text-decoration: line-through;
+}
+
+.message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.message-attachment-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    max-width: 100%;
+}
+
+.message-attachment-chip--image {
+    padding-right: 4px;
+}
+
+.attachment-preview-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin-left: 2px;
+    color: var(--muted);
+    transition: transform 0.2s ease, color 0.15s ease;
+}
+
+.message-attachment-chip.expanded .attachment-preview-toggle {
+    transform: rotate(180deg);
+    color: var(--fg);
+}
+
+.attachment-open-external {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-left: 2px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.attachment-open-external:hover {
+    opacity: 1;
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.message-image-preview-container {
+    margin-top: 6px;
+    margin-bottom: 4px;
+    max-width: 100%;
+    border-radius: 8px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+    border: 1px solid color-mix(in srgb, var(--border) 90%, var(--fg) 10%);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.message-image-loading {
+    padding: 14px 16px;
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.message-image-preview {
+    display: block;
+    max-width: 100%;
+    max-height: 280px;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+
+.message-image-preview:hover {
+    opacity: 0.95;
+}
+
+.message-attachment-chip--image .attachment-chip-icon--image {
+    background: color-mix(in srgb, var(--success-fg) 14%, transparent);
+    color: color-mix(in srgb, var(--success-fg) 85%, var(--fg));
+}
+
+.attachment-chip--openable {
+    cursor: pointer;
+}
+
+.attachment-chip--openable:focus-visible,
+.message-attachment-chip:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 2px;
+}
+
+/* ── Composer toolbar (inside input area) ── */
+.composer-toolbar-left,
+.composer-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.composer-toolbar-right {
+    flex-shrink: 0;
+}
+
+/* Permission level (Ask / Plan / Auto): right end of the model row, the model chip's look plus an icon. */
+.composer-permission-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    padding-left: 5px;
+}
+
+/* While dictating, the status takes the free space and the chip follows it. */
+.dictation-status:not([hidden]) + .composer-permission-btn {
+    margin-left: 8px;
+}
+
+.composer-permission-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+/* Opens above the input box on the right, over the chip (the model picker opens on the left). */
+.permission-menu {
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    width: min(300px, 100%);
+    margin-bottom: 4px;
+    padding: 6px 0;
+    background: var(--vscode-menu-background, var(--card-bg));
+    color: var(--vscode-menu-foreground, var(--fg));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+}
+
+.permission-menu[hidden] {
+    display: none;
+}
+
+.permission-menu-title {
+    padding: 2px 12px 6px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.permission-list {
+    outline: none;
+}
+
+.permission-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+.permission-item:hover {
+    background: var(--vscode-list-hoverBackground, color-mix(in srgb, var(--fg) 6%, transparent));
+}
+.permission-item.highlighted {
+    background: var(
+        --vscode-menu-selectionBackground,
+        var(--vscode-list-activeSelectionBackground, color-mix(in srgb, var(--fg) 12%, transparent))
+    );
+    color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground, inherit));
+}
+
+.permission-item-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    margin-top: 1px;
+    opacity: 0.85;
+}
+
+.permission-item-text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.permission-item-label {
+    font-size: 12.5px;
+}
+
+/* The active mode: a checkmark at the right, as in Claude's menu. */
+.permission-item-check {
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 16px;
+    align-self: center;
+}
+
+.permission-item-desc {
+    font-size: 11px;
+    line-height: 1.35;
+    opacity: 0.7;
+}
+
+.permission-menu-sep {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--vscode-menu-separatorBackground, var(--border));
+}
+
+/* Effort (thinking level): a dumbbell, the level's name, and a pill of dots — one per level — as in Claude's menu. */
+.effort-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 4px;
+    padding: 4px 8px;
+    user-select: none;
+}
+
+.effort-label {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+
+.effort-value {
+    color: var(--muted);
+}
+
+.effort-track {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    outline: none;
+}
+.effort-track:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 1px;
+}
+
+.effort-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+.effort-dot::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--fg) 35%, transparent);
+    transition: width 0.12s, height 0.12s, background-color 0.12s;
+}
+.effort-dot:hover::before {
+    background: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+.effort-dot.selected::before {
+    width: 14px;
+    height: 14px;
+    background: color-mix(in srgb, var(--fg) 82%, transparent);
+}
+/* The top level is tinted, like the purple last dot in Claude's slider. */
+.effort-dot[data-level='xhigh']::before {
+    background: var(--vscode-charts-purple, #b180d7);
+}
+
+/* Composer action cluster (attach / stop / steer / send) */
+.composer-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    min-width: 28px;
+    padding: 0;
+    border-radius: 8px;
+    cursor: pointer;
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 1;
+    box-sizing: border-box;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+/* `display: inline-flex` above would otherwise override the UA `[hidden]` rule (Steer leaked while idle). */
+.composer-action-btn[hidden] {
+    display: none;
+}
+
+.composer-action-btn svg {
+    display: block;
+    width: 14px;
+    height: 14px;
+    color: inherit;
+    flex-shrink: 0;
+}
+
+.composer-action-btn svg path {
+    stroke: currentColor;
+}
+
+.composer-action-btn--ghost {
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--border) 85%, var(--fg) 10%);
+    color: var(--muted);
+}
+
+.composer-action-btn--ghost:hover {
+    background: color-mix(in srgb, var(--fg) 5%, transparent);
+    border-color: color-mix(in srgb, var(--focus-border) 35%, var(--border));
+    color: var(--fg);
+}
+
+.composer-action-btn--primary {
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+    border: none;
+}
+
+.composer-action-btn--primary:hover:not(:disabled) {
+    background: var(--btn-hover);
+}
+
+.composer-action-btn--primary:disabled,
+.composer-action-btn--primary[aria-disabled='true'] {
+    opacity: 0.42;
+    cursor: default;
+}
+
+.composer-action-btn--primary.composer-action-btn--as-stop {
+    background: color-mix(in srgb, var(--error-fg) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--error-fg) 40%, var(--border));
+    color: color-mix(in srgb, var(--error-fg) 92%, var(--fg));
+}
+
+.composer-action-btn--primary.composer-action-btn--as-stop:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--error-fg) 18%, transparent);
+}
+
+.composer-action-btn--primary.composer-action-btn--as-queue {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--focus-border) 35%, transparent);
+}
+
+/* Voice input mic: green while the microphone is open. Dictation: a stop button while recording,
+   a spinner (disabled) while transcribing. Voice mode: a slashed mic when muted. */
+.mic-btn .mic-off-icon,
+.mic-btn .mic-stop-icon,
+.mic-btn .mic-busy-icon,
+.mic-btn.is-muted .mic-icon,
+.mic-btn.is-recording .mic-icon,
+.mic-btn.is-busy .mic-icon {
+    display: none;
+}
+
+.mic-btn.is-muted .mic-off-icon,
+.mic-btn.is-recording .mic-stop-icon,
+.mic-btn.is-busy .mic-busy-icon {
+    display: block;
+}
+
+.mic-btn.is-live {
+    background: color-mix(in srgb, var(--success-fg) 14%, transparent);
+    border-color: color-mix(in srgb, var(--success-fg) 55%, var(--border));
+    color: var(--success-fg);
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.mic-btn.is-live:hover {
+    background: color-mix(in srgb, var(--success-fg) 20%, transparent);
+    border-color: color-mix(in srgb, var(--success-fg) 70%, var(--border));
+    color: var(--success-fg);
+}
+
+.mic-btn.is-live.is-speaking {
+    background: color-mix(in srgb, var(--success-fg) 24%, transparent);
+}
+
+.mic-btn.is-busy,
+.mic-btn.is-busy:hover {
+    background: transparent;
+    color: var(--fg);
+    cursor: progress;
+}
+
+.mic-btn.is-busy .mic-busy-icon {
+    animation: tab-spin 0.8s linear infinite;
+}
+
+.mic-btn.is-voice:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* Dictation unusable until STT passes its check: red; the tooltip says why. */
+.mic-btn.is-unavailable,
+.mic-btn.is-unavailable:hover {
+    background: color-mix(in srgb, var(--error-fg) 22%, transparent);
+    border-color: color-mix(in srgb, var(--error-fg) 60%, transparent);
+    color: var(--error-fg);
+    cursor: not-allowed;
+}
+
+.composer-btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.composer-btn-icon[hidden] {
+    display: none !important;
+}
+
+/* ── Slash command menu ── */
+.slash-menu {
+    max-height: 200px;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--border);
+}
+.slash-item {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 14px;
+    cursor: pointer;
+    gap: 2px;
+}
+.slash-item:hover {
+    background: var(--tint);
+}
+.slash-item-active {
+    background: var(--tint-strong);
+}
+.slash-item-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg);
+    font-family: var(--font-mono);
+}
+.slash-item-source {
+    font-size: 10px;
+    color: var(--muted);
+    opacity: 0.75;
+    margin-left: auto;
+}
+
+.slash-item-desc {
+    font-size: 11px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Composer edit banner (resend: new vs fork) ── */
+.composer-edit-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    margin: 0 10px 6px;
+    border-radius: var(--radius);
+    border: 1px solid color-mix(in srgb, var(--user-accent) 28%, var(--border));
+    background: color-mix(in srgb, var(--user-accent) 6%, var(--card-bg));
+}
+
+.composer-edit-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: color-mix(in srgb, var(--user-accent) 70%, var(--fg));
+    text-transform: uppercase;
+}
+
+.composer-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.composer-edit-btn {
+    font-size: 10.5px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+    cursor: pointer;
+    transition: background 0.12s, opacity 0.12s;
+}
+
+.composer-edit-btn:hover:not(:disabled) {
+    background: var(--btn-hover);
+}
+
+.composer-edit-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.composer-edit-btn--fork {
+    background: color-mix(in srgb, var(--user-accent) 18%, var(--card-bg));
+    color: var(--fg);
+    border-color: color-mix(in srgb, var(--user-accent) 35%, var(--border));
+}
+
+.composer-edit-btn--ghost {
+    background: transparent;
+    color: var(--muted);
+    border-color: transparent;
+}
+
+.composer-edit-btn--ghost:hover {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 5%, transparent);
+}

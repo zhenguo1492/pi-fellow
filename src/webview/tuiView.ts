@@ -36,7 +36,7 @@ function cssVar(name: string): string | undefined {
 function readTheme(): ITheme {
     const ansi = (name: string) => cssVar(`--vscode-terminal-ansi${name}`);
     return {
-        // Same surface and text color as the chat view (`--bg` / `--fg` in main.css).
+        // Same surface and text color as the chat view (`--bg` / `--fg` in styles/tokens.css).
         background: cssVar('--bg'),
         foreground: cssVar('--fg'),
         cursor: cssVar('--vscode-terminalCursor-foreground'),

@@ -872,6 +872,10 @@ export class PiRpcSessionManager {
         if (this.backend !== 'pi') {
             throw new Error(PLAN_MODE_PI_ONLY);
         }
+        // pi sends a slash command no extension registered to the model as a prompt.
+        if (!(await this._bridge.getCommands()).some((c) => c.name === 'plan')) {
+            throw new Error('pi has no /plan command (the pi-plan-mode package is not installed)');
+        }
         const cmd = mode === 'plan' ? '/plan' : '/plan exit';
         await this._bridge.prompt(cmd);
         // Plan extension updates jsonl + chrome shortly after slash handling.

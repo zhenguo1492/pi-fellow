@@ -17,6 +17,13 @@ export interface SttConfig {
     onOutcome?: ServiceOutcome;
 }
 
+/** One transcription's use: the audio sent, and the tokens when the server reports them (OpenAI's `usage`). */
+export interface SttUsage {
+    audioMs: number;
+    input?: number;
+    output?: number;
+}
+
 const TRANSCRIPTIONS_PATH = '/audio/transcriptions';
 const REQUEST_TIMEOUT_MS = 60_000;
 
@@ -76,7 +83,11 @@ export function encodeWav(pcm: Int16Array, sampleRate: number): Uint8Array<Array
 export class SttClient {
     private resolvedModel: Promise<string> | undefined;
 
-    constructor(private readonly config: SttConfig) {}
+    constructor(
+        private readonly config: SttConfig,
+        /** Each transcription returned. */
+        private readonly onUsage?: (usage: SttUsage) => void,
+    ) {}
 
     async transcribe(pcm: Int16Array, sampleRate: number): Promise<string> {
         try {
@@ -107,7 +118,8 @@ export class SttClient {
         if (!res.ok) {
             throw new Error(`POST ${endpoint} → HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
         }
-        const body = (await res.json()) as { text?: unknown };
+        const body = (await res.json()) as { text?: unknown; usage?: unknown };
+        this.onUsage?.({ audioMs: (pcm.length / sampleRate) * 1000, ...reportedTokens(body.usage) });
         return typeof body.text === 'string' ? body.text.trim() : '';
     }
 
@@ -128,4 +140,13 @@ export class SttClient {
         });
         return this.resolvedModel;
     }
+}
+
+/** A transcription's token `usage` as OpenAI reports it; Whisper servers send none, or only `seconds`. */
+function reportedTokens(usage: unknown): { input?: number; output?: number } {
+    if (!usage || typeof usage !== 'object') {
+        return {};
+    }
+    const { input_tokens: input, output_tokens: output } = usage as Record<string, unknown>;
+    return { ...(typeof input === 'number' ? { input } : {}), ...(typeof output === 'number' ? { output } : {}) };
 }

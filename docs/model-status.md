@@ -8,7 +8,7 @@ Files: `src/providers/model-status.ts` (`ModelStatusTracker`), `src/pi/providerU
 - Content: model · context usage · 5h / 7d subscription quota of the current provider (warning color at ≥90%, error color at 100%). Clicking expands context, session tokens, and each quota window's reset time.
 - Quota sources:
   - omp: `omp usage --json --provider <id>`.
-  - pi: reads the OAuth token from `~/.pi/agent/auth.json` and calls Anthropic `/api/oauth/usage`, ChatGPT `wham/usage`, and Antigravity `retrieveUserQuotaSummary` directly (distinguishing the Gemini pool from the Claude/GPT pool). Tokens are not refreshed; an expired token is reported.
+  - pi: reads the OAuth token from `~/.pi/agent/auth.json` and calls Anthropic `/api/oauth/usage`, ChatGPT `wham/usage`, and Antigravity `retrieveUserQuotaSummary` directly (distinguishing the Gemini pool from the Claude/GPT pool). The extension never refreshes tokens itself: a token expired or within a minute of expiry is fetched with `pi auth print-bearer-token --provider <id>` (pi ≥ 0.83), which refreshes it under pi's own lock and writes it back to `auth.json`. When that fails (older pi, a provider the auth command does not know such as the Antigravity plugin, a revoked refresh token), the expired token is reported.
 - Refresh: immediately on model switch, throttled to 30 s on `agent_end`, and polled every 5 minutes while idle.
 
 ## Model picker and favorites

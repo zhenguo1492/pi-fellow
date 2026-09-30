@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { VOICE_OFFLINE_SEND_HINT, voiceIsOn, type VoiceStatus } from '../shared/voiceViewProtocol';
+import { voiceIsOn, type VoiceStatus } from '../shared/voiceViewProtocol';
 import type { VoiceInput } from '../voice/voiceInput';
 import type { SidebarHost } from './sidebarHost';
 import type { MessageHandlers } from './sidebarMessageHandlers';
@@ -30,17 +30,8 @@ export class SidebarBotView {
         return !!tab && tab.botView;
     }
 
-    /** The Bot view with the voice agent offline: the composer takes no text, typed or dictated. */
-    composerLocked(): boolean {
-        return this.showsBotView() && !voiceIsOn(this._voiceStatus);
-    }
-
-    /** The mic button and the Toggle Voice Input command: no new dictation while the composer is locked; stopping always works. */
+    /** The mic button and the Toggle Voice Input command. */
     async toggleDictation(): Promise<void> {
-        if (!this._voiceInput.isRecording && this.composerLocked()) {
-            this._host.post({ type: 'toast', message: VOICE_OFFLINE_SEND_HINT, variant: 'error' });
-            return;
-        }
         await this._voiceInput.toggle();
     }
 

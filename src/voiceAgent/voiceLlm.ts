@@ -112,6 +112,8 @@ export class VoiceLlm {
     private constructor(
         private readonly _bridge: PiRpcBridge,
         readonly model: string,
+        /** The model's context window, as the agent reported it at start. */
+        private readonly _contextWindow: number | undefined,
         private readonly _onExit: (error: Error | null) => void,
     ) {
         // Outbound omp frames; each case below reads only the fields it checks.
@@ -133,7 +135,8 @@ export class VoiceLlm {
             await bridge.setHostTools(options.tools);
             const state = await bridge.getState();
             const model = state.model ? `${state.model.provider}/${state.model.id}` : 'unknown';
-            return new VoiceLlm(bridge, model, onExit);
+            const contextWindow = state.model?.contextWindow;
+            return new VoiceLlm(bridge, model, typeof contextWindow === 'number' && contextWindow > 0 ? contextWindow : undefined, onExit);
         } catch (err) {
             await bridge.stop();
             throw err;
@@ -243,6 +246,7 @@ export class VoiceLlm {
                         cacheRead: usage.cacheRead ?? 0,
                         cacheWrite: usage.cacheWrite ?? 0,
                         cost: usage.cost?.total ?? 0,
+                        ...(this._contextWindow ? { contextWindow: this._contextWindow } : {}),
                     });
                 }
                 return;

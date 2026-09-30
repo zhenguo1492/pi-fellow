@@ -1,10 +1,11 @@
 /**
- * The floating translation of one sentence (Alt+right-click, sentencePick.ts) into the
- * `translateTo` language, after EchoRead's translation panel (echo-read-edge
- * src/content/components/TranslationPanel.tsx): under the sentence, or above it when there is more
- * room there, its arrow at the end of the sentence, which stays highlighted while it is open. It
- * floats over the whole webview and keeps within the area the sentence scrolls in; it follows the
- * sentence as that scrolls or is drawn again, and closes once the sentence is no longer shown.
+ * The floating translation of one sentence (Alt+right-click, sentencePick.ts), paragraph
+ * (Alt+Shift+right-click) or selection (Translate, selectionToolbar.ts) into the `translateTo`
+ * language, after EchoRead's translation panel (echo-read-edge
+ * src/content/components/TranslationPanel.tsx): under the text, or above it when there is more
+ * room there, its arrow at the end of the text, which stays highlighted while it is open. It
+ * floats over the whole webview and keeps within the area the text scrolls in; it follows the
+ * text as that scrolls or is drawn again, and closes once the text is no longer shown.
  * Escape, a press outside it, or × close it.
  */
 import { translationLanguage, type TranslationLanguage } from '../shared/translationLanguages';

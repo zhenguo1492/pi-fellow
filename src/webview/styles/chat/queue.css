@@ -1,0 +1,212 @@
+/* Pending steering / follow-up messages and the queued section. */
+
+/* ── Pending steering / follow-up (chat) ── */
+.pending-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 16px 4px;
+}
+.pending-messages--steering {
+    padding: 6px 0 0;
+}
+.pending-message {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px dashed var(--border);
+    background: color-mix(in srgb, var(--warning-fg) 6%, transparent);
+    font-size: 12px;
+    line-height: 1.45;
+}
+.pending-message--followup {
+    background: color-mix(in srgb, var(--muted) 8%, transparent);
+}
+.pending-message-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-top: 4px;
+    border-radius: 50%;
+    background: var(--warning-fg);
+    flex-shrink: 0;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+}
+.pending-message--followup .pending-message-indicator {
+    background: var(--muted);
+    animation: none;
+}
+.committed-steering .pending-message-indicator {
+    animation: none;
+}
+.pending-message-label {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--warning-fg);
+}
+.pending-message--followup .pending-message-label {
+    color: var(--muted);
+}
+.pending-message-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+.pending-message-text {
+    color: var(--fg);
+    opacity: 0.85;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.pending-message-text--collapsed {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+}
+.pending-message-clamp-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 2px;
+}
+
+/* ── Queued messages section ── */
+.queued-section {
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+}
+.queued-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    outline: none;
+    color: var(--muted);
+    transition: color 0.15s;
+}
+.queued-summary::-webkit-details-marker { display: none; }
+.queued-summary::marker { display: none; content: ''; }
+.queued-summary:hover { color: var(--fg); }
+.queued-chevron {
+    font-size: 10px;
+    display: inline-block;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+}
+.queued-section[open] .queued-chevron {
+    transform: rotate(90deg);
+}
+.queued-count {
+    font-size: 12px;
+    color: var(--muted);
+}
+.queued-list {
+    border-top: 1px solid var(--border);
+}
+.queued-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 14px;
+}
+.queued-item:hover {
+    background: var(--tint-faint);
+}
+.queued-item-icon {
+    color: var(--muted);
+    font-size: 10px;
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+}
+.queued-item-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg);
+}
+.queued-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.queued-item-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 3px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+.queued-item-btn:hover {
+    background: var(--tint-strong);
+}
+.queued-btn-icon {
+    width: 12px;
+    height: 12px;
+    filter: brightness(0) invert(0.6);
+    display: block;
+}
+.queued-item-btn:hover .queued-btn-icon {
+    filter: brightness(0) invert(1);
+}
+.queued-btn-svg {
+    display: block;
+    color: var(--muted);
+}
+.queued-item-btn:hover .queued-btn-svg {
+    color: var(--fg);
+}
+
+/* Inline edit mode */
+.queued-item-editing {
+    gap: 6px;
+}
+.queued-edit-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+}
+.queued-edit-input:focus {
+    border-color: var(--focus-border);
+}
+.queued-edit-save,
+.queued-edit-cancel {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 13px;
+    color: var(--muted);
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+.queued-edit-save:hover {
+    background: color-mix(in srgb, var(--success-fg) 15%, transparent);
+    color: var(--success-fg);
+}
+.queued-edit-cancel:hover {
+    background: color-mix(in srgb, var(--error-fg) 15%, transparent);
+    color: var(--error-fg);
+}

@@ -12,16 +12,17 @@
  * the user types; without TTS nothing is synthesized or played and replies are only shown as
  * text; without both there is no audio page at all, and voice mode is a typed conversation.
  */
-import { voiceUserText, type VoiceAttachments, type VoiceUnavailable } from '../shared/voiceViewProtocol';
+import { voiceUserText, type VoiceAttachments, type VoiceSpeechCall, type VoiceUnavailable } from '../shared/voiceViewProtocol';
 import type { CodeAnchor } from './codeAnchors';
 import { echoSource, floorFree, initialState, phaseOf, reduce, type ConvEvent, type ConvState, type Effect, type Metrics, type Phase } from './conversation';
 import { classifyBargeIn, isEchoOf, isHallucination, type BargeInVerdict } from './echoFilter';
 import { findChrome, launchHiddenChrome, startBrowserAudio, type BrowserAudio, type PlaybackReport } from './browserAudio';
 import type { ReplayOutput } from './replay';
+import { ClipLevelMeter } from './botLevel';
 import { TtsClient, type Pcm, type TtsRequestConfig } from './tts';
 import type { ProactiveTurnHooks, VoiceAgent, VoiceTurnListener } from './voiceAgent';
 import { SileroVad, VAD_FRAME_SAMPLES, VAD_SAMPLE_RATE } from '../voice/sileroVad';
-import { MicLevelMeter, frameDb, wavePoints } from '../voice/micLevel';
+import { MicLevelMeter, frameDb } from '../voice/micLevel';
 import { SpeechSegmenter } from '../voice/speechSegmenter';
 import { SHORT_SPEECH_SECS, describeVerdict, transcribeChecked, voiceVetoesBargeIn, type SpeechGate } from '../voice/speakerGate';
 import { SttClient, listSttModels, type SttConfig } from '../voice/stt';
@@ -76,6 +77,8 @@ export interface VoiceModeOptions {
      * its audio, sentence by sentence as sent to TTS, for the replay cache.
      */
     onSpoken?(turnId: number, pieces: Array<{ text: string; pcm: Pcm }>): void;
+    /** Each STT or TTS request that returned: what it used, for the Bot view's usage. */
+    onSpeechUsage?(usage: VoiceSpeechCall): void;
     log(line: string): void;
     /**
      * A speech service failed mid-session, the first time since it last worked (`message` in plain
@@ -129,11 +132,6 @@ const BARGE_IN_GAP_MS = 800;
 /** Audio kept in front of a candidate (0.5 s). */
 const BARGE_IN_PREROLL_FRAMES = 16;
 const MAX_SEGMENT_SECS = 28;
-/** One bot level report per this much played audio (≈16 Hz, like the microphone's). */
-const BOT_LEVEL_MS = 64;
-/** dBFS mapped to bot level 0 and 1: TTS output is normalized loud, speech sits around -25..-10. */
-const BOT_FLOOR_DB = -45;
-const BOT_CEIL_DB = -15;
 /** After a replay has played, the microphone stays held this much longer: the room's echo tail. */
 const REPLAY_TAIL_MS = 300;
 /** Speech starting this soon after a replay is checked against its text and dropped if it is the echo. */
@@ -240,7 +238,7 @@ export class VoiceMode {
     ) {
         this._audio = devices.audio;
         this._vad = devices.vad;
-        this._stt = devices.stt && new SttClient(devices.stt);
+        this._stt = devices.stt && this._sttClient(devices.stt);
         this._speaker = devices.tts && this._newSpeaker(devices.tts);
         this._state = initialState(_options.active, this._speaker !== undefined);
         this._segmenter = this._newSegmenter();
@@ -250,7 +248,7 @@ export class VoiceMode {
     /** Plays on the audio page, which is open whenever replies are voiced. */
     private _newSpeaker(tts: TtsRequestConfig): Speaker {
         return new Speaker(
-            new TtsClient(tts),
+            this._ttsClient(tts),
             {
                 play: (pcm) => {
                     const clipId = this._nextClipId++;
@@ -268,6 +266,14 @@ export class VoiceMode {
             (level, wave) => this._options.onBotLevel?.(level, wave),
             (message) => this._options.onServiceError?.('tts', message),
         );
+    }
+
+    private _sttClient(config: SttConfig): SttClient {
+        return new SttClient(config, (usage) => this._options.onSpeechUsage?.({ service: 'stt', ...usage }));
+    }
+
+    private _ttsClient(config: TtsRequestConfig): TtsClient {
+        return new TtsClient(config, (usage) => this._options.onSpeechUsage?.({ service: 'tts', ...usage }));
     }
 
     /** The STT model in use: the configured one, else the first the server listed ('' if unknown or no STT). */
@@ -301,7 +307,7 @@ export class VoiceMode {
             return;
         }
         if (this._stt) {
-            this._stt = new SttClient(config);
+            this._stt = this._sttClient(config);
             this._sttModel = config.model.trim();
             this._sttFailed = false;
             return;
@@ -316,7 +322,7 @@ export class VoiceMode {
                 return;
             }
             this._vad = vad;
-            this._stt = new SttClient(config);
+            this._stt = this._sttClient(config);
             this._sttModel = config.model.trim() || (models[0] ?? '');
             this._sttFailed = false;
             this._dropHeardAudio();
@@ -341,7 +347,7 @@ export class VoiceMode {
             return;
         }
         if (this._speaker) {
-            this._speaker.setClient(new TtsClient(config));
+            this._speaker.setClient(this._ttsClient(config));
             return;
         }
         try {
@@ -1129,25 +1135,6 @@ function concatFrames(frames: Int16Array[]): Int16Array {
     return pcm;
 }
 
-/** Level (0..1) and waveform of each {@link BOT_LEVEL_MS} of a clip: what the voice bar shows as it plays. */
-function speechLevels(pcm: Pcm): { level: number; wave: number[] }[] {
-    const window = Math.max(1, Math.round((pcm.rate * BOT_LEVEL_MS) / 1000));
-    const samples = new Int16Array(pcm.data.length >> 1);
-    for (let i = 0; i < samples.length; i++) {
-        samples[i] = pcm.data.readInt16LE(i * 2);
-    }
-    const out: { level: number; wave: number[] }[] = [];
-    for (let start = 0; start < samples.length; start += window) {
-        const end = Math.min(samples.length, start + window);
-        const db = frameDb(samples.subarray(start, end));
-        out.push({
-            level: Math.min(1, Math.max(0, (db - BOT_FLOOR_DB) / (BOT_CEIL_DB - BOT_FLOOR_DB))),
-            wave: wavePoints(samples, start, end, BOT_CEIL_DB),
-        });
-    }
-    return out;
-}
-
 interface Clip {
     turnId: number;
     text: string;
@@ -1179,7 +1166,9 @@ class Speaker {
     /** Armed while nothing is synthesizing or playing: the bot has fallen silent once it fires. */
     private _fallback: NodeJS.Timeout | undefined;
     /** Reports the level of the clip playing now, timed from the page's `started` report. */
-    private _meter: { clipId: number; timer: NodeJS.Timeout } | undefined;
+    private readonly _meter: ClipLevelMeter;
+    /** The clip `_meter` reports. */
+    private _meterClip: number | undefined;
     /** The audio of the reply being spoken, sentence by sentence; `undefined` for a sentence TTS failed on. */
     private _spoken: { turnId: number; pieces: Array<{ text: string; pcm?: Pcm }> } | undefined;
 
@@ -1188,10 +1177,12 @@ class Speaker {
         private readonly _audio: SpeakerAudio,
         private readonly _dispatch: (ev: ConvEvent) => void,
         private readonly _log: (line: string) => void,
-        private readonly _onLevel: (level: number, wave?: number[]) => void,
+        onLevel: (level: number, wave?: number[]) => void,
         /** TTS failed, the first time since it last worked: what went wrong, in plain words. */
         private readonly _onError: (message: string) => void,
-    ) {}
+    ) {
+        this._meter = new ClipLevelMeter(onLevel);
+    }
 
     enqueue(signal: AbortSignal, turnId: number, text: string, onPlaying?: () => void): void {
         if (signal.aborted) {
@@ -1231,14 +1222,15 @@ class Speaker {
         const { clip } = entry;
         if (report.type === 'started') {
             entry.started = true;
-            this._meterStart(report.clipId, entry.pcm, report.at);
+            this._meterClip = report.clipId;
+            this._meter.start(entry.pcm, report.at);
             this._dispatch({ type: 'sentencePlaying', turnId: clip.turnId, text: clip.text, durationMs: report.durationMs, at: report.at });
             clip.onPlaying?.();
             return;
         }
         this._onPage.delete(report.clipId);
-        if (this._meter?.clipId === report.clipId) {
-            this._meterStop();
+        if (this._meterClip === report.clipId) {
+            this._meter.stop();
         }
         if (entry.started) {
             this._dispatch({ type: 'sentencePlayed', turnId: clip.turnId, text: clip.text, at: report.at });
@@ -1250,7 +1242,7 @@ class Speaker {
 
     private _silence(): void {
         this._queue = [];
-        this._meterStop();
+        this._meter.stop();
         this._onPage.clear();
         this._audio.flush();
         clearTimeout(this._fallback);
@@ -1296,30 +1288,6 @@ class Speaker {
         this._pumping = false;
         if (last) {
             this._maybeIdle(last);
-        }
-    }
-
-    private _meterStart(clipId: number, pcm: Pcm, at: number): void {
-        clearInterval(this._meter?.timer);
-        const windows = speechLevels(pcm);
-        const timer = setInterval(() => {
-            // The window playing now; a late tick skips ahead rather than replaying what was heard.
-            const i = Math.floor((Date.now() - at) / BOT_LEVEL_MS);
-            if (i >= windows.length) {
-                this._meterStop();
-                return;
-            }
-            const { level, wave } = windows[Math.max(0, i)];
-            this._onLevel(level, wave);
-        }, BOT_LEVEL_MS);
-        this._meter = { clipId, timer };
-    }
-
-    private _meterStop(): void {
-        if (this._meter) {
-            clearInterval(this._meter.timer);
-            this._meter = undefined;
-            this._onLevel(0);
         }
     }
 

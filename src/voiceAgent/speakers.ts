@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AVATAR_PRESETS, ICON_PRESETS, avatarPresetMouthSrcs, avatarPresetSrc } from '../shared/avatarPresets';
+import { AVATAR_PRESETS, ICON_PRESETS, avatarPresetSrc, avatarPresetThinking } from '../shared/avatarPresets';
 import {
     avatarImageMime,
     parseAvatarSetting,
@@ -76,7 +76,7 @@ async function resolveAvatar(raw: unknown): Promise<VoiceAvatar | undefined> {
             const ids = [...ICON_PRESETS, ...AVATAR_PRESETS].map((p) => p.id).join(', ');
             throw new Error(`There is no avatar preset "${setting.id}": pick one of ${ids}.`);
         }
-        return { kind: 'image', src, mouthSrcs: avatarPresetMouthSrcs(setting.id) };
+        return { kind: 'image', src, think: avatarPresetThinking(setting.id) };
     }
     const file = avatarPath(setting.path);
     const mime = avatarImageMime(file);

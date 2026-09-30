@@ -3,16 +3,18 @@
  * settings page. Pictures are scaled down to a small square first: the setting's data URI can be
  * megabytes, and the Bot view repeats the avatar on every turn.
  */
+import type { AvatarThinking } from '../shared/avatarPresets';
 import { escapeHtml } from '../shared/html';
 import type { VoiceAvatar, VoiceSpeakerId } from '../shared/voiceSpeakers';
 
 /**
- * The robot: the voice agent's default avatar, and the button that starts voice mode. Its mouth
- * (`.av-mouth`) and antenna light (`.av-antenna`) move in the voice bar (avatarMotion.ts); the
- * mouth is hidden elsewhere.
+ * The robot: the voice agent's default avatar, and the button that starts voice mode. Its face
+ * holds a screen of log lines (`.av-screen`, hidden by its `visibility` attribute) that replaces the
+ * eyes (`.av-eyes`) and scrolls while the voice agent thinks (styles/chat/voiceBar.css); the lines
+ * repeat every 8 units, one tile past the screen, so the scroll wraps seamlessly.
  */
 export const ICON_ROBOT =
-    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="5" width="11" height="8.5" rx="2.5"/><path d="M8 5V2.75"/><circle class="av-antenna" cx="8" cy="2.25" r=".75" fill="currentColor" stroke="none"/><circle cx="5.75" cy="9" r="1" fill="currentColor" stroke="none"/><circle cx="10.25" cy="9" r="1" fill="currentColor" stroke="none"/><rect class="av-mouth" x="5.5" y="10.4" width="5" height="2.3" rx=".7" fill="currentColor" stroke="none" opacity="0"/><path d="M1 8.25v2M15 8.25v2"/></svg>';
+    '<svg class="av-robot" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="5" width="11" height="8.5" rx="2.5"/><path d="M8 5V2.75"/><circle cx="8" cy="2.25" r=".75" fill="currentColor" stroke="none"/><g class="av-eyes" fill="currentColor" stroke="none"><circle cx="5.75" cy="9" r="1"/><circle cx="10.25" cy="9" r="1"/></g><svg class="av-screen" x="4" y="6.5" width="8" height="5.5" viewBox="0 0 8 5.5" visibility="hidden"><g class="av-log" fill="currentColor" stroke="none"><rect y=".5" width="7" height="1" rx=".5"/><rect y="2.5" width="4" height="1" rx=".5"/><rect y="4.5" width="5.5" height="1" rx=".5"/><rect y="6.5" width="3" height="1" rx=".5"/><rect y="8.5" width="7" height="1" rx=".5"/><rect y="10.5" width="4" height="1" rx=".5"/><rect y="12.5" width="5.5" height="1" rx=".5"/></g></svg><path d="M1 8.25v2M15 8.25v2"/></svg>';
 
 /** Shown when no avatar is set, or its picture does not load. */
 export const DEFAULT_AVATAR: Readonly<Record<VoiceSpeakerId, string>> = {
@@ -49,10 +51,21 @@ async function shrink(src: string): Promise<string | undefined> {
 }
 
 /**
+ * Thinking animations of the pictures drawn (pixel-art presets), frames scaled as the picture is,
+ * by the picture's `src`: kept here rather than in the markup, which the Bot view repeats on every turn.
+ */
+const thinkings = new Map<string, AvatarThinking>();
+
+/** The thinking animation of a picture from {@link avatarMarkup} (`img[data-think]`), by its resting `src`. */
+export function avatarThinking(src: string): AvatarThinking | undefined {
+    return thinkings.get(src);
+}
+
+/**
  * The inside of an avatar box: the picture, the text, one of the default icons, or `fallback` (the
- * speaker's own default icon) when there is no avatar or the picture does not load. A picture with
- * talking frames carries them in `data-mouth` (space-separated, half then wide open), decoded ahead
- * so swapping to them never flickers.
+ * speaker's own default icon) when there is no avatar or the picture does not load. A picture
+ * with a thinking animation is marked `data-think`; its frames are decoded ahead, so swapping to
+ * one never flickers.
  */
 export async function avatarMarkup(avatar: VoiceAvatar | undefined, fallback: string): Promise<string> {
     if (avatar?.kind === 'icon') {
@@ -62,19 +75,22 @@ export async function avatarMarkup(avatar: VoiceAvatar | undefined, fallback: st
         return `<span class="av-text">${escapeHtml(avatar.text)}</span>`;
     }
     if (avatar?.kind === 'image') {
-        const [src, ...shrunk] = await Promise.all([avatar.src, ...(avatar.mouthSrcs ?? [])].map(shrink));
-        const mouth = shrunk.filter((frame) => frame !== undefined);
-        // Loaded once in this document, a swap to a frame is synchronous.
-        await Promise.all(
-            mouth.map((frame) => {
-                const img = new Image();
-                img.src = frame;
-                return img.decode().catch(() => undefined);
-            }),
-        );
-        if (src) {
-            return `<img class="av-img" src="${src}"${mouth.length ? ` data-mouth="${mouth.join(' ')}"` : ''} alt="">`;
+        const [src, ...frames] = await Promise.all([avatar.src, ...(avatar.think?.frames ?? [])].map(shrink));
+        if (!src) {
+            return fallback;
         }
+        if (avatar.think && frames.every((frame): frame is string => frame !== undefined)) {
+            await Promise.all(
+                frames.map((frame) => {
+                    const img = new Image();
+                    img.src = frame;
+                    return img.decode().catch(() => undefined);
+                }),
+            );
+            thinkings.set(src, { frames, play: avatar.think.play });
+            return `<img class="av-img" src="${src}" data-think alt="">`;
+        }
+        return `<img class="av-img" src="${src}" alt="">`;
     }
     return fallback;
 }

@@ -1,0 +1,222 @@
+/* Extension UI cards (plan_mode_question, ask_user, confirm) and TUI dialogs. */
+
+/* Extension UI (plan_mode_question, ask_user, confirm) */
+.extension-ui-host {
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+    position: relative;
+    z-index: 20;
+    flex-shrink: 0;
+}
+
+.extension-chrome-strip {
+    border-bottom: 1px solid var(--border);
+    padding: 6px 10px;
+    background: color-mix(in srgb, var(--card-bg) 80%, var(--bg));
+    max-height: 120px;
+    overflow-y: auto;
+    font-size: 10px;
+    line-height: 1.35;
+    flex-shrink: 0;
+}
+
+.extension-chrome-widget-title {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 2px;
+}
+
+.extension-chrome-widget-line {
+    color: var(--fg);
+    opacity: 0.9;
+    white-space: pre-wrap;
+}
+
+.extension-ui-card {
+    margin: 8px 10px 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-lg);
+    border: 1px solid color-mix(in srgb, var(--user-accent) 28%, var(--border));
+    background: color-mix(in srgb, var(--user-accent) 5%, var(--surface-raised));
+    box-shadow: 0 4px 16px color-mix(in srgb, #000 16%, transparent);
+    animation: extension-ui-in 0.18s ease-out;
+}
+
+@keyframes extension-ui-in {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.extension-ui-option-desc {
+    display: block;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 2px;
+    line-height: 1.35;
+}
+
+.extension-ui-header {
+    margin-bottom: 10px;
+}
+
+.extension-ui-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--violet) 45%, var(--fg));
+    background: color-mix(in srgb, var(--violet) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--violet) 35%, transparent);
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin-bottom: 6px;
+}
+
+.extension-ui-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg);
+    line-height: 1.4;
+}
+
+.extension-ui-subtitle {
+    margin: 4px 0 0;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.35;
+}
+
+.extension-ui-message {
+    margin: 4px 0 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* A TUI dialog no card can answer: its screen text, as is. */
+.extension-ui-screen {
+    margin: 0 0 8px;
+    max-height: 16em;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--fg);
+    white-space: pre;
+}
+
+.extension-ui-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.extension-ui-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--border) 88%, var(--fg) 8%);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 2%, var(--bg));
+    color: var(--fg);
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.extension-ui-option:hover {
+    background: color-mix(in srgb, var(--user-accent) 8%, var(--bg));
+    border-color: color-mix(in srgb, var(--user-accent) 30%, var(--border));
+}
+
+.extension-ui-letter {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--violet) 25%, transparent);
+    color: color-mix(in srgb, var(--violet) 25%, var(--fg));
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.extension-ui-option-text {
+    flex: 1;
+    line-height: 1.4;
+}
+
+.extension-ui-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--input-bg);
+    color: var(--fg);
+    font-size: 12px;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 48px;
+}
+
+.extension-ui-textarea:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--violet) 50%, transparent);
+}
+
+.extension-ui-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.extension-ui-btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--tint);
+    color: var(--fg);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.extension-ui-btn:hover {
+    background: var(--tint-strong);
+}
+
+.extension-ui-btn.primary {
+    background: color-mix(in srgb, var(--violet) 35%, transparent);
+    border-color: color-mix(in srgb, var(--violet) 50%, transparent);
+    color: var(--fg);
+}
+
+.extension-ui-btn.primary:hover {
+    background: color-mix(in srgb, var(--violet) 50%, transparent);
+}
+
+.extension-ui-btn.ghost {
+    background: transparent;
+    color: var(--muted);
+}

@@ -1,0 +1,153 @@
+/* Errors, TUI auth banner, connection banner, toasts. */
+
+/* ── Error ── */
+.error-message {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    color: var(--error-fg);
+    font-size: 12px;
+    background: color-mix(in srgb, var(--error-fg) 8%, transparent);
+    border-left: 3px solid var(--error-fg);
+    margin: 4px 0;
+}
+.error-message-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.error-message-dismiss,
+.connection-banner-dismiss {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: auto;
+    transition: background 0.15s, color 0.15s;
+}
+.error-message-dismiss:hover,
+.connection-banner-dismiss:hover {
+    background: var(--tint-strong);
+    color: var(--fg);
+}
+
+/* /login|/logout hand-off to TUI mode */
+.tui-auth-banner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-size: 12px;
+    color: var(--fg);
+    background: color-mix(in srgb, var(--link) 8%, transparent);
+    border-left: 3px solid var(--link);
+}
+.tui-auth-banner-text {
+    flex: 1 1 200px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.tui-auth-banner-btn {
+    padding: 3px 10px;
+    font-size: 12px;
+    color: var(--btn-fg);
+    background: var(--btn-bg);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.tui-auth-banner-btn:hover {
+    background: var(--btn-hover);
+}
+
+.message-error {
+    margin-top: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--error-fg);
+    background: color-mix(in srgb, var(--error-fg) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--error-fg) 25%, transparent);
+    border-radius: var(--radius);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* ── Connection / retry banner (above composer) ── */
+.connection-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    line-height: 1.4;
+}
+.connection-banner-connecting {
+    color: var(--muted);
+}
+.connection-banner-retrying {
+    background: color-mix(in srgb, var(--warning-fg) 8%, transparent);
+    color: var(--warning-fg);
+}
+.connection-banner-failed {
+    background: color-mix(in srgb, var(--error-fg) 8%, transparent);
+    color: var(--error-fg);
+}
+.connection-banner-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-top: 2px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    flex-shrink: 0;
+    animation: connection-spin 0.8s linear infinite;
+}
+@keyframes connection-spin {
+    to { transform: rotate(360deg); }
+}
+.connection-banner-title {
+    font-weight: 600;
+    flex-shrink: 0;
+}
+.connection-banner-detail {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+.connection-banner-failed .connection-banner-detail {
+    color: var(--error-fg);
+    opacity: 0.9;
+}
+
+/* ── Toast ── */
+.chat-toast {
+    position: fixed;
+    bottom: 88px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    padding: 6px 14px;
+    font-size: 11px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+    box-shadow: 0 8px 24px color-mix(in srgb, #000 25%, transparent);
+    pointer-events: none;
+}
+
+.chat-toast--error {
+    border-color: color-mix(in srgb, var(--error-fg) 40%, var(--border));
+    color: var(--error-fg);
+}

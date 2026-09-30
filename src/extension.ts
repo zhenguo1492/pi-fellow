@@ -296,13 +296,14 @@ export function activate(context: vscode.ExtensionContext): void {
             activateBuiltinVoiceEngine({
                 serverPath: path.join(context.extensionPath, 'out', 'voice-engine', 'server.js'),
                 modelRoot: path.join(context.globalStorageUri.fsPath, 'voice-models'),
+                runtimeRoot: path.join(context.globalStorageUri.fsPath, 'voice-runtime'),
                 features: builtinEngineFeatures,
                 log: (line) => outputChannel.appendLine(`[voice engine] ${line}`),
                 withDownloadProgress: (totalBytes, download) =>
                     vscode.window.withProgress(
                         {
                             location: vscode.ProgressLocation.Notification,
-                            title: `Downloading voice models (~${Math.max(1, Math.round(totalBytes / 1e6))} MB, first use only)…`,
+                            title: `Downloading the built-in voice engine (~${Math.max(1, Math.round(totalBytes / 1e6))} MB, first use only)…`,
                             cancellable: true,
                         },
                         async (progress, token) => {
@@ -319,7 +320,7 @@ export function activate(context: vscode.ExtensionContext): void {
                                 }, abort.signal);
                             } catch (err) {
                                 // An AbortError: the user's choice, not the engine failing (voice readiness ignores it).
-                                throw abort.signal.aborted ? new DOMException('The download of the built-in voice models was cancelled', 'AbortError') : err;
+                                throw abort.signal.aborted ? new DOMException('The download of the built-in voice engine was cancelled', 'AbortError') : err;
                             } finally {
                                 cancel.dispose();
                             }

@@ -1,0 +1,65 @@
+/* TUI mode (a terminal per tab) and the Bot view host. */
+
+/* ── TUI mode: each tab body is an embedded terminal running the CLI's TUI ── */
+.tui-host {
+    display: none;
+    position: relative;
+    flex: 1;
+    min-height: 0;
+}
+
+#app.tui-mode .tui-host {
+    display: block;
+}
+
+#app.tui-mode .messages,
+#app.tui-mode .scroll-btn-wrap,
+#app.tui-mode #mode-switch {
+    display: none;
+}
+
+/* The terminal is the composer; the input box keeps only the voice agent's bar, its approval cards, and
+   the cards for the TUI's own dialogs. */
+#app.tui-mode .input-container > :not(.voice-bar, .tool-approval-host, .extension-ui-host) {
+    display: none !important;
+}
+
+#app.tui-mode .voice-bar {
+    border-bottom: 0;
+    border-radius: calc(var(--radius-lg) - 1px);
+}
+
+#app.tui-mode .tool-approval-host .tool-approval-card {
+    margin-bottom: 8px;
+}
+
+.tui-pane {
+    display: none;
+    position: absolute;
+    inset: 2px 0 0 6px;
+}
+
+.tui-pane--active {
+    display: block;
+}
+
+.tui-pane .xterm {
+    height: 100%;
+}
+
+/* ── Bot view: a tab shows the voice agent's conversation instead of its own ── */
+.bot-host {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+}
+
+#app.bot-mode .bot-host {
+    display: flex;
+}
+
+#app.bot-mode .messages,
+#app.bot-mode .scroll-btn-wrap {
+    display: none;
+}

@@ -1,21 +1,23 @@
 import { escapeHtml } from '../../shared/html';
-import type { AgentBackend, McpServerSummary, McpSettingsSnapshot, PiAgentConfigData, SettingsData } from '../../shared/protocol';
+import type { McpClient, McpServerSummary, McpSettingsSnapshot, SettingsData } from '../../shared/protocol';
 import { vscode } from './api';
 import { buildSection, el, showToast } from './dom';
-import { emptyPiConfig } from './piConfig';
 import { settingsState } from './state';
 import { buildTabPanel } from './tabs';
 
 export function buildMcpTab(data: SettingsData): HTMLElement {
-    const cfg = data.piConfig ?? emptyPiConfig();
-    return buildTabPanel('mcp', [buildMcpSection(data, cfg)]);
+    return buildTabPanel('mcp', [buildMcpSection(data)]);
 }
 
-function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElement {
+function buildMcpSection(data: SettingsData): HTMLElement {
     const snap = settingsState.mcpSnapshot ?? data.mcpSnapshot;
     const children: HTMLElement[] = [];
 
-    children.push(buildMcpHelpBlock(snap, cfg, data.backend));
+    // Until the snapshot arrives, only omp's client is known: pi's depends on its packages and version.
+    const client = snap?.client ?? (data.backend === 'omp' ? 'omp' : undefined);
+    if (client) {
+        children.push(buildMcpHelpBlock(snap, client));
+    }
 
     if (!snap) {
         const loading = el('p', 'setting-description');
@@ -24,8 +26,8 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
         return buildSection('MCP servers', children, 'mcp');
     }
 
-    if (!snap.hasMcpAdapter && data.backend !== 'omp') {
-        children.push(buildMcpAdapterWarning());
+    if (snap.clientMissing) {
+        children.push(buildMcpClientWarning(snap.clientMissing));
     }
 
     const pathsRow = el('div', 'setting-row mcp-paths');
@@ -38,9 +40,9 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
         )
         .join('');
     const precedence =
-        data.backend === 'omp'
-            ? 'Highest precedence first; the first file that defines a server wins.'
-            : 'Highest precedence first; pi-mcp-adapter merges a server’s fields across files, higher files winning.';
+        snap.client === 'pi-adapter'
+            ? 'Highest precedence first; pi-mcp-adapter merges a server’s fields across files, higher files winning.'
+            : 'Highest precedence first; the first file that defines a server wins.';
     pathsRow.innerHTML = `
         <div class="setting-label-row"><label>Config files</label></div>
         <p class="setting-description">${precedence}</p>
@@ -70,23 +72,34 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
     return buildSection('MCP servers', children, 'mcp');
 }
 
-function buildMcpHelpBlock(
-    snap: McpSettingsSnapshot | null | undefined,
-    cfg: PiAgentConfigData,
-    backend: AgentBackend = 'pi',
-): HTMLElement {
+const CLIENT_LABEL: Record<McpClient, string> = {
+    omp: 'omp native',
+    'pi-builtin': 'pi built-in',
+    'pi-adapter': 'pi-mcp-adapter',
+};
+
+function buildMcpHelpBlock(snap: McpSettingsSnapshot | null | undefined, client: McpClient): HTMLElement {
     const row = el('div', 'setting-row mcp-help');
-    const body =
-        backend === 'omp'
-            ? `<ol>
+    let body: string;
+    if (client === 'omp') {
+        body = `<ol>
                    <li>Oh My Pi has a built-in MCP client; no adapter package is needed.</li>
                    <li>Define servers in project <code>.omp/mcp.json</code> or user <code>~/.omp/agent/mcp.json</code>; root <code>mcp.json</code> / <code>.mcp.json</code> are read as a portable fallback. omp also picks up Claude Code, Cursor, Codex, Gemini and VS Code MCP configs, which are not listed here — <code>/mcp list</code> in chat shows every source.</li>
                    <li>Disabling a server sets <code>"enabled": false</code> on its entry. <code>disabledServers</code> / <code>enabledServers</code> in the user mcp.json override any source.</li>
                    <li>After changes, use <strong>Reload active session</strong> (or <code>/mcp reload</code> in chat).</li>
                </ol>
-               <p>Each connected server’s tools are registered directly, as <code>mcp__&lt;server&gt;_&lt;tool&gt;</code> tools.</p>`
-            : `<ol>
-                   <li>Install <code>npm:pi-mcp-adapter</code> in Packages (you have ${cfg.packages.some((p) => p.includes('pi-mcp-adapter')) ? 'it' : 'not yet'}).</li>
+               <p>Each connected server’s tools are registered directly, as <code>mcp__&lt;server&gt;_&lt;tool&gt;</code> tools.</p>`;
+    } else if (client === 'pi-builtin') {
+        body = `<ol>
+                   <li>pi has a built-in MCP client (its <code>mcp</code> extension); no package is needed. Installing <code>npm:pi-mcp-adapter</code> replaces it.</li>
+                   <li>Define servers in user <code>~/.pi/agent/mcp.json</code> or, for trusted projects, <code>.pi/mcp.json</code>; a project entry replaces a user entry of the same name.</li>
+                   <li>Disabling a server sets <code>"enabled": false</code> on its entry.</li>
+                   <li>After changes, use <strong>Reload active session</strong>; <code>/mcp</code> in chat shows live status, sign-ins and reconnects.</li>
+               </ol>
+               <p>Tools are named <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>. A server’s <code>"exposure"</code> decides how the model reaches them: <code>codemode</code> (default) from codemode scripts, <code>deferred</code> through <code>tool_search</code>, <code>direct</code> declared like built-in tools, <code>hidden</code> not at all.</p>`;
+    } else {
+        body = `<ol>
+                   <li><code>npm:pi-mcp-adapter</code> (in Packages) is pi’s MCP client when installed; it replaces pi’s built-in one.</li>
                    <li>Define servers in one of the mcp.json files below — not as separate npm packages per server.</li>
                    <li>Disabling a server sets <code>"disabled": true</code> on its entry.</li>
                    <li>After changes, use <strong>Reload active session</strong>.</li>
@@ -94,20 +107,23 @@ function buildMcpHelpBlock(
                <p><strong>Default (proxy):</strong> The model gets one compact <code>mcp</code> tool (~200 tokens). It calls <code>mcp({ search: "…" })</code> to find tools, then <code>mcp({ tool: "…", args: … })</code>. Servers connect lazily on first use.</p>
                <p><strong>Direct tools:</strong> Set <code>"directTools": true</code> on a server (or globally in <code>mcp.json</code> settings). Tool names and schemas are injected into context — higher token cost, model sees them like built-in tools.</p>
                <p class="setting-description">Current: proxy ${snap?.disableProxyTool ? 'off' : 'on'}, global directTools ${snap?.globalDirectTools ? 'on' : 'off or unset'}.</p>`;
+    }
 
     row.innerHTML = `
         <details class="mcp-help-details">
-            <summary>How the model discovers and uses MCP (${backend === 'omp' ? 'omp native' : 'pi-mcp-adapter'})</summary>
+            <summary>How the model discovers and uses MCP (${CLIENT_LABEL[client]})</summary>
             <div class="mcp-help-body">${body}</div>
         </details>
     `;
     return row;
 }
 
-function buildMcpAdapterWarning(): HTMLElement {
+function buildMcpClientWarning(missing: NonNullable<McpSettingsSnapshot['clientMissing']>): HTMLElement {
     const row = el('div', 'setting-row pi-config-error');
     row.innerHTML =
-        '<strong>pi-mcp-adapter missing.</strong> Add <code>npm:pi-mcp-adapter</code> under Packages, then reload the session. Without it, MCP servers in mcp.json are ignored.';
+        missing === 'builtin-disabled'
+            ? '<strong>No MCP client.</strong> pi’s built-in <code>mcp</code> extension is turned off (<code>builtin:mcp</code> excluded in settings <code>extensions</code>) and <code>npm:pi-mcp-adapter</code> is not installed, so MCP servers in mcp.json are ignored. Turn the built-in one back on (<code>pi config</code> → Built-in extensions) or add the adapter under Packages, then reload the session.'
+            : '<strong>No MCP client.</strong> This pi has no built-in MCP client and <code>npm:pi-mcp-adapter</code> is not installed, so MCP servers in mcp.json are ignored. Update pi or add the adapter under Packages, then reload the session.';
     return row;
 }
 

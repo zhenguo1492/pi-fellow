@@ -110,20 +110,22 @@ export async function planModelDownload(root: string, specs: readonly ModelSpec[
     return { total: items.reduce((sum, item) => sum + item.files.reduce((s, f) => s + f.size, 0), 0), items };
 }
 
+/** The bytes the files under `dir` take on disk. */
+export async function directoryBytes(dir: string): Promise<number> {
+    let bytes = 0;
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        bytes += entry.isDirectory() ? await directoryBytes(full) : (await fs.stat(full)).size;
+    }
+    return bytes;
+}
+
 /** The bytes the installed specs take on disk. */
 export async function installedBytes(root: string, specs: readonly ModelSpec[]): Promise<number> {
-    const sizeOf = async (dir: string): Promise<number> => {
-        let bytes = 0;
-        for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-            const full = path.join(dir, entry.name);
-            bytes += entry.isDirectory() ? await sizeOf(full) : (await fs.stat(full)).size;
-        }
-        return bytes;
-    };
     let total = 0;
     for (const spec of specs) {
         if (await isInstalled(root, spec)) {
-            total += await sizeOf(modelDir(root, spec));
+            total += await directoryBytes(modelDir(root, spec));
         }
     }
     return total;

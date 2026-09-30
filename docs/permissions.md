@@ -43,6 +43,7 @@ For pi, Plan is pi's own plan mode (pi-plan-mode):
 1. Picking Plan first sets `TabState.readOnlyPlan` so the gate is read-only.
 2. Once `setAgentMode('plan')` confirms, control is handed to pi (`releasePlanToPi`). While pi's plan mode is on, the gate allows everything; pi-plan-mode blocks tools in its own `tool_call` handler.
 3. When pi leaves plan mode (Implement, or its own menu), the gate returns to the tab's `permissionBase` (Manual / Edit automatically / Auto).
+4. Without the pi-plan-mode package pi has no `/plan` command, and pi would send an unknown slash command to the model as a prompt. `setAgentMode` checks `get_commands` first and refuses, so the tab stays in Plan through the gate alone (read-only), as on omp.
 
 The title bar only has the Implement button; there is no second Plan toggle.
 

@@ -78,10 +78,11 @@ export interface PiCommandInfo {
 import type { ExtensionUiCard } from './extensionUi';
 
 /**
- * An mcp.json the backend reads. Both: `global` (agent dir mcp.json), `project` (workspace .mcp.json),
- * `projectAgent` (.pi/mcp.json or .omp/mcp.json). pi only: the shared user files `sharedGlobal`
- * (~/.config/mcp/mcp.json), `agentsGlobal` (~/.agents/mcp.json), `agentsNestedGlobal` (~/.agents/mcp/mcp.json).
- * omp only: `globalCompat` (agent dir .mcp.json), `projectAgentCompat` (.omp/.mcp.json), `projectRoot` (mcp.json).
+ * An mcp.json the backend reads. `global` (agent dir mcp.json) and `projectAgent` (.pi/mcp.json or
+ * .omp/mcp.json) everywhere; `project` (workspace .mcp.json) for omp and pi-mcp-adapter. pi-mcp-adapter
+ * only: the shared user files `sharedGlobal` (~/.config/mcp/mcp.json), `agentsGlobal` (~/.agents/mcp.json),
+ * `agentsNestedGlobal` (~/.agents/mcp/mcp.json). omp only: `globalCompat` (agent dir .mcp.json),
+ * `projectAgentCompat` (.omp/.mcp.json), `projectRoot` (mcp.json).
  */
 export type McpScopeId =
     | 'global'
@@ -131,8 +132,21 @@ export interface McpConfigPathInfo {
     exists: boolean;
 }
 
+/**
+ * The MCP client that reads the config: omp's own, pi's built-in `mcp` extension, or the pi-mcp-adapter
+ * package (which replaces the built-in one when installed).
+ */
+export type McpClient = 'omp' | 'pi-builtin' | 'pi-adapter';
+
 export interface McpSettingsSnapshot {
-    hasMcpAdapter: boolean;
+    client: McpClient;
+    /**
+     * Set when pi loads no MCP client at all: `builtin-disabled` (settings `extensions` turn off
+     * `builtin:mcp` and pi-mcp-adapter is not installed), `adapter-missing` (this pi has no built-in
+     * client and pi-mcp-adapter is not installed).
+     */
+    clientMissing?: 'builtin-disabled' | 'adapter-missing';
+    /** pi-mcp-adapter `settings`; unset for the other clients. */
     disableProxyTool: boolean;
     globalDirectTools?: boolean;
     toolPrefix?: string;
@@ -228,7 +242,7 @@ export interface VoiceReadiness {
     tts: VoiceServiceCheck;
 }
 
-/** The built-in engine's models (Settings → Voice, Built-in). */
+/** The built-in engine's runtime and models (Settings → Voice, Built-in). */
 export interface BuiltinVoiceStatus {
     downloaded: boolean;
     /** On disk when downloaded, else what the download fetches; undefined when unknown (offline). */

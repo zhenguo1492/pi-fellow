@@ -22,6 +22,8 @@ export interface EngineConfig {
     token: string;
     /** 0: any free port. */
     port: number;
+    /** The sherpa-onnx-node package directory of the downloaded runtime (./runtime.ts). */
+    sherpaPath: string;
     /** Each model directory given is loaded; one left out leaves its endpoints unavailable. */
     sttDir?: string;
     ttsDir?: string;
@@ -117,8 +119,17 @@ function unavailable(what: string): HttpError {
 
 async function main(): Promise<void> {
     const config = JSON.parse(process.env.OMP_VOICE_ENGINE ?? '') as EngineConfig;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- native addon, kept out of the bundle
-    const sherpa = require('sherpa-onnx-node') as Sherpa;
+    let sherpa: Sherpa;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports -- native addon, downloaded on first use (./runtime.ts)
+        sherpa = require(config.sherpaPath) as Sherpa;
+    } catch (err) {
+        console.error(err instanceof Error ? err.stack : String(err));
+        // The last line is what the extension reports; the error above (its loader's own words) goes to the log only.
+        const runtime = path.dirname(path.dirname(config.sherpaPath));
+        console.error(`Could not load sherpa-onnx (${process.platform}-${process.arch}) from ${runtime}; details are in the voice engine log. Delete that folder to download it again.`);
+        process.exit(1);
+    }
     const { sttDir, ttsDir, speakerDir, denoiseDir } = config;
     const loadStarted = performance.now();
     const [recognizer, synthesizer] = await Promise.all([

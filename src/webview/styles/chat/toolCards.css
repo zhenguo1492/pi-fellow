@@ -1,6 +1,6 @@
 /* Tool cards (src/webview/toolView.ts, src/webview/toolCards/), ported from
    oh-my-pi collab-web tool-render.css. Dense devtool look: mono type,
-   hairlines, 4px radii. Colors come from the VS Code theme via main.css :root. */
+   hairlines, 4px radii. Colors come from the VS Code theme via tokens.css. */
 
 .tv-card {
     --tv-fg: var(--fg);
@@ -191,7 +191,7 @@
     color: var(--tv-faint);
 }
 
-.tv-expand {
+.tv-expand, .tv-copy {
     align-self: flex-start;
     margin-top: 3px;
     padding: 0 1px;
@@ -202,8 +202,8 @@
     color: var(--tv-faint);
     cursor: pointer;
 }
-.tv-expand:hover { color: var(--tv-fg); text-decoration: underline; }
-.tv-expand:focus-visible { outline: 2px solid var(--tv-accent); outline-offset: 1px; border-radius: 2px; }
+:is(.tv-expand, .tv-copy):hover { color: var(--tv-fg); text-decoration: underline; }
+:is(.tv-expand, .tv-copy):focus-visible { outline: 2px solid var(--tv-accent); outline-offset: 1px; border-radius: 2px; }
 
 /* ── bash command line ── */
 

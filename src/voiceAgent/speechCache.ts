@@ -35,9 +35,24 @@ export class SpeechCache {
         return this._clips.size;
     }
 
-    /** The sentence of `entryId`'s audio made with `ttsKey` that reads `text`, if any; a lookup does not make it newer. */
+    /**
+     * The audio made with `ttsKey` that reads `text`, if any: `entryId`'s first, else another
+     * message's (the same words in the same voice sound the same: a selection, or a chat paragraph
+     * quoting a spoken reply). A lookup does not make it newer.
+     */
     piece(entryId: string, ttsKey: string, text: string): SpokenPiece | undefined {
-        return this._clips.get(`${entryId}\u0000${ttsKey}`)?.find((p) => p.text === text);
+        const own = this._clips.get(`${entryId}\u0000${ttsKey}`)?.find((p) => p.text === text);
+        if (own) {
+            return own;
+        }
+        const suffix = `\u0000${ttsKey}`;
+        for (const [key, pieces] of this._clips) {
+            const found = key.endsWith(suffix) ? pieces.find((p) => p.text === text) : undefined;
+            if (found) {
+                return found;
+            }
+        }
+        return undefined;
     }
 
     /** A message's audio as voice mode spoke it, in place of any kept for it. */

@@ -42,6 +42,20 @@ const settingsWebviewConfig = {
 };
 
 /**
+ * The webviews' stylesheets: each entry @imports its modules (src/webview/styles/chat/, tokens.css,
+ * xterm's CSS) into one file. SVG masks are inlined as data URLs (the webview CSP allows data:).
+ */
+const stylesConfig = {
+    entryPoints: ['src/webview/styles/main.css', 'src/webview/styles/settings.css'],
+    bundle: true,
+    outdir: 'out/webview/styles',
+    loader: { '.svg': 'dataurl' },
+    target: 'chrome130',
+    sourcemap: true,
+    minify: false,
+};
+
+/**
  * Loaded by Pi/omp (not VS Code): host tools on the pi backend (src/piExtension/hostTools.ts) and the
  * permission gate of every chat worker (src/piExtension/permissionGate.ts).
  * ESM: Pi's loader rejects a CommonJS `exports.default` as "not a valid factory function".
@@ -58,33 +72,19 @@ const piExtensionConfig = {
 };
 
 /**
- * The built-in voice engine, a separate process (src/voice/builtinEngine/server.ts). sherpa-onnx-node
- * is a native addon: not bundled, copied next to the server by copyVoiceEngineRuntime.
+ * The built-in voice engine, a separate process (src/voice/builtinEngine/server.ts). Its native
+ * runtime (sherpa-onnx) is not bundled: it is downloaded on first use (src/voice/builtinEngine/runtime.ts).
  */
 const voiceEngineConfig = {
     entryPoints: ['src/voice/builtinEngine/server.ts'],
     bundle: true,
     outfile: 'out/voice-engine/server.js',
-    external: ['sherpa-onnx-node'],
     format: 'cjs',
     platform: 'node',
     target: 'node22',
     sourcemap: true,
     minify: false,
 };
-
-async function copyStyles() {
-    const stylesDir = path.join('out', 'webview', 'styles');
-    await fs.promises.mkdir(stylesDir, { recursive: true });
-    const srcDir = path.join('src', 'webview', 'styles');
-    for (const file of await fs.promises.readdir(srcDir)) {
-        await fs.promises.copyFile(path.join(srcDir, file), path.join(stylesDir, file));
-    }
-    await fs.promises.copyFile(
-        require.resolve('@xterm/xterm/css/xterm.css'),
-        path.join(stylesDir, 'xterm.css'),
-    );
-}
 
 /** onnxruntime-web loads these at runtime for the voice-input VAD (src/voice/sileroVad.ts). */
 async function copyOrtRuntime() {
@@ -96,35 +96,25 @@ async function copyOrtRuntime() {
     }
 }
 
-/**
- * sherpa-onnx-node and this platform's prebuilt binaries, as out/voice-engine/node_modules: the VSIX
- * is packaged with --no-dependencies. Its loader finds the binaries in the sibling package directory.
- */
-async function copyVoiceEngineRuntime() {
-    const modulesDir = path.join('out', 'voice-engine', 'node_modules');
-    const platform = process.platform === 'win32' ? 'win' : process.platform;
-    for (const pkg of ['sherpa-onnx-node', `sherpa-onnx-${platform}-${process.arch}`]) {
-        await fs.promises.cp(path.dirname(require.resolve(`${pkg}/package.json`)), path.join(modulesDir, pkg), { recursive: true });
-    }
-}
-
 async function build() {
     if (isWatch) {
-        await Promise.all([copyStyles(), copyOrtRuntime(), copyVoiceEngineRuntime()]);
+        await copyOrtRuntime();
         const extCtx = await esbuild.context(extensionConfig);
         const webCtx = await esbuild.context(webviewConfig);
         const settingsCtx = await esbuild.context(settingsWebviewConfig);
+        const stylesCtx = await esbuild.context(stylesConfig);
         const piExtensionCtx = await esbuild.context(piExtensionConfig);
         const voiceEngineCtx = await esbuild.context(voiceEngineConfig);
-        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), piExtensionCtx.watch(), voiceEngineCtx.watch()]);
+        await Promise.all([extCtx.watch(), webCtx.watch(), settingsCtx.watch(), stylesCtx.watch(), piExtensionCtx.watch(), voiceEngineCtx.watch()]);
         console.log('Watching for changes...');
     } else {
         await esbuild.build(extensionConfig);
         await esbuild.build(webviewConfig);
         await esbuild.build(settingsWebviewConfig);
+        await esbuild.build(stylesConfig);
         await esbuild.build(piExtensionConfig);
         await esbuild.build(voiceEngineConfig);
-        await Promise.all([copyStyles(), copyOrtRuntime(), copyVoiceEngineRuntime()]);
+        await copyOrtRuntime();
         console.log('Build complete.');
     }
 }

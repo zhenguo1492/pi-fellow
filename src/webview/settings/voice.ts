@@ -226,7 +226,7 @@ export function buildSentenceActionsRow(enabled: boolean, translateTo: string): 
                 <span>Read aloud and translate sentences (Alt)</span>
             </label>
         </div>
-        <p class="setting-description">In the Bot view and the chat (prompts, replies, Thought blocks, card text), hold Alt to highlight the sentence under the pointer: Alt+click reads it aloud with the text-to-speech above, Alt+right-click shows its translation in a floating panel (the sentence is sent to Google Translate). Off by default.</p>
+        <p class="setting-description">In the Bot view and the chat (prompts, replies, Thought blocks, card text), hold Alt to highlight the sentence under the pointer: Alt+click reads it aloud with the text-to-speech above, Alt+right-click shows its translation in a floating panel (the text is sent to Google Translate). Hold Shift too (Alt+Shift) for the whole paragraph. Selecting text with the mouse shows Read aloud and Translate buttons for the selection. While text is read aloud, click it to pause or resume, double-click a word to read on from there, click elsewhere or press Escape to stop. Off by default.</p>
         <div class="voice-translate-to">
             <div class="setting-label-row">
                 <label for="setting-voiceAgent.translateTo">Translate into</label>

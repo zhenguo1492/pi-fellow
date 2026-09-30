@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { getKemdiMcpHints } from '../shared/kemdiMcpHints';
 import type {
+    McpClient,
     McpConfigPathInfo,
     McpConnectionStatus,
     McpScopeId,
@@ -13,7 +14,7 @@ import type {
     McpSettingsSnapshot,
 } from '../shared/protocol';
 import type { AgentBackend } from './agentBackend';
-import { getAgentLayout } from './piCliPaths';
+import { getAgentLayout, resolvePiCliInvocation } from './piCliPaths';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,9 +26,11 @@ interface ServerEntry extends JsonObject {
     args?: unknown;
     url?: unknown;
     directTools?: unknown;
+    /** pi's built-in client: how the tools reach the model (`codemode` by default, `direct`, …). */
+    exposure?: unknown;
     /** pi-mcp-adapter: only literal `true` disables (its `isServerDisabled`). */
     disabled?: unknown;
-    /** omp: only literal `false` disables. */
+    /** omp and pi's built-in client: only literal `false` disables. */
     enabled?: unknown;
 }
 
@@ -42,13 +45,15 @@ interface McpSource {
 
 interface McpContext {
     backend: AgentBackend;
+    client: McpClient;
+    clientMissing?: McpSettingsSnapshot['clientMissing'];
     agentDir: string;
     cwd: string;
     home: string;
 }
 
 interface ResolvedServer {
-    /** Effective definition (pi: merged per field across files; omp: the first definition). */
+    /** Effective definition (pi-mcp-adapter: merged per field across files; otherwise the first definition). */
     entry: ServerEntry;
     /** Config file owning the entry — the one a toggle writes. Absent for servers pulled in by pi `imports`. */
     source?: McpSource;
@@ -59,7 +64,7 @@ interface ResolvedServer {
 }
 
 interface ResolvedConfig {
-    backend: AgentBackend;
+    client: McpClient;
     sources: McpSource[];
     servers: Map<string, ResolvedServer>;
     /** omp user-level overrides (`disabledServers` / `enabledServers` in the user mcp.json). */
@@ -88,42 +93,107 @@ function importPaths(home: string): Record<string, string[]> {
     };
 }
 
-function hostContext(preferredBackend?: AgentBackend): McpContext {
+async function hostContext(preferredBackend?: AgentBackend): Promise<McpContext> {
     const layout = getAgentLayout(preferredBackend);
-    return {
-        backend: layout.backend,
-        agentDir: layout.agentDir,
-        cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
-        home: os.homedir(),
-    };
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const base = { backend: layout.backend, agentDir: layout.agentDir, cwd, home: os.homedir() };
+    if (layout.backend === 'omp') {
+        return { ...base, client: 'omp' };
+    }
+    return { ...base, ...piMcpClient(layout.agentDir, cwd, await piHasBuiltinMcp()) };
 }
 
-/** Config files each backend reads, highest precedence first. */
+/** Whether the installed pi ships the built-in `mcp` extension; assumed when pi cannot be resolved. */
+async function piHasBuiltinMcp(): Promise<boolean> {
+    try {
+        const invocation = await resolvePiCliInvocation('pi');
+        return invocation.backend !== 'pi' || fs.existsSync(path.join(path.dirname(invocation.cliJsPath), 'extensions', 'mcp'));
+    } catch {
+        return true;
+    }
+}
+
+/** `packages` / `extensions` entries of a pi settings.json: a string, or an object with `source`. */
+function settingsSources(settings: JsonObject | undefined, key: 'packages' | 'extensions'): string[] {
+    const list = settings?.[key];
+    return Array.isArray(list)
+        ? list.flatMap((p) => (typeof p === 'string' ? [p] : isObject(p) && typeof p.source === 'string' ? [p.source] : []))
+        : [];
+}
+
+/**
+ * `builtin:mcp` switched on or off by a settings `extensions` list, as pi's isEnabledByOverrides
+ * (`!` excludes, `+` forces in, `-` forces out); undefined when the list does not mention it.
+ */
+function builtinMcpOverride(settings: JsonObject | undefined): boolean | undefined {
+    const list = settingsSources(settings, 'extensions');
+    let enabled: boolean | undefined;
+    if (list.includes('!builtin:mcp')) {
+        enabled = false;
+    }
+    if (list.includes('+builtin:mcp')) {
+        enabled = true;
+    }
+    if (list.includes('-builtin:mcp')) {
+        enabled = false;
+    }
+    return enabled;
+}
+
+/**
+ * pi's MCP client: pi-mcp-adapter when installed (it registers `/mcp`, so pi skips its built-in
+ * extension), else the built-in `mcp` extension unless the settings turn it off.
+ */
+function piMcpClient(agentDir: string, cwd: string, hasBuiltin: boolean): Pick<McpContext, 'client' | 'clientMissing'> {
+    const user = readConfig(path.join(agentDir, 'settings.json'));
+    const project = readConfig(path.join(cwd, '.pi', 'settings.json'));
+    const adapter = [user, project].some((s) =>
+        [...settingsSources(s, 'packages'), ...settingsSources(s, 'extensions')].some((p) => p.includes('pi-mcp-adapter')),
+    );
+    if (adapter) {
+        return { client: 'pi-adapter' };
+    }
+    if (!hasBuiltin) {
+        return { client: 'pi-adapter', clientMissing: 'adapter-missing' };
+    }
+    const enabled = builtinMcpOverride(project) ?? builtinMcpOverride(user) ?? true;
+    return enabled ? { client: 'pi-builtin' } : { client: 'pi-builtin', clientMissing: 'builtin-disabled' };
+}
+
+/** Config files the client reads, highest precedence first. */
 function mcpSources(ctx: McpContext): McpSource[] {
     const tilde = (p: string) => (p.startsWith(ctx.home + path.sep) ? `~${p.slice(ctx.home.length)}` : p);
     const user = path.join(ctx.agentDir, 'mcp.json');
     const userCompat = path.join(ctx.agentDir, '.mcp.json');
-    const list: McpSource[] =
-        ctx.backend === 'omp'
-            ? // omp://mcp-config.md "Discovery and precedence": the first definition of a name wins. Claude/Cursor/…
-              // configs rank between the native files and the root fallbacks; they are not listed here.
-              [
-                  { scope: 'projectAgent', label: 'Project (.omp/mcp.json)', path: path.join(ctx.cwd, '.omp', 'mcp.json'), primary: true },
-                  { scope: 'projectAgentCompat', label: 'Project (.omp/.mcp.json)', path: path.join(ctx.cwd, '.omp', '.mcp.json'), primary: false },
-                  { scope: 'global', label: `User (${tilde(user)})`, path: user, primary: true },
-                  { scope: 'globalCompat', label: `User (${tilde(userCompat)})`, path: userCompat, primary: false },
-                  { scope: 'projectRoot', label: 'Project fallback (mcp.json)', path: path.join(ctx.cwd, 'mcp.json'), primary: false },
-                  { scope: 'project', label: 'Project fallback (.mcp.json)', path: path.join(ctx.cwd, '.mcp.json'), primary: true },
-              ]
-            : // pi-mcp-adapter getConfigSources, reversed: it merges entries per field, later files overriding earlier.
-              [
-                  { scope: 'projectAgent', label: 'Project (.pi/mcp.json)', path: path.join(ctx.cwd, '.pi', 'mcp.json'), primary: true },
-                  { scope: 'project', label: 'Project (.mcp.json)', path: path.join(ctx.cwd, '.mcp.json'), primary: true },
-                  { scope: 'global', label: `User (${tilde(user)})`, path: user, primary: true },
-                  { scope: 'agentsNestedGlobal', label: 'Shared (~/.agents/mcp/mcp.json)', path: path.join(ctx.home, '.agents', 'mcp', 'mcp.json'), primary: false },
-                  { scope: 'agentsGlobal', label: 'Shared (~/.agents/mcp.json)', path: path.join(ctx.home, '.agents', 'mcp.json'), primary: false },
-                  { scope: 'sharedGlobal', label: 'Shared (~/.config/mcp/mcp.json)', path: path.join(ctx.home, '.config', 'mcp', 'mcp.json'), primary: false },
-              ];
+    let list: McpSource[];
+    if (ctx.client === 'omp') {
+        // omp://mcp-config.md "Discovery and precedence": the first definition of a name wins. Claude/Cursor/…
+        // configs rank between the native files and the root fallbacks; they are not listed here.
+        list = [
+            { scope: 'projectAgent', label: 'Project (.omp/mcp.json)', path: path.join(ctx.cwd, '.omp', 'mcp.json'), primary: true },
+            { scope: 'projectAgentCompat', label: 'Project (.omp/.mcp.json)', path: path.join(ctx.cwd, '.omp', '.mcp.json'), primary: false },
+            { scope: 'global', label: `User (${tilde(user)})`, path: user, primary: true },
+            { scope: 'globalCompat', label: `User (${tilde(userCompat)})`, path: userCompat, primary: false },
+            { scope: 'projectRoot', label: 'Project fallback (mcp.json)', path: path.join(ctx.cwd, 'mcp.json'), primary: false },
+            { scope: 'project', label: 'Project fallback (.mcp.json)', path: path.join(ctx.cwd, '.mcp.json'), primary: true },
+        ];
+    } else if (ctx.client === 'pi-builtin') {
+        // pi's extensions/mcp/config.js loadMcpConfig: a project entry replaces a user entry of the same name.
+        list = [
+            { scope: 'projectAgent', label: 'Project (.pi/mcp.json, trusted projects only)', path: path.join(ctx.cwd, '.pi', 'mcp.json'), primary: true },
+            { scope: 'global', label: `User (${tilde(user)})`, path: user, primary: true },
+        ];
+    } else {
+        // pi-mcp-adapter getConfigSources, reversed: it merges entries per field, later files overriding earlier.
+        list = [
+            { scope: 'projectAgent', label: 'Project (.pi/mcp.json)', path: path.join(ctx.cwd, '.pi', 'mcp.json'), primary: true },
+            { scope: 'project', label: 'Project (.mcp.json)', path: path.join(ctx.cwd, '.mcp.json'), primary: true },
+            { scope: 'global', label: `User (${tilde(user)})`, path: user, primary: true },
+            { scope: 'agentsNestedGlobal', label: 'Shared (~/.agents/mcp/mcp.json)', path: path.join(ctx.home, '.agents', 'mcp', 'mcp.json'), primary: false },
+            { scope: 'agentsGlobal', label: 'Shared (~/.agents/mcp.json)', path: path.join(ctx.home, '.agents', 'mcp.json'), primary: false },
+            { scope: 'sharedGlobal', label: 'Shared (~/.config/mcp/mcp.json)', path: path.join(ctx.home, '.config', 'mcp', 'mcp.json'), primary: false },
+        ];
+    }
     // A file reachable two ways (e.g. PI_CODING_AGENT_DIR=~/.config/mcp) is read once, at its highest precedence.
     const seen = new Set<string>();
     return list.filter((s) => !seen.has(s.path) && !!seen.add(s.path));
@@ -216,7 +286,7 @@ function importedServers(raw: JsonObject, home: string): Map<string, { entry: Se
 }
 
 /**
- * Every server the backend would load from its mcp.json files. `pending` substitutes an edited, not yet written
+ * Every server the client would load from its mcp.json files. `pending` substitutes an edited, not yet written
  * config for the file at its path.
  */
 function resolveConfig(ctx: McpContext, pending?: { path: string; raw: JsonObject }): ResolvedConfig {
@@ -229,7 +299,7 @@ function resolveConfig(ctx: McpContext, pending?: { path: string; raw: JsonObjec
     let disabledServers: ReadonlySet<unknown> = new Set();
     let enabledServers: ReadonlySet<unknown> = new Set();
 
-    if (ctx.backend === 'pi') {
+    if (ctx.client === 'pi-adapter') {
         for (const source of [...sources].reverse()) {
             const raw = read(source.path);
             if (!raw) {
@@ -268,20 +338,20 @@ function resolveConfig(ctx: McpContext, pending?: { path: string; raw: JsonObjec
                     legacy.set(name, { entry, source, legacy: true });
                 }
             }
-            if (source.scope === 'global') {
+            if (source.scope === 'global' && ctx.client === 'omp') {
                 disabledServers = new Set(Array.isArray(raw?.disabledServers) ? raw.disabledServers : []);
                 enabledServers = new Set(Array.isArray(raw?.enabledServers) ? raw.enabledServers : []);
             }
         }
     }
-    // Neither CLI reads disabledMcpServers; list those entries only so they can be restored.
+    // No client reads disabledMcpServers; list those entries only so they can be restored.
     for (const [name, server] of legacy) {
         if (!servers.has(name)) {
             servers.set(name, server);
         }
     }
     return {
-        backend: ctx.backend,
+        client: ctx.client,
         sources,
         servers,
         disabledServers,
@@ -295,10 +365,11 @@ function isServerEnabled(config: ResolvedConfig, name: string, server: ResolvedS
     if (server.legacy) {
         return false;
     }
-    if (config.backend === 'pi') {
+    if (config.client === 'pi-adapter') {
         return server.entry.disabled !== true;
     }
-    // omp: the user denylist beats everything; the allowlist overrides a source's `enabled: false`.
+    // omp: the user denylist beats everything; the allowlist overrides a source's `enabled: false`. Both lists
+    // stay empty for pi's built-in client, which reads only `enabled`.
     if (config.disabledServers.has(name)) {
         return false;
     }
@@ -309,7 +380,7 @@ function disabledReason(config: ResolvedConfig, name: string, server: ResolvedSe
     if (server.legacy) {
         return 'Parked in "disabledMcpServers" by an older version of this extension (not read by pi or omp) — enable to restore';
     }
-    if (config.backend === 'pi') {
+    if (config.client === 'pi-adapter') {
         return 'Disabled ("disabled": true)';
     }
     return config.disabledServers.has(name)
@@ -346,15 +417,11 @@ function transportOf(entry: ServerEntry): 'stdio' | 'http' | 'unknown' {
     return typeof entry.command === 'string' ? 'stdio' : 'unknown';
 }
 
-function buildSnapshot(
-    ctx: McpContext,
-    packages: string[],
-    probeResults?: Map<string, { ok: boolean; message: string }>,
-): McpSettingsSnapshot {
+function buildSnapshot(ctx: McpContext, probeResults?: Map<string, { ok: boolean; message: string }>): McpSettingsSnapshot {
     const config = resolveConfig(ctx);
-    const isPi = ctx.backend === 'pi';
-    // omp caches tool metadata in its agent.db; only pi-mcp-adapter's mcp-cache.json is readable here.
-    const cache = isPi ? loadMetadataCache(ctx.agentDir) : undefined;
+    const isAdapter = ctx.client === 'pi-adapter';
+    // omp and pi's built-in client keep no tool cache readable here; pi-mcp-adapter has mcp-cache.json.
+    const cache = isAdapter ? loadMetadataCache(ctx.agentDir) : undefined;
     const settings = config.settings;
 
     const configPaths: McpConfigPathInfo[] = config.sources.flatMap((s) => {
@@ -368,7 +435,7 @@ function buildSnapshot(
             const { entry } = server;
             const args = Array.isArray(entry.args) ? entry.args.filter((a): a is string => typeof a === 'string') : [];
             const enabled = isServerEnabled(config, name, server);
-            const cacheStatus = isPi ? cacheStatusFor(name, cache) : 'unavailable';
+            const cacheStatus = isAdapter ? cacheStatusFor(name, cache) : 'unavailable';
             const tools = (cache?.servers?.[name]?.tools ?? []).map((t) => ({ name: t.name, description: t.description }));
             const probe = probeResults?.get(name);
             let status: McpConnectionStatus;
@@ -379,9 +446,12 @@ function buildSnapshot(
             } else if (probe) {
                 status = probe.ok ? 'reachable' : 'failed';
                 statusMessage = probe.message;
-            } else if (!isPi) {
+            } else if (ctx.client === 'omp') {
                 status = 'idle';
                 statusMessage = 'Not checked — omp connects when the session starts (/mcp list in chat shows live status)';
+            } else if (ctx.client === 'pi-builtin') {
+                status = 'idle';
+                statusMessage = 'Not checked — pi connects when the session starts (/mcp in chat shows live status)';
             } else if (cacheStatus === 'fresh') {
                 status = 'cached';
                 statusMessage = 'Tool list cached; connects on first use';
@@ -403,8 +473,8 @@ function buildSnapshot(
                 commandPreview: commandPreview(entry, args),
                 url: typeof entry.url === 'string' ? entry.url : undefined,
                 hints: getKemdiMcpHints(
-                    { name, args, directTools: entry.directTools ?? settings.directTools },
-                    ctx.backend,
+                    { name, args, directTools: entry.directTools ?? settings.directTools, exposure: entry.exposure },
+                    ctx.client,
                 ),
                 tools,
                 toolCount: tools.length,
@@ -415,7 +485,8 @@ function buildSnapshot(
         });
 
     return {
-        hasMcpAdapter: !isPi || packages.some((p) => p.includes('pi-mcp-adapter')),
+        client: ctx.client,
+        clientMissing: ctx.clientMissing,
         disableProxyTool: settings.disableProxyTool === true,
         globalDirectTools: typeof settings.directTools === 'boolean' ? settings.directTools : undefined,
         toolPrefix: typeof settings.toolPrefix === 'string' ? settings.toolPrefix : undefined,
@@ -426,11 +497,10 @@ function buildSnapshot(
 }
 
 export async function loadMcpSettingsSnapshot(
-    packages: string[],
     probeResults?: Map<string, { ok: boolean; message: string }>,
     preferredBackend?: AgentBackend,
 ): Promise<McpSettingsSnapshot> {
-    return buildSnapshot(hostContext(preferredBackend), packages, probeResults);
+    return buildSnapshot(await hostContext(preferredBackend), probeResults);
 }
 
 /** Drops `name` from a string-list key; the key goes when the list empties. Returns whether it changed. */
@@ -449,8 +519,8 @@ function removeFromList(raw: JsonObject, key: string, name: string): boolean {
 }
 
 /**
- * Flips the backend's native field on the entry in the file `scope` names — pi-mcp-adapter `"disabled": true`,
- * omp `"enabled": false` — dropping it again to enable.
+ * Flips the client's native field on the entry in the file `scope` names — pi-mcp-adapter `"disabled": true`,
+ * omp and pi's built-in client `"enabled": false` — dropping it again to enable.
  */
 function setServerEnabled(ctx: McpContext, scope: McpScopeId, name: string, enabled: boolean): void {
     const sources = mcpSources(ctx);
@@ -466,7 +536,7 @@ function setServerEnabled(ctx: McpContext, scope: McpScopeId, name: string, enab
 
     const legacy = raw.disabledMcpServers;
     if (enabled && isObject(legacy) && name in legacy) {
-        // Older versions of this extension parked disabled entries here, where neither CLI looks: move it back.
+        // Older versions of this extension parked disabled entries here, where no client looks: move it back.
         if (!isObject(servers[name]) && isObject(legacy[name])) {
             servers[name] = legacy[name];
         }
@@ -480,17 +550,17 @@ function setServerEnabled(ctx: McpContext, scope: McpScopeId, name: string, enab
     if (!isObject(entry)) {
         throw new Error(`"${name}" is not defined in ${source.path}`);
     }
-    if (!enabled) {
-        if (ctx.backend === 'omp') {
-            entry.enabled = false;
+    if (ctx.client !== 'pi-adapter') {
+        if (enabled) {
+            delete entry.enabled;
         } else {
-            entry.disabled = true;
+            entry.enabled = false;
         }
-    } else if (ctx.backend === 'omp') {
-        delete entry.enabled;
+    } else if (!enabled) {
+        entry.disabled = true;
     } else {
         delete entry.disabled;
-        // pi merges entries per field, so a lower-precedence file's `disabled: true` would show through.
+        // pi-mcp-adapter merges entries per field, so a lower-precedence file's `disabled: true` would show through.
         if (resolveConfig(ctx, { path: source.path, raw }).servers.get(name)?.entry.disabled === true) {
             entry.disabled = false;
         }
@@ -502,7 +572,7 @@ function setServerEnabled(ctx: McpContext, scope: McpScopeId, name: string, enab
 
     const writes = new Map<string, JsonObject>([[source.path, raw]]);
     const userSource = sources.find((s) => s.scope === 'global');
-    if (ctx.backend === 'omp' && userSource) {
+    if (ctx.client === 'omp' && userSource) {
         // As omp's /mcp enable|disable: drop user-level overrides that would contradict the entry's new state.
         const user = userSource.path === source.path ? raw : readConfig(userSource.path);
         if (user) {
@@ -524,7 +594,7 @@ export async function setMcpServerEnabled(
     enabled: boolean,
     preferredBackend?: AgentBackend,
 ): Promise<void> {
-    setServerEnabled(hostContext(preferredBackend), scope, serverName, enabled);
+    setServerEnabled(await hostContext(preferredBackend), scope, serverName, enabled);
 }
 
 /** Reachability only: the MCP handshake (initialize, tools/list) is left to the agent. */
@@ -532,7 +602,7 @@ export async function probeMcpServer(
     server: McpServerSummary,
     preferredBackend?: AgentBackend,
 ): Promise<{ ok: boolean; message: string }> {
-    const config = resolveConfig(hostContext(preferredBackend));
+    const config = resolveConfig(await hostContext(preferredBackend));
     const resolved = config.servers.get(server.name);
     if (!resolved) {
         return { ok: false, message: 'Server definition not found in any MCP config file' };

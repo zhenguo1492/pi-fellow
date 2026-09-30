@@ -385,6 +385,29 @@ describe('HostToolRouter: working itself and directing the worker', () => {
     });
 });
 
+describe('HostToolRouter: show_text', () => {
+    it('shows text in any permission mode and without an editor, touching nothing', async () => {
+        const { worker, turn, edits, commands } = setup();
+        worker.level = 'plan';
+        const router = new HostToolRouter(worker, () => undefined, () => true, () => {
+            throw new Error('no research');
+        });
+        const shown = await router.execute('show_text', { text: 'SELECT 1;', language: 'sql' }, turn(1));
+        expect(shown).toEqual({ text: expect.stringMatching(/not read aloud/), isError: false });
+        expect([edits, commands, worker.sends, worker.approvals]).toEqual([[], [], [], []]);
+    });
+
+    it('refuses blank text, and text too long to keep in the transcript', async () => {
+        const { router, turn } = setup();
+        expect(await router.execute('show_text', { text: '  ' }, turn(1))).toEqual({ text: 'Missing text.', isError: true });
+        expect((await router.execute('show_text', { text: 'x'.repeat(20000) }, turn(1))).isError).toBe(false);
+        expect(await router.execute('show_text', { text: 'x'.repeat(20001) }, turn(1))).toEqual({
+            text: expect.stringMatching(/^Not shown: 20001 characters, at most 20000\./),
+            isError: true,
+        });
+    });
+});
+
 describe("HostToolRouter: the worker's file lock", () => {
     const edit = { path: 'src/a.ts', oldText: 'x', newText: 'y' };
 

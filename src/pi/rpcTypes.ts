@@ -70,7 +70,7 @@ export interface RpcSlashCommand {
 }
 
 export interface RpcSessionState {
-    model?: { provider: string; id: string; name?: string };
+    model?: { provider: string; id: string; name?: string; contextWindow?: number };
     thinkingLevel: string;
     isStreaming: boolean;
     isCompacting: boolean;

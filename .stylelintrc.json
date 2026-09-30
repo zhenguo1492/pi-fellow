@@ -1,0 +1,16 @@
+{
+    "extends": ["stylelint-config-recommended"],
+    "rules": {
+        "no-descending-specificity": null,
+        "declaration-property-value-disallowed-list": [
+            {
+                "/^(color|background|background-color|border|border-color|border-(top|right|bottom|left)(-color)?|outline|outline-color|fill|stroke|caret-color|text-decoration-color|accent-color)$/": [
+                    "/(?<!var\\(--[\\w-]+,\\s*)(#(?!0{3}\\b|0{6}\\b)[0-9a-fA-F]{3,8}\\b|\\brgba?\\(\\s*(?!0,\\s*0,\\s*0\\b)|\\bhsla?\\()/"
+                ]
+            },
+            {
+                "message": "Use a token from src/webview/styles/tokens.css (or color-mix over one): a color literal does not follow the VS Code theme. Black (scrims, shadows) is allowed."
+            }
+        ]
+    }
+}

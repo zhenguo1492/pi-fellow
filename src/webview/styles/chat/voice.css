@@ -1,6 +1,6 @@
 /*
  * The Bot view a chat tab shows in place of its conversation (docs/voice-agent-design.md §11,
- * src/webview/voicePanel.ts), loaded after main.css: the engines and token use at the top, then
+ * src/webview/voicePanel.ts), after the xterm styles in main.css: the engines and token use at the top, then
  * cards and the transcript, filling the tab body. Everything is scoped under .vp.
  */
 
@@ -109,26 +109,14 @@ body.vscode-high-contrast-light .vp {
     box-shadow: 0 4px 10px rgba(0, 0, 0, .3);
 }
 .vp-head.open .vp-detail { display: flex; }
-.vp-row, .vp-tokens > summary { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vp-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .vp-k { flex-shrink: 0; width: 4.6em; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
-.vp-v, .vp-tok-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
+/* A detail of the row above (Cache under LLM): the key indented and lighter; values stay aligned (border-box). */
+.vp-sub .vp-k { padding-left: 1em; font-weight: 400; }
+.vp-v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
 .vp-sep { margin: 0 5px; color: var(--muted); opacity: .7; }
-.vp.vp-configured .vp-eng .vp-v { color: var(--muted); }
 .vp-meter-bar { display: inline-block; width: 90px; height: 5px; margin-right: 8px; vertical-align: 1px; border-radius: 3px; background: color-mix(in srgb, var(--muted) 25%, transparent); overflow: hidden; }
 .vp-meter-bar i { display: block; height: 100%; border-radius: 3px; background: var(--link); }
-.vp-tokens[hidden] { display: none; }
-.vp-tokens > summary { list-style: none; cursor: pointer; border-radius: 4px; }
-.vp-tokens > summary::-webkit-details-marker { display: none; }
-.vp-tokens > summary:hover { background: var(--hover); }
-.vp-tokens > summary:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
-.vp-tokens .vp-car { flex-shrink: 0; font-size: .7em; opacity: .7; transition: transform .15s; }
-.vp-tokens[open] .vp-car { transform: rotate(90deg); }
-.vp-calls { max-height: 180px; overflow: auto; margin: 4px 0 2px; }
-.vp-calls table { border-collapse: collapse; font-family: var(--font-mono); font-size: calc(var(--vp-small) - .5px); }
-.vp-calls th, .vp-calls td { padding: 0 12px 0 0; text-align: right; white-space: nowrap; }
-.vp-calls th:nth-child(-n+2), .vp-calls td:nth-child(-n+2) { text-align: left; }
-.vp-calls th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--vp-bg); }
-.vp-calls-empty { color: var(--muted); }
 
 /* ── Cards: tasks to confirm, background research; one line each ── */
 .vp-cards { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 0; }
@@ -177,6 +165,72 @@ body.vscode-high-contrast-light .vp {
 .vp-stream::-webkit-scrollbar { width: 8px; }
 .vp-stream::-webkit-scrollbar-thumb { background: var(--scrollbar); border: 2px solid transparent; background-clip: content-box; border-radius: 5px; }
 .vp-empty { margin: auto 0; padding: 4px 8px; color: var(--muted); text-align: center; }
+/* A new conversation's welcome: who the voice agent is, what it does, how to start. */
+.vp-empty.vp-welcome {
+    display: flex; flex-direction: column; align-items: center;
+    max-width: 420px; margin: auto; padding: 16px 20px; color: var(--fg);
+}
+.vp-empty[hidden] { display: none; }
+.vp-welcome-av {
+    width: 56px; height: 56px; margin-bottom: 10px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-lg); color: var(--vscode-charts-blue, #3794ff); background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 20%, transparent);
+}
+.vp-welcome-av svg { width: 34px; height: 34px; }
+.vp-welcome-av .av-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.vp-welcome-av .av-text { font-size: 28px; font-weight: 600; line-height: 1; white-space: nowrap; }
+.vp-welcome-title { font-size: calc(var(--vp-font) + 4px); font-weight: 600; }
+.vp-welcome-sub { margin: 2px 0 14px; color: var(--muted); }
+.vp-welcome-list {
+    align-self: stretch; margin: 0 0 16px; padding: 10px 12px 10px 28px;
+    text-align: left; font-size: var(--vp-small);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-raised);
+}
+.vp-welcome-list li + li { margin-top: 4px; }
+.vp-welcome-list li::marker { color: var(--voice); }
+.vp-welcome-list b { font-weight: 600; }
+/* STT and TTS: what is configured and whether it works; a click opens Settings → Voice. */
+.vp-welcome-svcs { align-self: stretch; display: flex; flex-direction: column; gap: 6px; margin: 0 0 16px; }
+.vp-svc {
+    display: flex; align-items: flex-start; gap: 8px; width: 100%;
+    padding: 6px 10px; text-align: left; font: inherit; font-size: var(--vp-small); color: var(--fg); cursor: pointer;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-raised);
+}
+.vp-svc:hover { background: var(--tint); }
+.vp-svc:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1px; }
+.vp-svc[data-state="ok"] { border-color: color-mix(in srgb, var(--success-fg) 40%, var(--border)); }
+.vp-svc[data-state="bad"] { border-color: color-mix(in srgb, var(--error-fg) 50%, var(--border)); }
+.vp-svc-ic {
+    flex-shrink: 0; width: 18px; height: 18px; margin-top: 1px;
+    display: flex; align-items: center; justify-content: center; border-radius: 50%;
+    color: var(--muted);
+}
+.vp-svc-ic svg { width: 12px; height: 12px; stroke-width: 2.2; }
+.vp-svc[data-state="ok"] .vp-svc-ic { color: var(--success-fg); background: color-mix(in srgb, var(--success-fg) 18%, transparent); }
+.vp-svc[data-state="bad"] .vp-svc-ic { color: var(--error-fg); background: color-mix(in srgb, var(--error-fg) 18%, transparent); }
+.vp-svc-spin {
+    width: 10px; height: 10px; border-radius: 50%;
+    border: 1.5px solid currentcolor; border-right-color: transparent;
+    animation: vp-spin .9s linear infinite;
+}
+.vp-svc-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.vp-svc-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.vp-svc-k { flex-shrink: 0; font-weight: 600; }
+.vp-svc-v { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.vp-svc-why { color: var(--error-fg); overflow-wrap: anywhere; }
+.vp-svc[data-state="checking"] .vp-svc-why { color: var(--muted); }
+.vp-svc-link { color: var(--link); }
+.vp-svc:hover .vp-svc-link { text-decoration: underline; }
+.vp-welcome-call {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 16px; border: none; border-radius: 999px;
+    font: inherit; font-weight: 600; cursor: pointer;
+    color: var(--btn-fg); background: var(--btn-bg);
+}
+.vp-welcome-call:hover { background: var(--btn-hover); }
+.vp-welcome-call:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 2px; }
+.vp-welcome-call svg { width: 14px; height: 14px; }
+.vp-welcome-hint { margin-top: 8px; font-size: var(--vp-small); color: var(--muted); }
 
 .vp-turn {
     --c: var(--muted);
@@ -200,7 +254,6 @@ body.vscode-high-contrast-light .vp {
 .vp-turn[data-settled] { animation: none; }
 .vp-turn.user { --c: var(--user); }
 .vp-turn.bot  { --c: var(--voice); }
-.vp-turn.narr { --c: var(--warn); }
 .vp-turn.silent { opacity: .6; }
 /* The avatar's hue: the speaker's colour, except User green and Bot blue (VS Code's chart colours, themed for light and dark). */
 .vp-av {
@@ -268,7 +321,7 @@ body.vscode-high-contrast-light .vp {
 .vp-tools .tv-card[data-kind="dispatch"] { --c: var(--voice); }
 .vp-tools .tv-card[data-kind="confirm"] { --c: var(--ok); }
 .vp-tools .tv-card:is([data-kind="answer"], [data-kind="proposal"]) { --c: var(--warn); }
-.vp-tools .tv-card:is([data-kind="read"], [data-kind="research"]) { --c: var(--link); }
+.vp-tools .tv-card:is([data-kind="read"], [data-kind="research"], [data-kind="snippet"]) { --c: var(--link); }
 .vp-tools .tv-card:is([data-kind="stop"], .tv-card--error) { --c: var(--error); }
 .vp-tools .tv-head { width: fit-content; max-width: 100%; gap: 6px; padding: 0 7px 0 6px; border: 1px solid var(--border); border-radius: 4px; }
 .vp-tools .tv-head:hover { color: var(--fg); background: var(--hover); }
@@ -329,6 +382,6 @@ body.vscode-high-contrast-light .vp {
 @keyframes vp-rise { from { opacity: 0; transform: translateY(4px); } }
 
 @media (prefers-reduced-motion: reduce) {
-    .vp-turn, .vp-card { animation: none; }
+    .vp-turn, .vp-card, .vp-svc-spin { animation: none; }
     .vp::before { animation: none !important; }
 }

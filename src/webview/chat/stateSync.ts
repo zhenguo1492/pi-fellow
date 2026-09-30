@@ -3,6 +3,7 @@ import { applyVoiceMicStatus, setSttCheck } from '../dictation';
 import { setPickerCurrentModel } from '../modelPicker';
 import { syncTuiView } from '../tuiView';
 import { applyVoiceBarStatus, setBotViewShown, setVoiceReadiness } from '../voiceBar';
+import { setVoicePanelReadiness } from '../voicePanel';
 import { state } from './state';
 import { resetUserScroll, scrollToBottom, updateScrollButton } from './scroll';
 import { updateChangedFiles } from './changedFiles';
@@ -11,7 +12,7 @@ import { updatePendingMessagesInChat } from './pendingMessages';
 import { updateMessages } from './transcript';
 import { setStreamPhase, updateStreamingUI } from './streaming';
 import { updateQueuedMessageBanner } from './queuedBanner';
-import { updateAttachmentsStrip } from './composerChips';
+import { updateComposerChips } from './composerChips';
 import { clearComposerEdit, getComposerEdit, restoreComposerDraft, stashComposerDraft, updateInputArea } from './composer';
 import { tabView, updateTabs } from './tabs';
 import { updateModeSwitch, updatePlanPanel } from './plan';
@@ -74,6 +75,7 @@ export function applyStateSync(s: SerializedAgentState): void {
     if (s.voiceReadiness) {
         setSttCheck(s.voiceReadiness.stt);
         setVoiceReadiness(s.voiceReadiness);
+        setVoicePanelReadiness(s.voiceReadiness);
     }
     applyVoiceMicStatus(s.voice);
     applyVoiceBarStatus(s.voice);
@@ -100,7 +102,7 @@ export function applyStateSync(s: SerializedAgentState): void {
         updateChangedFiles();
         updateQueuedMessageBanner();
         updatePendingMessagesInChat();
-        updateAttachmentsStrip();
+        updateComposerChips();
         updateConnectionBanner();
         updatePlanPanel();
         updateScrollButton();

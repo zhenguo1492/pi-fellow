@@ -19,7 +19,7 @@ const CROSSFADE_MS = 28;
 const STALE_MS = 200;
 /** A bot line whose points all stay within this is not drawn: it shows only while the bot makes a sound. */
 const BOT_QUIET = 0.02;
-/** Matches the `.voice-wave` opacity transition in main.css. */
+/** Matches the `.voice-wave` opacity transition in styles/chat/voiceBar.css. */
 const FADE_MS = 250;
 
 interface Line {

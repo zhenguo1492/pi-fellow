@@ -1,0 +1,274 @@
+/* Inline diff cards, the changed-files section, redo anchors and the history a redo dims. */
+
+/* ── Inline diff cards ── */
+.diff-card {
+    margin: 0 0 8px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card-bg);
+    overflow: hidden;
+    box-sizing: border-box;
+}
+.diff-card.loading {
+    opacity: 0.7;
+}
+
+.diff-file-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    user-select: none;
+}
+.diff-file-header:hover { background: var(--tint-faint); }
+
+.diff-file-icon {
+    font-size: 12px;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+.diff-file-name {
+    font-weight: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.diff-file-dir {
+    color: var(--muted);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.diff-stats {
+    display: flex;
+    gap: 6px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+}
+.diff-stat-add { color: var(--success-fg); }
+.diff-stat-del { color: var(--error-fg); }
+
+.diff-new-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--success-fg) 15%, transparent);
+    color: var(--success-fg);
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+}
+
+.diff-view {
+    border-top: 1px solid var(--border);
+    max-height: 250px;
+    overflow-y: auto;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+}
+.diff-view::-webkit-scrollbar { width: 4px; height: 4px; }
+.diff-view::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+
+.diff-line {
+    padding: 0 12px;
+    white-space: pre;
+    min-height: 1.5em;
+}
+.diff-line-add {
+    background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+    color: var(--success-fg);
+}
+.diff-line-del {
+    background: color-mix(in srgb, var(--error-fg) 12%, transparent);
+    color: var(--error-fg);
+}
+.diff-line-ctx {
+    color: var(--muted);
+}
+.diff-line-hunk {
+    color: var(--link);
+    background: color-mix(in srgb, var(--link) 6%, transparent);
+    font-style: italic;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+/* ── Changed files section ── */
+.changed-files-section {
+    border-bottom: 1px solid var(--tint);
+    font-size: 12px;
+}
+
+.changed-files-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    outline: none;
+}
+.changed-files-summary::-webkit-details-marker { display: none; }
+.changed-files-summary::marker { display: none; content: ''; }
+.changed-files-summary:hover { background: var(--tint-faint); }
+
+.changed-files-arrow {
+    font-size: 10px;
+    color: var(--muted);
+    display: inline-block;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+}
+.changed-files-section[open] .changed-files-arrow {
+    transform: rotate(90deg);
+}
+
+.changed-files-count {
+    font-weight: 600;
+    color: var(--fg);
+}
+
+.changed-files-spacer {
+    flex: 1;
+}
+
+.changed-files-link {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.changed-files-link:hover {
+    color: var(--fg);
+    background: var(--tint);
+    border-color: var(--muted);
+}
+
+.changed-files-review-btn {
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+    border: none;
+    border-radius: 4px;
+    padding: 4px 14px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background 0.15s;
+}
+.changed-files-review-btn:hover {
+    background: var(--btn-hover);
+}
+
+.changed-files-dismiss {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+.changed-files-dismiss:hover {
+    color: var(--fg);
+    background: var(--tint);
+}
+
+/* ── Changed file list ── */
+.changed-files-list {
+    max-height: 200px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+.changed-files-list::-webkit-scrollbar { width: 4px; }
+.changed-files-list::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+
+.changed-file-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px 4px 24px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+.changed-file-item:hover {
+    background: var(--tint-faint);
+}
+
+.cf-icon {
+    font-size: 11px;
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+}
+.cf-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cf-stats {
+    display: flex;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    flex-shrink: 0;
+}
+.cf-stat-add { color: var(--success-fg); }
+.cf-stat-del { color: var(--error-fg); }
+
+.redo-anchor {
+    position: relative;
+    height: 0;
+    overflow: visible;
+}
+
+.redo-btn {
+    position: absolute;
+    top: -32px;
+    right: 8px;
+    background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success-fg) 30%, transparent);
+    color: var(--success-fg);
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    transition: background 0.15s, border-color 0.15s;
+}
+.redo-btn:hover {
+    background: color-mix(in srgb, var(--success-fg) 25%, transparent);
+    border-color: var(--success-fg);
+}
+
+/* ── Dimmed (rolled-back) messages ── */
+.message.dimmed,
+.message-group-user.dimmed,
+.message-group-assistant.dimmed,
+.tool-card.dimmed,
+.diff-card.dimmed {
+    opacity: 0.35;
+    pointer-events: none;
+}

@@ -1,0 +1,69 @@
+/* Sentence pick, read-along and translation (docs/sentence-replay.md). */
+
+/* ── Alt over sentences (sentencePick.ts), in the Bot view and the chat ── */
+body[data-sentence-pick],
+body[data-sentence-pick] * { cursor: pointer !important; }
+/* Under the pointer with Alt held; the one whose translation is open. */
+::highlight(vp-sentence-hover) { background-color: color-mix(in srgb, var(--link) 28%, transparent); }
+::highlight(vp-sentence-pinned) { background-color: color-mix(in srgb, var(--link) 18%, transparent); }
+/* Read aloud: all of it (the read region, a playback control), and the sentence of it being read:
+   while its speech is prepared, while it is heard, while paused. */
+::highlight(vp-read-region) { background-color: color-mix(in srgb, var(--muted) 16%, transparent); }
+::highlight(vp-sentence-loading) { background-color: color-mix(in srgb, var(--link) 14%, transparent); }
+::highlight(vp-sentence-playing) { background-color: color-mix(in srgb, var(--link) 30%, transparent); color: var(--fg); }
+::highlight(vp-sentence-paused) { background-color: color-mix(in srgb, var(--muted) 30%, transparent); }
+body[data-read-along],
+body[data-read-along] * { cursor: pointer !important; }
+
+/* The sentence's translation (translatePopup.ts), floating by it with an arrow at its end. */
+.sentence-tp {
+    position: fixed; z-index: 1000;
+    display: flex; flex-direction: column;
+    width: 360px;
+    border: 1px solid var(--vscode-editorWidget-border, var(--border)); border-radius: 6px;
+    background: var(--card-bg); color: var(--vscode-editorWidget-foreground, var(--fg));
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+    font-size: var(--vscode-font-size, 13px); line-height: 1.55;
+    animation: sentence-tp-in .12s ease-out;
+}
+.sentence-tp[hidden] { display: none; }
+.sentence-tp-head {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    padding: 2px 3px 2px 10px;
+    font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    user-select: none;
+}
+.sentence-tp-close { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.sentence-tp-close:hover { color: var(--fg); background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, .31)); }
+.sentence-tp-close:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+.sentence-tp-body { min-height: 0; overflow: auto; padding: 6px 10px 8px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.sentence-tp-body[data-state="loading"] { color: var(--muted); }
+.sentence-tp-body[data-state="error"] { color: var(--error-fg); }
+.sentence-tp-arrow {
+    position: absolute; top: -6px; width: 10px; height: 10px; margin-left: -5px;
+    background: var(--card-bg);
+    border-left: 1px solid var(--vscode-editorWidget-border, var(--border)); border-top: 1px solid var(--vscode-editorWidget-border, var(--border));
+    transform: rotate(45deg);
+}
+.sentence-tp.up .sentence-tp-arrow { top: auto; bottom: -6px; border: 0; border-right: 1px solid var(--vscode-editorWidget-border, var(--border)); border-bottom: 1px solid var(--vscode-editorWidget-border, var(--border)); }
+/* Read aloud / Translate over a mouse selection (selectionToolbar.ts), at the point the drag ended. */
+.sentence-sel {
+    position: fixed; z-index: 1001;
+    display: flex; gap: 2px; padding: 2px;
+    border: 1px solid var(--vscode-editorWidget-border, var(--border)); border-radius: 6px;
+    background: var(--card-bg); color: var(--vscode-editorWidget-foreground, var(--fg));
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+    font-size: 12px; line-height: 1;
+    user-select: none;
+    animation: sentence-tp-in .12s ease-out;
+}
+.sentence-sel[hidden] { display: none; }
+.sentence-sel button { height: 22px; padding: 0 8px; border: 0; border-radius: 4px; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+.sentence-sel button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, .31)); }
+.sentence-sel button:disabled { opacity: .45; cursor: default; }
+.sentence-sel button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+@keyframes sentence-tp-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+    .sentence-tp, .sentence-sel { animation: none; }
+}

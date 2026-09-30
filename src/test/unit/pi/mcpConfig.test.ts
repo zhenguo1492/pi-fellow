@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const env = vi.hoisted(() => ({ cwd: '', agentDirs: { pi: '', omp: '' } }));
+const env = vi.hoisted(() => ({ cwd: '', agentDirs: { pi: '', omp: '' }, piDist: '' }));
 
 vi.mock('vscode', () => ({
     workspace: {
@@ -16,6 +16,7 @@ vi.mock('vscode', () => ({
 }));
 vi.mock('../../../pi/piCliPaths', () => ({
     getAgentLayout: (backend: 'pi' | 'omp' = 'pi') => ({ backend, agentDir: env.agentDirs[backend] }),
+    resolvePiCliInvocation: async () => ({ backend: 'pi', nodePath: 'node', cliJsPath: path.join(env.piDist, 'cli.js'), binDir: env.piDist }),
 }));
 
 import { loadMcpSettingsSnapshot, probeMcpServer, setMcpServerEnabled } from '../../../pi/mcpConfig';
@@ -41,7 +42,7 @@ function readJson(file: string): McpFile {
 }
 
 async function server(name: string, backend: 'pi' | 'omp') {
-    const snap = await loadMcpSettingsSnapshot([], undefined, backend);
+    const snap = await loadMcpSettingsSnapshot(undefined, backend);
     const found = snap.servers.find((s) => s.name === name);
     if (!found) {
         throw new Error(`no server ${name} in ${snap.servers.map((s) => s.name).join(', ')}`);
@@ -54,6 +55,9 @@ beforeEach(() => {
     home = path.join(root, 'home');
     env.cwd = path.join(root, 'workspace');
     env.agentDirs = { pi: path.join(home, '.pi', 'agent'), omp: path.join(home, '.omp', 'agent') };
+    // The installed pi's dist/: this one ships the built-in mcp extension.
+    env.piDist = path.join(root, 'pi', 'dist');
+    fs.mkdirSync(path.join(env.piDist, 'extensions', 'mcp'), { recursive: true });
     fs.mkdirSync(env.cwd, { recursive: true });
     originalHome = process.env.HOME;
     process.env.HOME = home;
@@ -70,7 +74,7 @@ describe('omp MCP config', () => {
         writeJson(path.join(env.cwd, '.pi', 'mcp.json'), { mcpServers: { piOnly: { command: 'x' } } });
         writeJson(path.join(home, '.config', 'mcp', 'mcp.json'), { mcpServers: { shared: { command: 'x' } } });
 
-        const snap = await loadMcpSettingsSnapshot([], undefined, 'omp');
+        const snap = await loadMcpSettingsSnapshot(undefined, 'omp');
 
         expect(snap.servers.map((s) => [s.name, s.scope])).toEqual([['proj', 'projectAgent']]);
         expect(snap.configPaths.find((p) => p.id === 'projectAgent')?.path).toBe(path.join(env.cwd, '.omp', 'mcp.json'));
@@ -106,7 +110,65 @@ describe('omp MCP config', () => {
     });
 });
 
-describe('pi MCP config', () => {
+/** pi settings.json listing pi-mcp-adapter: it replaces pi's built-in MCP client. */
+function installAdapter(): void {
+    writeJson(path.join(env.agentDirs.pi, 'settings.json'), { packages: ['npm:pi-mcp-adapter'] });
+}
+
+describe("pi's built-in MCP client", () => {
+    it('reads only the agent dir mcp.json and .pi/mcp.json, a project entry replacing the user one', async () => {
+        writeJson(path.join(env.agentDirs.pi, 'mcp.json'), { mcpServers: { a: { command: 'user' }, u: { command: 'x' } } });
+        writeJson(path.join(env.cwd, '.pi', 'mcp.json'), { mcpServers: { a: { url: 'https://example.invalid/mcp' } } });
+        writeJson(path.join(env.cwd, '.mcp.json'), { mcpServers: { root: { command: 'x' } } });
+        writeJson(path.join(home, '.config', 'mcp', 'mcp.json'), { mcpServers: { shared: { command: 'x' } } });
+
+        const snap = await loadMcpSettingsSnapshot(undefined, 'pi');
+
+        expect(snap.client).toBe('pi-builtin');
+        expect(snap.clientMissing).toBeUndefined();
+        expect(snap.configPaths.map((p) => p.id)).toEqual(['projectAgent', 'global']);
+        expect(snap.servers.map((s) => [s.name, s.scope, s.transport])).toEqual([
+            ['a', 'projectAgent', 'http'],
+            ['u', 'global', 'stdio'],
+        ]);
+    });
+
+    it('toggles "enabled": false, the field pi reads, not "disabled"', async () => {
+        const file = path.join(env.agentDirs.pi, 'mcp.json');
+        writeJson(file, { mcpServers: { a: { command: 'x' }, off: { command: 'y', disabled: true } } });
+
+        // "disabled" is pi-mcp-adapter's field; the built-in client ignores it.
+        expect(await server('off', 'pi')).toMatchObject({ enabled: true });
+
+        await setMcpServerEnabled('global', 'a', false, 'pi');
+        expect(readJson(file).mcpServers.a).toEqual({ command: 'x', enabled: false });
+        expect(await server('a', 'pi')).toMatchObject({ enabled: false, statusMessage: 'Disabled ("enabled": false)' });
+
+        await setMcpServerEnabled('global', 'a', true, 'pi');
+        expect(readJson(file).mcpServers.a).toEqual({ command: 'x' });
+    });
+
+    it('reports no client when settings turn builtin:mcp off, a project "+" turning it back on', async () => {
+        writeJson(path.join(env.agentDirs.pi, 'settings.json'), { extensions: ['-builtin:mcp'] });
+        expect(await loadMcpSettingsSnapshot(undefined, 'pi')).toMatchObject({ client: 'pi-builtin', clientMissing: 'builtin-disabled' });
+
+        writeJson(path.join(env.cwd, '.pi', 'settings.json'), { extensions: ['+builtin:mcp'] });
+        expect((await loadMcpSettingsSnapshot(undefined, 'pi')).clientMissing).toBeUndefined();
+    });
+
+    it('uses pi-mcp-adapter when installed, as a package object too, and asks for it on a pi without the built-in client', async () => {
+        writeJson(path.join(env.cwd, '.pi', 'settings.json'), { packages: [{ source: 'npm:pi-mcp-adapter@2' }], extensions: ['-builtin:mcp'] });
+        expect(await loadMcpSettingsSnapshot(undefined, 'pi')).toMatchObject({ client: 'pi-adapter', clientMissing: undefined });
+
+        fs.rmSync(path.join(env.cwd, '.pi', 'settings.json'));
+        fs.rmSync(path.join(env.piDist, 'extensions'), { recursive: true });
+        expect(await loadMcpSettingsSnapshot(undefined, 'pi')).toMatchObject({ client: 'pi-adapter', clientMissing: 'adapter-missing' });
+    });
+});
+
+describe('pi-mcp-adapter MCP config', () => {
+    beforeEach(installAdapter);
+
     it('toggles "disabled" in place, keeping the rest of the file and its permissions', async () => {
         const file = path.join(env.cwd, '.mcp.json');
         const original = { settings: { toolPrefix: 'short' }, mcpServers: { a: { command: 'npx', args: ['-y', 'a'] } } };
@@ -211,6 +273,7 @@ describe('probeMcpServer', () => {
         await listening.promise;
         const base = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
         try {
+            installAdapter();
             writeJson(path.join(env.cwd, '.mcp.json'), {
                 mcpServers: { sse: { url: `${base}/sse` }, auth: { url: `${base}/auth` } },
             });

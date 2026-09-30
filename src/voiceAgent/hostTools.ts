@@ -228,6 +228,22 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         loadMode: 'essential',
     },
     {
+        name: 'show_text',
+        label: 'Show text',
+        description:
+            'Show text as a card under your reply in the chat, never read aloud: a code example, a SQL query, a command line, a config snippet, or anything else the user should see or copy rather than hear. Say in a sentence what it is instead of reading it. Changes nothing.',
+        parameters: {
+            ...OBJECT,
+            properties: {
+                text: { type: 'string', description: 'Exactly what to show, as the user would copy it.' },
+                language: { type: 'string', description: 'Its language for highlighting, e.g. sql, bash, typescript, json; leave out for plain text.' },
+                title: { type: 'string', description: 'A few words on what it is, shown on the card.' },
+            },
+            required: ['text'],
+        },
+        loadMode: 'essential',
+    },
+    {
         name: 'open_file',
         label: 'Open file',
         description:
@@ -565,6 +581,8 @@ const DEFAULT_TERMINAL_WAIT_SECS = 2;
 const DEFAULT_DEBUG_START_SECS = 15;
 const DEFAULT_DEBUG_STEP_SECS = 10;
 const DEFAULT_OUTPUT_LINES = 80;
+/** Longest show_text: the transcript, with every tool call's arguments, lives in workspace state. */
+const MAX_SHOWN_CHARS = 20000;
 /** Settled proposals remembered for a late confirm_task. */
 const MAX_SETTLED = 20;
 
@@ -885,6 +903,15 @@ export class HostToolRouter {
                     ...(startLine !== undefined ? { startLine, endLine } : {}),
                     ...(symbol ? { symbol } : {}),
                 });
+            }
+            case 'show_text': {
+                const text = requireString(args, 'text');
+                if (text.length > MAX_SHOWN_CHARS) {
+                    throw new Error(
+                        `Not shown: ${text.length} characters, at most ${MAX_SHOWN_CHARS}. Show a shorter excerpt, or put it in a file with create_file.`,
+                    );
+                }
+                return 'Shown as a card under your reply in the chat; it is not read aloud.';
             }
             case 'list_viewers':
                 return formatViewers(await this._requireHands().listViewers(requireString(args, 'path')));

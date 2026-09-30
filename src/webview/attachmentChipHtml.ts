@@ -12,10 +12,6 @@ export const CHIP_EXPAND_ICON = `<svg class="chip-svg chip-svg-chevron" viewBox=
 
 export const CHIP_EXTERNAL_ICON = `<svg class="chip-svg chip-svg-external" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2h4v4M14 2L8 8M13 9.5V13a1 1 0 01-1 1H3a1 1 0 01-1-1V4a1 1 0 011-1h3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-const CHIP_EYE_ICON = `<svg class="chip-svg" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/></svg>`;
-
-const CHIP_EYE_OFF_ICON = `<svg class="chip-svg" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 13.5l11-11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`;
-
 function fileExtension(name: string): string {
     const i = name.lastIndexOf('.');
     if (i <= 0 || i === name.length - 1) {
@@ -62,7 +58,6 @@ export function renderEditorContextChip(
         <span class="editor-context-icon">${CHIP_FILE_ICON}</span>
         <span class="editor-context-name">${escapeHtml(name)}</span>
         ${lines ? `<span class="editor-context-lines">${escapeHtml(lines)}</span>` : ''}
-        <span class="editor-context-toggle">${enabled ? CHIP_EYE_ICON : CHIP_EYE_OFF_ICON}</span>
     </button>`;
 }
 
