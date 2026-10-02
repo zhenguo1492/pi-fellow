@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # esbuild does not typecheck: host and webview are checked separately.
+      - run: npm run typecheck
+
+      - run: npm run lint:css
+
+      - run: npm run test:unit
+
+      # The integration suites load out/, so build last and let a broken bundle fail here.
+      - run: npm run compile

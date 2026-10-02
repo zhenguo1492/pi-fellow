@@ -13,6 +13,7 @@
     "url": "https://github.com/zhenguo1492/pi-fellow/issues"
   },
   "homepage": "https://github.com/zhenguo1492/pi-fellow#readme",
+  "qna": "https://github.com/zhenguo1492/pi-fellow/issues",
   "icon": "media/oh-my-pi-chater-icon.png",
   "engines": {
     "vscode": "^1.100.0"

@@ -1,0 +1,82 @@
+name: Bug report
+description: Something in Pi Fellow does not work the way it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I opened a second chat tab and sent a prompt while the first was still streaming.
+        I expected the prompt to go to the second tab; it was answered in the first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: Which CLI family the extension is driving (`oh-my-pi-chater.backend`).
+      options:
+        - omp
+        - pi
+        - not sure
+    validations:
+      required: true
+
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI version
+      description: Output of `omp --version` or `pi --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Pi Fellow and VS Code versions
+      description: From the extension page, and Help → About.
+      placeholder: Pi Fellow 0.1.0, VS Code 1.100.2
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04 / macOS 15.1 / Windows 11
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        View → Output, then pick **Pi Fellow** (and **Pi Fellow: Voice Agent** for voice issues)
+        from the channel dropdown. Paste what appears around the failure.
+        Check it for file paths or anything else you would rather not publish.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues
+          required: true
+        - label: An `omp` or `pi` CLI works on its own in a terminal
+          required: false

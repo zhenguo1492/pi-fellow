@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest something Pi Fellow should be able to do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does Pi Fellow get in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+      description: Describe the behaviour you want, not only the solution you have in mind.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat view and tool cards
+        - TUI tabs
+        - Voice agent (pair programmer)
+        - Blackboard
+        - Dictation and voice services
+        - Settings
+        - Permissions
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: Workarounds, other extensions, or CLI commands you fall back to.
