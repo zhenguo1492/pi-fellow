@@ -49,7 +49,7 @@ src/
 │   ├── html.ts             # escapeHtml: the only HTML escaper (& < > " ')
 │   └── voice*.ts, avatarPresets.ts, translationLanguages.ts  # Voice presets, view protocol, speakers
 ├── utils/                  # fileEditor.ts (FileEditorTracker), diff.ts
-├── voice/                  # Dictation, STT client, VAD, voice settings, voiceprint gate; builtinEngine/ (local STT/TTS/speaker/denoise server)
+├── voice/                  # Dictation, STT client, VAD, voice settings, voiceprint gate; browserAudio.ts (hidden-browser mic/speaker, shared with the voice agent); builtinEngine/ (local STT/TTS/speaker/denoise server)
 ├── voiceAgent/             # Voice agent: VoiceMode, VoiceLlm, HostToolRouter, FloorArbiter, replay, blackboard.ts (board tabs), …
 └── webview/
     ├── main.ts             # Chat entry: mounts Bot view, message listener, message actions, render()

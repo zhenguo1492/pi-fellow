@@ -16,7 +16,7 @@ import { voiceUserMessage, type VoiceAttachments, type VoiceSpeechCall, type Voi
 import type { CodeAnchor } from './codeAnchors';
 import { echoSource, floorFree, initialState, phaseOf, reduce, type ConvEvent, type ConvState, type Effect, type Metrics, type Phase } from './conversation';
 import { classifyBargeIn, isEchoOf, isHallucination, type BargeInVerdict } from './echoFilter';
-import { findChrome, launchHiddenChrome, startBrowserAudio, type BrowserAudio, type PlaybackReport } from './browserAudio';
+import { findChrome, launchHiddenChrome, startBrowserAudio, type BrowserAudio, type PlaybackReport } from '../voice/browserAudio';
 import type { ReplayOutput } from './replay';
 import { ClipLevelMeter } from './botLevel';
 import { TtsClient, type Pcm, type TtsRequestConfig } from './tts';

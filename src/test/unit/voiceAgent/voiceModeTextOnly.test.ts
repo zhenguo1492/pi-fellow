@@ -4,7 +4,7 @@ import type * as SileroVadModule from '../../../voice/sileroVad';
 import { encodeWav } from '../../../voice/stt';
 import { VoiceServiceSync, type VoiceServiceSyncDeps } from '../../../voiceAgent/serviceSync';
 import type { TtsRequestConfig } from '../../../voiceAgent/tts';
-import type { BrowserAudio } from '../../../voiceAgent/browserAudio';
+import type { BrowserAudio } from '../../../voice/browserAudio';
 import type { Phase } from '../../../voiceAgent/conversation';
 import type { VoiceTurnListener, VoiceTurnResult } from '../../../voiceAgent/voiceAgent';
 import { VoiceMode, type ReplyAudioEvent, type VoiceModeOptions } from '../../../voiceAgent/voiceMode';
@@ -14,7 +14,7 @@ const page = vi.hoisted(() => ({
     start: vi.fn(),
 }));
 
-vi.mock('../../../voiceAgent/browserAudio', () => ({
+vi.mock('../../../voice/browserAudio', () => ({
     startBrowserAudio: page.start.mockImplementation(async () => page.audio as BrowserAudio),
     findChrome: () => undefined,
     launchHiddenChrome: vi.fn(),

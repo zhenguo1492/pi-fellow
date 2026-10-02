@@ -38,7 +38,7 @@ docker compose -f docker/docker-compose.yml --profile gpu --profile cpu down
 | `tts` / `tts-cpu` | [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI), text to speech | `http://127.0.0.1:8880/v1` | `oh-my-pi-chater.voiceAgent.tts.url` |
 | `chatterbox` (profile `gpu`) | chatterbox-tts (`chatterbox-multilingual`), text to speech that clones a voice from `voices/` | `http://127.0.0.1:8881/v1` | `oh-my-pi-chater.voiceAgent.tts.url`, model `chatterbox-multilingual`, voice a file name such as `Justin.mp3`, language field "per sentence" |
 
-`stt` and Kokoro listen on 127.0.0.1 only; `chatterbox` listens on 0.0.0.0 so other machines on the LAN can reach it.
+`stt` and `chatterbox` listen on 0.0.0.0, so other machines on the LAN reach them at this host's address (`http://<host>:8010/v1`, `http://<host>:8881/v1`); neither asks for a key, so keep them off untrusted networks. Kokoro listens on 127.0.0.1 only.
 
 ## chatterbox
 

@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { noRecorderMessage, recorderSearchDirs } from '../../../voice/dictation';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+import { chooseCapture, micErrorMessage, noRecorderMessage, recorderExitHint, recorderSearchDirs } from '../../../voice/dictation';
 
 describe('recorderSearchDirs', () => {
     it('keeps PATH first and appends the Homebrew directories a GUI app does not inherit', () => {
@@ -38,9 +41,76 @@ describe('noRecorderMessage', () => {
         expect(noRecorderMessage('win32')).toContain('SoX');
     });
 
+    it('offers the browser everywhere, since it needs no package manager at all', () => {
+        for (const platform of ['darwin', 'linux', 'win32'] as NodeJS.Platform[]) {
+            expect(noRecorderMessage(platform)).toContain('Google Chrome');
+        }
+    });
+
     it('says what went wrong before saying what to install', () => {
         for (const platform of ['darwin', 'linux', 'win32'] as NodeJS.Platform[]) {
-            expect(noRecorderMessage(platform)).toMatch(/^No audio recorder found\. /);
+            expect(noRecorderMessage(platform)).toMatch(/^No way to record found\. /);
         }
+    });
+});
+
+/** A directory holding only the named executables, so a lookup answers for it and not for this machine. */
+const temps: string[] = [];
+function binDir(...executables: string[]): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-fellow-recorders-'));
+    temps.push(dir);
+    for (const name of executables) {
+        fs.writeFileSync(path.join(dir, name), '', { mode: 0o755 });
+    }
+    return dir;
+}
+afterAll(() => temps.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+
+describe('chooseCapture', () => {
+    const chrome = () => '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+
+    it('takes the command-line recorder when the machine has one', () => {
+        const capture = chooseCapture([binDir('arecord')], chrome);
+
+        expect(capture).toEqual({ kind: 'recorder', recorder: expect.objectContaining({ command: expect.stringContaining('arecord') }) });
+    });
+
+    it('prefers arecord over sox rec, which takes seconds to deliver audio', () => {
+        const capture = chooseCapture([binDir('rec', 'arecord')], chrome);
+
+        expect(capture?.kind === 'recorder' && capture.recorder.command).toContain('arecord');
+    });
+
+    it('falls back to the hidden browser when no recorder is installed, as on a stock macOS', () => {
+        expect(chooseCapture([binDir()], chrome)).toEqual({ kind: 'browser', chrome: chrome() });
+    });
+
+    it('gives up only when neither a recorder nor a browser is there', () => {
+        expect(chooseCapture([binDir()], () => undefined)).toBeUndefined();
+    });
+});
+
+describe('micErrorMessage', () => {
+    it('reads a missing device as something to plug in, not as a failure to explain', () => {
+        expect(micErrorMessage('NotFoundError: Requested device not found')).toMatch(/No microphone found/);
+    });
+
+    it('separates a denied permission from a missing device', () => {
+        expect(micErrorMessage('NotAllowedError: Permission denied')).toMatch(/denied/i);
+        expect(micErrorMessage('NotReadableError: Could not start audio source')).toMatch(/could not be read/i);
+    });
+
+    it('passes an error it does not recognise through rather than guessing', () => {
+        expect(micErrorMessage('WeirdError: something new')).toContain('WeirdError: something new');
+    });
+});
+
+describe('recorderExitHint', () => {
+    it('explains the device error SoX reports on a machine with no microphone', () => {
+        expect(recorderExitHint("formats: can't open input `default': can not open audio device")).toMatch(/no microphone/i);
+    });
+
+    it('adds nothing to an exit it has no explanation for', () => {
+        expect(recorderExitHint('exit code 1')).toBe('');
     });
 });

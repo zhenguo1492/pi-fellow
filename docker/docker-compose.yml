@@ -11,8 +11,13 @@ services:
     container_name: whisper-speaches
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8010:8000"
+      # 0.0.0.0: reachable from other machines on the LAN.
+      - "0.0.0.0:8010:8000"
     environment:
+      # The model speaches loads; the image has no default worth relying on.
+      WHISPER__MODEL: ${WHISPER_MODEL:-Systran/faster-whisper-large-v3}
+      # -1 keeps the model loaded: no cold start, and no unload/reload (which hangs speaches).
+      WHISPER__TTL: ${WHISPER_TTL:--1}
       # Languages Whisper's auto-detection may pick, ISO-639-1, comma-separated; the first is preferred on near-ties.
       WHISPER_ALLOWED_LANGUAGES: ${WHISPER_ALLOWED_LANGUAGES:-zh,en}
       # How many times more likely another allowed language must be to beat the preferred one.

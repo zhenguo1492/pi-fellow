@@ -12,6 +12,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DictationStatus, VoiceSettings } from '../shared/protocol';
+import { findChrome, launchHiddenChrome, startBrowserAudio, type BrowserAudio } from './browserAudio';
 import { MicLevelMeter, frameDb } from './micLevel';
 import { describeError } from './modelsProbe';
 import { transcribeChecked, type SpeechGate } from './speakerGate';
@@ -75,19 +76,61 @@ export function recorderSearchDirs(
     return [...dirs, ...EXTRA_RECORDER_DIRS.filter((dir) => !dirs.includes(dir))];
 }
 
-/** What to install, in the words of the platform the user is on. */
+/** What to install, in the words of the platform the user is on. Neither way of capturing is there. */
 export function noRecorderMessage(platform: NodeJS.Platform = process.platform): string {
     const install =
         platform === 'darwin'
-            ? 'Install SoX: `brew install sox`.'
+            ? 'install Google Chrome, or SoX (`brew install sox`)'
             : platform === 'linux'
-              ? 'Install alsa-utils (`sudo apt install alsa-utils`), pulseaudio-utils, or SoX (`rec`).'
-              : 'Install SoX and make sure `rec` is on PATH.';
-    return `No audio recorder found. ${install}`;
+              ? 'install alsa-utils (`sudo apt install alsa-utils`), pulseaudio-utils, SoX, or Google Chrome'
+              : 'install Google Chrome, or SoX so that `rec` is on PATH';
+    return `No way to record found. To use the microphone, ${install}.`;
 }
 
-function findRecorder(): { command: string; args: string[] } | undefined {
-    const dirs = recorderSearchDirs();
+/** getUserMedia's error name, in words that say what to do about it. */
+export function micErrorMessage(error: string): string {
+    if (/NotFound|DevicesNotFound|OverconstrainedError/i.test(error)) {
+        return `No microphone found (${error}). Plug one in and select it as the input device in the system sound settings.`;
+    }
+    if (/NotAllowed|PermissionDenied|SecurityError/i.test(error)) {
+        return `Microphone access was denied (${error}). Allow it for VS Code in the system privacy settings.`;
+    }
+    if (/NotReadable|TrackStart/i.test(error)) {
+        return `The microphone could not be read (${error}). Close whatever else is using it, then try again.`;
+    }
+    return `The microphone could not be opened: ${error}`;
+}
+
+/** A recorder that quit on its own says why in its own words; add what that usually means. */
+export function recorderExitHint(detail: string): string {
+    return /can ?not open audio device|no such (audio )?device|unable to open/i.test(detail)
+        ? ' — usually no microphone is connected, or none is selected as the input device.'
+        : '';
+}
+
+export interface Recorder {
+    command: string;
+    args: string[];
+}
+
+/** How a run will capture: a command-line recorder if the machine has one, else the hidden browser. */
+export type Capture = { kind: 'recorder'; recorder: Recorder } | { kind: 'browser'; chrome: string } | undefined;
+
+/** Both lookups are arguments so this answers for a given machine, not only for the one running it. */
+export function chooseCapture(
+    dirs: string[] = recorderSearchDirs(),
+    chrome: () => string | undefined = findChrome,
+): Capture {
+    const recorder = findRecorder(dirs);
+    if (recorder) {
+        return { kind: 'recorder', recorder };
+    }
+    // macOS ships no recorder at all, so without this fallback dictation needs `brew install sox`.
+    const browser = chrome();
+    return browser ? { kind: 'browser', chrome: browser } : undefined;
+}
+
+function findRecorder(dirs: string[] = recorderSearchDirs()): Recorder | undefined {
     const exts = process.platform === 'win32' ? ['.exe', '.cmd', ''] : [''];
     for (const { bin, args } of RECORDERS) {
         for (const dir of dirs) {
@@ -112,6 +155,8 @@ export function dictationSegmenterParams(s: VoiceSettings): SegmenterParams {
 
 export class DictationSession<T = string> {
     private proc: ChildProcess | undefined;
+    private browser: BrowserAudio | undefined;
+    private chrome: { kill(): void } | undefined;
     private draining: Promise<void> | undefined;
     private buffered: Buffer = Buffer.alloc(0);
     private segmenter: SpeechSegmenter;
@@ -161,15 +206,23 @@ export class DictationSession<T = string> {
     }
 
     start(): void {
-        const recorder = findRecorder();
-        if (!recorder) {
+        const capture = chooseCapture();
+        if (!capture) {
             throw new Error(noRecorderMessage());
         }
         this.vad.reset();
-        const proc = spawn(recorder.command, recorder.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-        this.proc = proc;
         this.recording = true;
         this.emitStatus();
+        if (capture.kind === 'recorder') {
+            this.captureWithRecorder(capture.recorder);
+        } else {
+            this.captureWithBrowser(capture.chrome);
+        }
+    }
+
+    private captureWithRecorder(recorder: Recorder): void {
+        const proc = spawn(recorder.command, recorder.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        this.proc = proc;
 
         proc.stdout!.on('data', (chunk: Buffer) => this.onAudio(chunk));
         proc.stderr!.on('data', (chunk: Buffer) => {
@@ -183,10 +236,46 @@ export class DictationSession<T = string> {
             if (this.recording) {
                 // The recorder quit on its own (no device, permission, unplugged mic).
                 const detail = this.stderr.trim() || `exit code ${code}`;
-                this.events.error(`${path.basename(recorder.command)} stopped: ${detail}`);
+                this.events.error(`${path.basename(recorder.command)} stopped: ${detail}${recorderExitHint(detail)}`);
                 void this.stop();
             }
         });
+    }
+
+    /**
+     * The microphone through the same hidden browser voice mode uses: its page streams 16 kHz mono
+     * s16le over a local WebSocket, the very format a recorder writes to stdout, and WebRTC gives
+     * echo cancellation for free. Starting it takes a browser launch, so `start` does not wait.
+     */
+    private captureWithBrowser(chrome: string): void {
+        void (async () => {
+            try {
+                const audio = await startBrowserAudio({
+                    mic: (chunk) => this.onAudio(chunk),
+                    micStatus: (error) => {
+                        if (error !== undefined && this.recording) {
+                            this.events.error(micErrorMessage(error));
+                            void this.stop();
+                        }
+                    },
+                    playback: () => undefined,
+                    connected: () => undefined,
+                    log: () => undefined,
+                });
+                if (!this.recording) {
+                    // Stopped while the browser was coming up.
+                    audio.close();
+                    return;
+                }
+                this.browser = audio;
+                this.chrome = launchHiddenChrome(chrome, audio.url, [], () => undefined);
+            } catch (err) {
+                if (this.recording) {
+                    this.events.error(describeError(err));
+                    void this.stop();
+                }
+            }
+        })();
     }
 
     /** Stops the microphone; speech captured and not yet transcribed is transcribed now. */
@@ -197,6 +286,10 @@ export class DictationSession<T = string> {
         this.recording = false;
         this.proc?.kill();
         this.proc = undefined;
+        this.chrome?.kill();
+        this.chrome = undefined;
+        this.browser?.close();
+        this.browser = undefined;
         await this.draining;
         this.buffered = Buffer.alloc(0);
         const tail = this.segmenter.flush();

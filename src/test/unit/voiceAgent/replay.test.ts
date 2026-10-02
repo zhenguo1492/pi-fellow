@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { messagePlainText } from '../../../shared/voiceMessageText';
 import type { VoiceReplay, VoiceViewHostMessage } from '../../../shared/voiceViewProtocol';
 import { encodeWav } from '../../../voice/stt';
-import type { BrowserAudio, PlaybackReport } from '../../../voiceAgent/browserAudio';
+import type { BrowserAudio, PlaybackReport } from '../../../voice/browserAudio';
 import { isEchoOf } from '../../../voiceAgent/echoFilter';
 import { BotViewAudio, ReplayPlayer, type ReplayOutput } from '../../../voiceAgent/replay';
 import { replayPieces } from '../../../voiceAgent/sentences';

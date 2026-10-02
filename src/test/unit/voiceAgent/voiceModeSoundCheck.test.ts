@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type * as SileroVadModule from '../../../voice/sileroVad';
 import type { SpeakerVerdict, SpeechGate } from '../../../voice/speakerGate';
-import type { BrowserAudio } from '../../../voiceAgent/browserAudio';
+import type { BrowserAudio } from '../../../voice/browserAudio';
 import type { Phase } from '../../../voiceAgent/conversation';
 import { VoiceMode, type VoiceModeOptions } from '../../../voiceAgent/voiceMode';
 
@@ -10,7 +10,7 @@ const page = vi.hoisted(() => ({
     mic: undefined as ((chunk: Buffer) => void) | undefined,
 }));
 
-vi.mock('../../../voiceAgent/browserAudio', () => ({
+vi.mock('../../../voice/browserAudio', () => ({
     startBrowserAudio: async (handlers: { mic: (chunk: Buffer) => void }) => {
         page.mic = handlers.mic;
         return page.audio as unknown as BrowserAudio;
