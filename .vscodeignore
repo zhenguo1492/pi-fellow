@@ -10,10 +10,13 @@ docs/**
 docker/**
 # Shipped as .tmp/README.vsix.md instead (repo-only images left out: node esbuild.js --readme).
 README.md
+.tmp/**
 AGENT.md
 AGENTS.md
 .gitignore
 vitest.config.ts
+vitest.eval.config.ts
+.stylelintrc.json
 tsconfig.json
 esbuild.js
 package-lock.json
