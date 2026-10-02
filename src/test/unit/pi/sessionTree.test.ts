@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { formatSessionTree } from '../../../pi/sessionTree';
 
 describe('formatSessionTree', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
     it('returns empty array when tree is empty', () => {
         const result = formatSessionTree([], null);
         expect(result).toEqual([]);
@@ -75,6 +77,7 @@ describe('formatSessionTree', () => {
     });
 
     it('correctly parses custom, custom_message, and toolResult entries', () => {
+        vi.stubEnv('HOME', '/home/test-user');
         const rawTree = [
             {
                 entry: {
@@ -102,7 +105,7 @@ describe('formatSessionTree', () => {
                                                 type: 'toolCall',
                                                 id: 'tc-1',
                                                 name: 'read',
-                                                arguments: { path: '/home/zheng/test.ts', offset: 1, limit: 10 },
+                                                arguments: { path: '/home/test-user/test.ts', offset: 1, limit: 10 },
                                             },
                                         ],
                                     },
