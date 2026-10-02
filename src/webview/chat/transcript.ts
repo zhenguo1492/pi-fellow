@@ -457,8 +457,8 @@ function buildWelcome(): HTMLElement {
     const modelTitle = model ? ` title="${escapeHtml(model.id)}"` : '';
     const provider = model?.provider ? escapeHtml(model.provider) : '<span class="welcome-meta-empty">—</span>';
     w.innerHTML = `
-        <div class="welcome-icon">&pi;</div>
-        <div class="welcome-title">PI Buddy</div>
+        <div class="welcome-icon" role="img" aria-label="π"></div>
+        <div class="welcome-title">Pi Fellow</div>
         <div class="welcome-subtitle">Ask anything. ${backendLabel} can read, write, and execute code for you.</div>
         <dl class="welcome-meta">
             <dt>Agent</dt><dd><span class="welcome-backend-badge welcome-backend-badge--${state.activeBackend}">${backendLabel}</span></dd>

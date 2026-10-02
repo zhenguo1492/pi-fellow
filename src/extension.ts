@@ -1,6 +1,6 @@
 /**
  * @license MIT
- * PI Buddy — Copyright (c) 2026 guo.zheng
+ * Pi Fellow — Copyright (c) 2026 guo.zheng
  *
  * Derived from vscode-pi-agent (https://github.com/FChatin/vs-pi-agent),
  * Copyright (c) 2026 FChatin, released under the MIT License.
@@ -55,7 +55,7 @@ async function promptInstallCli(): Promise<void> {
     const installPi = 'Install pi';
     const reload = 'Reload Window';
     const pick = await vscode.window.showWarningMessage(
-        'PI Buddy needs the omp or pi CLI. Install one, then reload the window.',
+        'Pi Fellow needs the omp or pi CLI. Install one, then reload the window.',
         installOmp,
         installPi,
         reload,
@@ -76,10 +76,10 @@ async function checkPiNativeModules(outputChannel: vscode.OutputChannel): Promis
         const npmDir = path.join(getPiAgentDir(), 'npm');
         if (invocation.backend === 'pi' && !(await canLoadPiNativeModules(invocation, npmDir))) {
             outputChannel.appendLine(
-                'WARNING: better-sqlite3 failed to load under pi Node. Memory/search tools may fail. Run "PI Buddy: Rebuild Pi native modules".',
+                'WARNING: better-sqlite3 failed to load under pi Node. Memory/search tools may fail. Run "Pi Fellow: Rebuild Pi native modules".',
             );
             void vscode.window.showWarningMessage(
-                'Pi memory/search native modules are not loading under your global pi Node. Run "PI Buddy: Rebuild Pi native modules" or reload after fixing pi Node.',
+                'Pi memory/search native modules are not loading under your global pi Node. Run "Pi Fellow: Rebuild Pi native modules" or reload after fixing pi Node.',
             );
         }
     } catch (err: unknown) {
@@ -105,8 +105,8 @@ async function clearExtensionOnlyKeys(context: vscode.ExtensionContext, outputCh
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-    const outputChannel = vscode.window.createOutputChannel('PI Buddy');
-    outputChannel.appendLine('PI Buddy extension activating...');
+    const outputChannel = vscode.window.createOutputChannel('Pi Fellow');
+    outputChannel.appendLine('Pi Fellow extension activating...');
     setPiExtensionPath(context.extensionPath);
     context.subscriptions.push(initWindowBackend(context.workspaceState));
 
@@ -161,8 +161,9 @@ export function activate(context: vscode.ExtensionContext): void {
             modelStatus.setSession(sidebarProvider.activeSession);
         }
         sidebarProviderForShutdown = sidebarProvider;
-        // Commands act on the chat tab shown in the sidebar; `session` is only the first tab.
-        const activeSession = () => sidebarProvider.activeSession ?? session;
+        // Commands act on the chat tab shown in the sidebar; none when the user closed every tab (`session`
+        // was only the first tab's, disposed with it).
+        const activeSession = () => sidebarProvider.activeSession;
 
         registerAttachFromExplorer(context, () => sidebarProvider);
         context.subscriptions.push(
@@ -171,7 +172,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 worker: sidebarProvider,
                 chat: sidebarProvider,
                 resumeList: sidebarProvider,
-                installedSkills: () => activeSession().getSkillsAsync(),
+                installedSkills: async () => (await activeSession()?.getSkillsAsync()) ?? [],
             }),
         );
         // After the voice agent's history is in: a tab the user only talked to it about comes back under its voice name.
@@ -193,7 +194,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
             vscode.commands.registerCommand('oh-my-pi-chater.newChat', async () => {
                 const session = activeSession();
-                await session?.newSession();
+                if (!session) {
+                    // Every tab closed: a new chat is a new tab.
+                    await sidebarProvider.createTab();
+                    return;
+                }
+                await session.newSession();
                 await sidebarProvider.pushStateSync();
                 sidebarProvider.postModelFooter();
                 modelStatus.refresh();
@@ -275,7 +281,7 @@ export function activate(context: vscode.ExtensionContext): void {
             ),
 
             vscode.commands.registerCommand('oh-my-pi-chater.reloadSession', async () => {
-                await activeSession().reloadPiAgentResources();
+                await activeSession()?.reloadPiAgentResources();
                 sidebarProvider.sendStateSync();
             }),
 
@@ -286,7 +292,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
             vscode.commands.registerCommand('oh-my-pi-chater.rebuildNativeModules', async () => {
                 await rebuildAgentNativeModules(outputChannel);
-                await activeSession().reloadPiAgentResources();
+                await activeSession()?.reloadPiAgentResources();
                 sidebarProvider.sendStateSync();
             }),
         );
@@ -355,11 +361,11 @@ export function activate(context: vscode.ExtensionContext): void {
             outputChannel.appendLine(`Could not migrate the text-to-speech settings: ${err instanceof Error ? err.message : String(err)}`),
         );
 
-        outputChannel.appendLine('PI Buddy extension activated.');
+        outputChannel.appendLine('Pi Fellow extension activated.');
     } catch (err: any) {
         const msg = err?.message ?? String(err);
         outputChannel.appendLine(`Failed to activate: ${msg}`);
-        vscode.window.showErrorMessage(`PI Buddy failed to activate: ${msg}`);
+        vscode.window.showErrorMessage(`Pi Fellow failed to activate: ${msg}`);
         registerBootErrorSidebar(context, msg);
     }
 }

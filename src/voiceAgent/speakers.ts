@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AVATAR_PRESETS, ICON_PRESETS, avatarPresetSrc, avatarPresetThinking } from '../shared/avatarPresets';
+import { AVATAR_PRESETS, DEFAULT_AVATAR_PRESETS, ICON_PRESETS, avatarPresetAnimations, avatarPresetSrc } from '../shared/avatarPresets';
 import {
     avatarImageMime,
     parseAvatarSetting,
@@ -48,7 +48,7 @@ export async function resolveSpeakers(): Promise<ResolvedSpeakers> {
         (['user', 'bot'] as const).map(async (id) => {
             let avatar: VoiceAvatar | undefined;
             try {
-                avatar = await resolveAvatar(config.get(AVATAR_KEY[id]));
+                avatar = await resolveAvatar(config.get(AVATAR_KEY[id]), id);
             } catch (err) {
                 errors[id] = err instanceof Error ? err.message : String(err);
             }
@@ -58,11 +58,10 @@ export async function resolveSpeakers(): Promise<ResolvedSpeakers> {
     return { speakers, errors };
 }
 
-async function resolveAvatar(raw: unknown): Promise<VoiceAvatar | undefined> {
-    const setting = parseAvatarSetting(raw);
-    if (setting.kind === 'none') {
-        return undefined;
-    }
+/** An avatar setting as the views show it; empty is the speaker's default preset. */
+async function resolveAvatar(raw: unknown, id: VoiceSpeakerId): Promise<VoiceAvatar> {
+    const parsed = parseAvatarSetting(raw);
+    const setting = parsed.kind === 'none' ? { kind: 'preset' as const, id: DEFAULT_AVATAR_PRESETS[id] } : parsed;
     if (setting.kind === 'text') {
         return { kind: 'text', text: setting.text };
     }
@@ -76,7 +75,7 @@ async function resolveAvatar(raw: unknown): Promise<VoiceAvatar | undefined> {
             const ids = [...ICON_PRESETS, ...AVATAR_PRESETS].map((p) => p.id).join(', ');
             throw new Error(`There is no avatar preset "${setting.id}": pick one of ${ids}.`);
         }
-        return { kind: 'image', src, think: avatarPresetThinking(setting.id) };
+        return { kind: 'image', src, ...avatarPresetAnimations(setting.id) };
     }
     const file = avatarPath(setting.path);
     const mime = avatarImageMime(file);
@@ -108,8 +107,11 @@ function avatarPath(raw: string): string {
     return root ? path.join(root, raw) : path.resolve(raw);
 }
 
-/** "Choose picture…" on the settings page: saves the picked file as the avatar. */
-export async function pickAvatar(id: VoiceSpeakerId): Promise<void> {
+/**
+ * Upload on the settings page: picks a picture for the speaker's avatar without saving it (Save does).
+ * The avatar setting's value, and the picture as the Bot view would show it or why it can't.
+ */
+export async function pickAvatar(id: VoiceSpeakerId): Promise<{ value: string; resolved?: VoiceAvatar; error?: string } | undefined> {
     const picked = await vscode.window.showOpenDialog({
         canSelectMany: false,
         openLabel: 'Use as avatar',
@@ -117,7 +119,12 @@ export async function pickAvatar(id: VoiceSpeakerId): Promise<void> {
         filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'] },
     });
     const file = picked?.[0];
-    if (file) {
-        await vscode.workspace.getConfiguration(SECTION).update(AVATAR_KEY[id], file.fsPath, vscode.ConfigurationTarget.Global);
+    if (!file) {
+        return undefined;
+    }
+    try {
+        return { value: file.fsPath, resolved: await resolveAvatar(file.fsPath, id) };
+    } catch (err) {
+        return { value: file.fsPath, error: err instanceof Error ? err.message : String(err) };
     }
 }

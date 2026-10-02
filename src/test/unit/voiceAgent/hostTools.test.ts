@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { WorkerEditLocks } from '../../../pi/workerEdits';
 import { HostToolRouter, terminalKeys, type EditorHands, type ToolTurn } from '../../../voiceAgent/hostTools';
+import type { BoardHands, BoardMarkStyle, BoardTarget, BoardViewRequest, BoardWriteRequest } from '../../../shared/board';
 import { findViewers, type ExtensionManifest } from '../../../voiceAgent/viewers';
 import type {
     WorkerAnswer,
@@ -385,26 +386,122 @@ describe('HostToolRouter: working itself and directing the worker', () => {
     });
 });
 
-describe('HostToolRouter: show_text', () => {
-    it('shows text in any permission mode and without an editor, touching nothing', async () => {
-        const { worker, turn, edits, commands } = setup();
+class FakeBoards implements BoardHands {
+    writes: BoardWriteRequest[] = [];
+    points: Array<{ target: BoardTarget; style: BoardMarkStyle | undefined }> = [];
+    views: BoardViewRequest[] = [];
+    async write(request: BoardWriteRequest) {
+        this.writes.push(request);
+        return 'Board b1 "Login"\nh1 heading "Login"';
+    }
+    async point(target: BoardTarget, style: BoardMarkStyle | undefined) {
+        this.points.push({ target, style });
+        return 'Pointed.';
+    }
+    async view(request: BoardViewRequest) {
+        this.views.push(request);
+        return 'Done.';
+    }
+}
+
+describe('HostToolRouter: show_me and the boards', () => {
+    const noResearch = () => {
+        throw new Error('no research');
+    };
+    const withBoards = () => {
+        const { worker, turn } = setup();
+        const boards = new FakeBoards();
+        return { worker, turn, boards, router: new HostToolRouter(worker, () => undefined, () => true, noResearch, undefined, boards) };
+    };
+    const diagram = '```mermaid\nflowchart LR\n  A --> B\n```';
+
+    it('shows short content as a card in any permission mode, touching nothing', async () => {
+        const { worker, turn, boards, router } = withBoards();
         worker.level = 'plan';
-        const router = new HostToolRouter(worker, () => undefined, () => true, () => {
-            throw new Error('no research');
-        });
-        const shown = await router.execute('show_text', { text: 'SELECT 1;', language: 'sql' }, turn(1));
+        const shown = await router.execute('show_me', { markdown: '```sql\nSELECT 1;\n```' }, turn(1));
         expect(shown).toEqual({ text: expect.stringMatching(/not read aloud/), isError: false });
-        expect([edits, commands, worker.sends, worker.approvals]).toEqual([[], [], [], []]);
+        expect([boards.writes, worker.sends, worker.approvals]).toEqual([[], [], []]);
     });
 
-    it('refuses blank text, and text too long to keep in the transcript', async () => {
-        const { router, turn } = setup();
-        expect(await router.execute('show_text', { text: '  ' }, turn(1))).toEqual({ text: 'Missing text.', isError: true });
-        expect((await router.execute('show_text', { text: 'x'.repeat(20000) }, turn(1))).isError).toBe(false);
-        expect(await router.execute('show_text', { text: 'x'.repeat(20001) }, turn(1))).toEqual({
+    it('refuses content too long to keep in the transcript', async () => {
+        const { turn, boards, router } = withBoards();
+        expect(await router.execute('show_me', { markdown: 'x'.repeat(20001) }, turn(1))).toEqual({
             text: expect.stringMatching(/^Not shown: 20001 characters, at most 20000\./),
             isError: true,
         });
+        expect(boards.writes).toEqual([]);
+    });
+
+    it('writes anything else on a board, in Plan mode too', async () => {
+        const { worker, turn, boards, router } = withBoards();
+        worker.level = 'plan';
+        const written = await router.execute('show_me', { markdown: diagram, title: 'Login', board: 'new' }, turn(1));
+        expect(written).toEqual({ text: expect.stringMatching(/^Board b1 /), isError: false });
+        expect(boards.writes).toEqual([{ markdown: diagram, title: 'Login', board: 'new', mode: 'append' }]);
+        await router.execute('show_me', { markdown: '', mode: 'block', block: 'd1' }, turn(2));
+        expect(boards.writes[1]).toEqual({ markdown: '', mode: 'block', block: 'd1' });
+    });
+
+    it('refuses block mode without a block, an unknown mode, and a board without the boards', async () => {
+        const { turn, boards, router, worker } = withBoards();
+        expect((await router.execute('show_me', { markdown: diagram, mode: 'block' }, turn(1))).text).toMatch(/^Missing block/);
+        expect((await router.execute('show_me', { markdown: diagram, mode: 'prepend' }, turn(1))).text).toMatch(/^Unknown mode prepend/);
+        expect(boards.writes).toEqual([]);
+        const bare = new HostToolRouter(worker, () => undefined, () => true, noResearch);
+        expect(await bare.execute('show_me', { markdown: diagram }, turn(1))).toEqual({ text: 'There is no board here.', isError: true });
+    });
+
+    it('refuses every board tool in a proactive turn', async () => {
+        const { boards, router } = withBoards();
+        const proactive = { tabId: 'tab-1', seq: 1, userAt: 1000, proactive: true };
+        expect((await router.execute('show_me', { markdown: 'ls' }, proactive)).isError).toBe(true);
+        expect((await router.execute('board_point', { block: 'p1' }, proactive)).isError).toBe(true);
+        expect((await router.execute('board_view', { action: 'list' }, proactive)).isError).toBe(true);
+        expect([boards.writes, boards.points, boards.views]).toEqual([[], [], []]);
+    });
+
+    it('parses board_point: lines, text, style', async () => {
+        const { turn, boards, router } = withBoards();
+        await router.execute('board_point', { board: 'b2', block: 'c1', startLine: 3, endLine: 5, style: 'box' }, turn(1));
+        await router.execute('board_point', { block: 'd1', text: 'Client' }, turn(1));
+        expect(boards.points).toEqual([
+            { target: { board: 'b2', block: 'c1', startLine: 3, endLine: 5 }, style: 'box' },
+            { target: { block: 'd1', text: 'Client' }, style: undefined },
+        ]);
+        expect((await router.execute('board_point', { block: 'c1', style: 'circle' }, turn(1))).text).toMatch(/^Unknown style circle/);
+        expect((await router.execute('board_point', {}, turn(1))).text).toBe('Missing block.');
+        expect(boards.points).toHaveLength(2);
+    });
+
+    it('parses board_view: move and open targets, maximize, scroll places', async () => {
+        const { turn, boards, router } = withBoards();
+        await router.execute('board_view', { action: 'move', to: 'window' }, turn(1));
+        await router.execute('board_view', { action: 'move', to: 'main' }, turn(1));
+        await router.execute('board_view', { action: 'open', board: 'b2', to: 'main' }, turn(1));
+        await router.execute('board_view', { action: 'maximize' }, turn(1));
+        await router.execute('board_view', { action: 'restore' }, turn(1));
+        await router.execute('board_view', { action: 'scroll', board: 'b1', where: 'top' }, turn(1));
+        await router.execute('board_view', { action: 'scroll', where: 'd2' }, turn(1));
+        await router.execute('board_view', { action: 'expand', block: ' d2 ', where: 'top' }, turn(1));
+        await router.execute('board_view', { action: 'collapse', block: 'd2' }, turn(1));
+        expect(boards.views).toEqual([
+            { action: 'move', to: 'window' },
+            { action: 'move', to: 'main' },
+            { action: 'open', board: 'b2', to: 'main' },
+            { action: 'maximize' },
+            { action: 'restore' },
+            { action: 'scroll', board: 'b1', where: 'top' },
+            { action: 'scroll', where: { block: 'd2' } },
+            { action: 'expand', block: 'd2' },
+            { action: 'collapse' },
+        ]);
+        expect((await router.execute('board_view', { action: 'zoom' }, turn(1))).text).toMatch(/^Unknown action zoom/);
+        expect((await router.execute('board_view', { action: 'move' }, turn(1))).text).toMatch(/^Missing to/);
+        expect((await router.execute('board_view', { action: 'move', to: 'up' }, turn(1))).text).toMatch(/^Unknown to up/);
+        expect((await router.execute('board_view', { action: 'maximize', to: 'main' }, turn(1))).text).toMatch(/^to goes with move or open/);
+        expect((await router.execute('board_view', { action: 'scroll' }, turn(1))).text).toMatch(/^Missing where/);
+        expect((await router.execute('board_view', { action: 'expand' }, turn(1))).text).toMatch(/^Missing block/);
+        expect(boards.views).toHaveLength(9);
     });
 });
 

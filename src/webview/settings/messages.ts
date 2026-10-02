@@ -3,11 +3,12 @@ import { applySttDryRun, applyTtsDryRunResult } from '../voiceDryRun';
 import { applyVoiceprintRun } from '../voiceprintDialog';
 import { vscode } from './api';
 import { showToast } from './dom';
+import { applySavedSettings, applySettingsSaved, pruneEdits } from './edits';
 import { render, renderMcpSection } from './render';
 import { renderSkillsSection } from './skills';
 import { settingsState } from './state';
 import { scrollToSettingsSection } from './tabs';
-import { renderVoiceSkills } from './voice';
+import { applyAvatarPicked, renderVoiceSkills } from './voice';
 import { applyBuiltinVoiceStatus, applyVoiceSaved, applyVoiceTestResult, renderVoiceTab, syncVoiceFields } from './voiceSetup';
 
 /** Handles every message the extension host sends to the settings page. */
@@ -16,25 +17,23 @@ export function registerMessageListener(): void {
         const msg = event.data as SettingsServerMessage;
         switch (msg.type) {
             case 'settings': {
-                const previous = settingsState.currentSettings;
-                settingsState.currentSettings = msg.data;
-                if (msg.data.mcpSnapshot) {
-                    settingsState.mcpSnapshot = msg.data.mcpSnapshot;
-                }
+                const previous = settingsState.savedSettings;
+                applySavedSettings(msg.data);
                 if (previous && withoutVoice(previous) === withoutVoice(msg.data)) {
-                    // Only the voice settings changed (e.g. a Test saved them): update in place, so the
+                    // Only the voice settings changed (e.g. a Save): update in place, so the
                     // fields keep their undo history (Ctrl+Z back to the previous URL).
                     syncVoiceFields();
                 } else if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
-                    // Keep the current draft when settings arrive during editing.
+                    // Keep the field being typed in when settings arrive during editing.
                     renderVoiceTab();
                 } else {
-                    render(msg.data);
+                    render();
                 }
                 break;
             }
             case 'mcpSnapshot':
                 settingsState.mcpSnapshot = msg.snapshot;
+                pruneEdits();
                 renderMcpSection();
                 break;
             case 'skills':
@@ -60,6 +59,14 @@ export function registerMessageListener(): void {
                 break;
             case 'voiceSaved':
                 applyVoiceSaved(msg);
+                break;
+            case 'settingsSaved':
+                applySettingsSaved();
+                showToast(msg.message, msg.ok ? 'info' : 'error');
+                break;
+            case 'avatarPicked':
+                applyAvatarPicked(msg);
+                render();
                 break;
             case 'builtinVoiceStatus':
                 applyBuiltinVoiceStatus(msg);

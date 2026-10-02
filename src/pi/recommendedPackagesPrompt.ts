@@ -126,7 +126,7 @@ export async function maybePromptForRecommendedPackages(
     }
 
     const choice = await vscode.window.showWarningMessage(
-        `PI Buddy: missing Pi CLI packages — ${list}. ${detail} Install via npm into ~/.pi/agent?`,
+        `Pi Fellow: missing Pi CLI packages — ${list}. ${detail} Install via npm into ~/.pi/agent?`,
         { modal: false },
         'Install all',
         'Open Settings',

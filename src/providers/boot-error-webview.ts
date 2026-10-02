@@ -24,9 +24,9 @@ export function createBootErrorWebviewProvider(message: string): vscode.WebviewV
 </style>
 </head>
 <body>
-  <h2>PI Buddy could not start</h2>
+  <h2>Pi Fellow could not start</h2>
   <p>${escapeHtml(message)}</p>
-  <p>Open <strong>Output → PI Buddy</strong> for details, then reinstall the VSIX or run <code>npm install</code> in the extension folder.</p>
+  <p>Open <strong>Output → Pi Fellow</strong> for details, then reinstall the VSIX or run <code>npm install</code> in the extension folder.</p>
 </body>
 </html>`;
         },
@@ -84,7 +84,7 @@ export function createCliMissingWebviewProvider(): vscode.WebviewViewProvider {
 </head>
 <body>
   <h2>Install omp or pi to start chatting</h2>
-  <p>PI Buddy drives an agent CLI, and neither <code>omp</code> nor <code>pi</code> was found on this machine. Install one of them:</p>
+  <p>Pi Fellow drives an agent CLI, and neither <code>omp</code> nor <code>pi</code> was found on this machine. Install one of them:</p>
   <h3>omp (Oh My Pi, recommended) — <a href="${OMP_INSTALL_URL}">omp.sh</a></h3>
   <pre>curl -fsSL https://omp.sh/install | sh</pre>
   <pre>bun install -g @oh-my-pi/pi-coding-agent</pre>

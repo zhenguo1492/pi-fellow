@@ -51,7 +51,7 @@ export class PiHostTools {
             const id = String(request.id);
             const call = JSON.parse(String(request.placeholder)) as HostToolCallPayload;
             this._open.set(call.callKey, id);
-            return { type: 'host_tool_call', id, toolName: call.toolName, arguments: call.arguments };
+            return { type: 'host_tool_call', id, toolCallId: call.callKey, toolName: call.toolName, arguments: call.arguments };
         }
         if (request.method === 'setStatus' && request.statusKey === HOST_TOOL_CANCEL_STATUS_KEY) {
             const callKey = String(request.statusText);

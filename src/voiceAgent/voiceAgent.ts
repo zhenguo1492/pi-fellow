@@ -1,4 +1,5 @@
 import type { VoiceAttachments, VoiceCallUsage, VoiceObservationKind, VoiceUsageTotals } from '../shared/voiceViewProtocol';
+import type { BoardContextSource, BoardHands } from '../shared/board';
 import type { ImageContent } from '../shared/piTypes';
 import { AnchorStream, type CodeAnchor } from './codeAnchors';
 import { FloorArbiter, type ArbiterSettings, type ArbiterView, type Observation } from './floorArbiter';
@@ -18,7 +19,7 @@ export interface VoiceAgentOptions {
     sessionDir: string;
     /** Remembers each task's voice context across agents, so a restart picks the conversation up again. */
     contexts?: VoiceContextMemory;
-    /** `provider/id`; empty follows the worker's model when the process starts (design §5.4). */
+    /** `provider/id`; empty takes the worker's model when the process starts (design §5.4). `setModel` changes it. */
     model: string;
     thinking: string;
     /** The skills to load, asked each time the process starts; absent loads none. Research never gets skills. */
@@ -44,6 +45,8 @@ export interface VoiceAgentOptions {
     onRead?: (target: FocusTarget) => void;
     /** Its hands in the user's VS Code: open_file, list_viewers, open_with and read_output, editing and managing files, the terminal and the debugger. */
     hands?: EditorHands;
+    /** The blackboards: show_me and the board tools write and point there; every user turn carries the user's mark and saved edits. */
+    boards?: BoardContextSource & BoardHands;
     /** The names set for the voice agent and the user, read at every turn. */
     names?: () => { bot: string; user: string };
     /** `voiceAgent.humor`, read at every turn; absent is off: no `<tone>`. */
@@ -55,8 +58,8 @@ export interface VoiceAgentOptions {
 export interface VoiceContextMemory {
     /** The session file of the task's last voice context, while it is still on disk. */
     savedContext(task: WorkerTask): string | undefined;
-    /** The task's voice context is now `sessionFile`; `resumed` when it is the saved one. */
-    bindContext(task: WorkerTask, sessionFile: string, resumed: boolean): void;
+    /** The task's voice context is now `sessionFile`; `resumed` when it is the saved one. Awaited before the turn is built, so what it loads is in the turn's message. */
+    bindContext(task: WorkerTask, sessionFile: string, resumed: boolean): void | Promise<void>;
 }
 
 export interface ProactiveTurnHooks {
@@ -95,8 +98,13 @@ export interface VoiceTurnListener {
     onText?(delta: string): void;
     /** The reply points at code here, between the text before and after it. */
     onAnchor?(anchor: CodeAnchor): void;
-    /** `result.research` is the job a `research` call started. */
-    onToolCall?(name: string, args: Record<string, unknown>, result: ToolResult): void;
+    /**
+     * A host tool call began: first as the model starts writing it (no `args` yet), again with its
+     * `args` as it runs. `id` is the model's tool call id; `onToolCall` names the same one.
+     */
+    onToolStart?(id: string, name: string, args?: Record<string, unknown>): void;
+    /** A host tool call finished; `result.research` is the job a `research` call started. */
+    onToolCall?(id: string, name: string, args: Record<string, unknown>, result: ToolResult): void;
     /** The voice agent is looking something up itself (read, grep, glob, web_search). */
     onLookup?(lookup: VoiceLookup): void;
     /** That lookup finished. */
@@ -142,6 +150,8 @@ interface VoiceContext {
     research: ResearchJob[];
     /** The editor as last shown to this context, so an unchanged one is not repeated. */
     editorKey?: string;
+    /** The user's board mark as last shown to this context: a mark goes in the next user turn only. */
+    boardMarkKey?: string;
 }
 
 interface RunningTurn {
@@ -192,6 +202,13 @@ export class VoiceAgent {
     private _stopped = false;
     /** `provider/id` of the running omp process, once it is up. */
     private _model: string | undefined;
+    /** `voiceAgent.model` as chosen: `provider/id`, or empty for the chat tab's model. */
+    private _chosenModel: string;
+    /**
+     * The model the process is kept on: the chosen one, else the chat tab's when the process started
+     * or empty was chosen. Undefined: whatever the process runs.
+     */
+    private _wantedModel: string | undefined;
     /** The loaded voice context's totals, refreshed after each turn and context switch. */
     private _usage: VoiceUsageTotals | undefined;
     /** Voice came on and the agent has not spoken first yet; dropped once the user speaks. */
@@ -201,6 +218,7 @@ export class VoiceAgent {
 
     constructor(private readonly _options: VoiceAgentOptions) {
         const { worker } = _options;
+        this._chosenModel = _options.model;
         this._research = new ResearchRunner(_options.cwd);
         this._arbiter = new FloorArbiter(_options.arbiter);
         this._router = new HostToolRouter(
@@ -209,6 +227,7 @@ export class VoiceAgent {
             _options.confirmBeforeDispatch,
             (tabId, question) => this._startResearch(tabId, question),
             _options.hands,
+            _options.boards,
         );
         // The user answered one of the voice agent's approval cards: say what came of it.
         this._router.onApprovalSettled = () => {
@@ -391,6 +410,25 @@ export class VoiceAgent {
         });
     }
 
+    /**
+     * `voiceAgent.model` changed (`provider/id`; empty: the chat tab's model as it is now). The
+     * running process switches between turns, so a reply in progress ends on the model it began
+     * with; not started, the process starts on it. Rejects when the agent cannot switch to it.
+     */
+    setModel(model: string): Promise<void> {
+        this._chosenModel = model;
+        this._wantedModel = model || this._options.worker.activeTask()?.model;
+        if (this._stopped || !this._llm) {
+            return Promise.resolve();
+        }
+        return this._enqueue(async () => {
+            const llm = await this._llm?.catch(() => undefined);
+            if (!this._stopped && llm) {
+                await this._syncModel(llm);
+            }
+        });
+    }
+
     /** Turns run one at a time (§7.7 invariant 1). */
     private _enqueue<T>(work: () => Promise<T>): Promise<T> {
         this._inFlight++;
@@ -432,11 +470,15 @@ export class VoiceAgent {
         if (!task) {
             throw new Error('No chat tab');
         }
-        const llm = await this._ensureLlm(task);
-        const { key, fresh } = await this._enterContext(llm, task);
+        const { llm, key, fresh } = await this._load(task);
         const context = this._contexts.get(key)!;
         const digest = this._digest(task.tabId);
         const requests = worker.pendingRequests(task.tabId);
+        const mark = this._options.boards?.userMark();
+        // Keyed without `latest`: an editor selection made since shows in <editor>, not as a new mark.
+        const markKey = mark && JSON.stringify([mark.board, mark.mark]);
+        const markIsNew = markKey !== context.boardMarkKey;
+        context.boardMarkKey = markKey;
         const input: TurnInput = {
             trigger: { kind: 'user', text, source, files: options.attachments?.files },
             status: worker.status(task.tabId),
@@ -452,6 +494,9 @@ export class VoiceAgent {
             editor: this._editorFor(context),
             names: this._options.names?.(),
             interrupted: this._takeInterrupted(options.interrupted),
+            board: markIsNew ? mark : undefined,
+            boardEdits: this._options.boards?.takeEdits(),
+            boards: fresh ? this._options.boards?.list() : undefined,
         };
         input.tone = this._tone.next(input, this._options.humor?.() ?? 'off');
         const message = buildTurnMessage(input);
@@ -475,8 +520,7 @@ export class VoiceAgent {
         if (this._stopped || this._userWaiting > 0 || !task) {
             return undefined;
         }
-        const llm = await this._ensureLlm(task);
-        const { key, fresh } = await this._enterContext(llm, task);
+        const { llm, key, fresh } = await this._load(task);
         // The user spoke while the context loaded: their turn goes first and covers this.
         if (this._stopped || this._userWaiting > 0 || this._options.floorBusy?.()) {
             return undefined;
@@ -519,6 +563,8 @@ export class VoiceAgent {
             editor: this._editorFor(context),
             names: this._options.names?.(),
             interrupted: this._takeInterrupted(),
+            // Edits and the user's mark wait for the user's turn; the board list comes with the context.
+            boards: fresh ? this._options.boards?.list() : undefined,
         };
         input.tone = this._tone.next(input, this._options.humor?.() ?? 'off');
         const message = buildTurnMessage(input);
@@ -639,11 +685,13 @@ export class VoiceAgent {
                     show(shown);
                 }
             },
+            onToolStart: (call) => listener.onToolStart?.(call.id, call.toolName),
             onToolCall: (call) => {
+                listener.onToolStart?.(call.toolCallId, call.toolName, call.arguments);
                 executing.push(
                     this._router.execute(call.toolName, call.arguments, turn).then((result) => {
                         toolCalls.push({ name: call.toolName, args: call.arguments, result });
-                        listener.onToolCall?.(call.toolName, call.arguments, result);
+                        listener.onToolCall?.(call.toolCallId, call.toolName, call.arguments, result);
                         this._options.onChange?.();
                         if (!cancelled.has(call.id)) {
                             llm.sendToolResult(call.id, result.text, result.isError);
@@ -691,16 +739,48 @@ export class VoiceAgent {
         return result;
     }
 
+    /** The process up, the task's voice context loaded, and on the model chosen for it. */
+    private async _load(task: WorkerTask): Promise<{ llm: VoiceLlm; key: string; fresh: boolean }> {
+        const llm = await this._ensureLlm(task);
+        const entered = await this._enterContext(llm, task);
+        // A voice context brings back the model it was last on; the chosen one stays.
+        await this._syncModel(llm).catch((err: unknown) => this._options.log(err instanceof Error ? err.message : String(err)));
+        return { llm, ...entered };
+    }
+
+    /** Puts the process on `_wantedModel` when it runs another one. Only while idle. */
+    private async _syncModel(llm: VoiceLlm): Promise<void> {
+        const wanted = this._wantedModel;
+        if (wanted && wanted !== llm.model) {
+            try {
+                await llm.setModel(wanted);
+                this._options.log(`Voice agent switched to ${llm.model}.`);
+            } catch (err) {
+                // Not tried again on every turn: the process stays on what it runs until another choice.
+                this._wantedModel = undefined;
+                throw new Error(`The voice agent could not switch to ${wanted}: ${err instanceof Error ? err.message : String(err)}`);
+            } finally {
+                this._model = llm.model;
+                this._options.onChange?.();
+            }
+        } else if (this._model !== llm.model) {
+            this._model = llm.model;
+            this._options.onChange?.();
+        }
+    }
+
     private _ensureLlm(task: WorkerTask): Promise<VoiceLlm> {
         if (!this._llm) {
-            const { cwd, sessionDir, model, thinking, log, skills } = this._options;
+            const { cwd, sessionDir, thinking, log, skills } = this._options;
+            const model = this._chosenModel || task.model;
+            this._wantedModel = model;
             const started = (skills?.() ?? Promise.resolve([])).then((chosen) =>
                 VoiceLlm.start(
                     {
                         cwd,
                         sessionDir,
                         systemPrompt: voiceSystemPrompt(this._options.extraPrompt?.() ?? ''),
-                        model: model || task.model,
+                        model,
                         thinking,
                         tools: VOICE_HOST_TOOLS,
                         skills: chosen,
@@ -755,6 +835,8 @@ export class VoiceAgent {
         const existing = this._contexts.get(key);
         if (existing) {
             await llm.switchSession(existing.sessionFile);
+            // Back to a context this agent already had: its boards come back with it.
+            await this._options.contexts?.bindContext(task, existing.sessionFile, true);
             this._loadedKey = key;
             this._refreshUsage(llm);
             return { key, fresh: false };
@@ -772,7 +854,7 @@ export class VoiceAgent {
         }
         const resumed = sessionFile !== undefined;
         sessionFile ??= await llm.newSession();
-        this._options.contexts?.bindContext(task, sessionFile, resumed);
+        await this._options.contexts?.bindContext(task, sessionFile, resumed);
         // A new context: older activity is either in <task-history> or from an earlier task in this
         // tab, so keep only the run in progress, if any. A resumed one saw none of what this agent's
         // digest holds (it starts with the agent): all of it.
@@ -808,7 +890,7 @@ export class VoiceAgent {
         if (!context) {
             throw new Error('No voice turn is running');
         }
-        const model = this._options.model || this._options.worker.activeTask()?.model;
+        const model = this._chosenModel || this._options.worker.activeTask()?.model;
         const job = this._research.start(question, model, (done) => {
             const seconds = Math.round(((done.finishedAt ?? Date.now()) - done.startedAt) / 1000);
             this._options.log(

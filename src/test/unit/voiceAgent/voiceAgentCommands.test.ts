@@ -87,6 +87,16 @@ vi.mock('../../../voiceAgent/debugDriver', () => ({ DebugDriver: class { console
 vi.mock('../../../voiceAgent/vscodeOutput', () => ({ OutputReader: class { dispose = () => {}; } }));
 vi.mock('../../../voiceAgent/pairHands', () => ({ PairHands: class { dispose = () => {}; } }));
 vi.mock('../../../voiceAgent/workerFocus', () => ({ WorkerFocusTracker: class { dispose = () => {}; } }));
+vi.mock('../../../voiceAgent/blackboard', () => ({
+    Blackboards: class {
+        bindSession = async () => {};
+        pointAnchor = () => {};
+        clearPoint = () => {};
+        openFromHistory = async () => {};
+        dispose = () => {};
+    },
+    pruneBoardFolders: async () => {},
+}));
 vi.mock('../../../voiceAgent/activeWindow', () => ({
     ActiveVoiceWindow: class {
         active = true;

@@ -1,0 +1,89 @@
+/* Document typography: headings, paragraphs, lists, quotes, tables, inline code. */
+
+.board-block {
+    margin: 0 0 14px;
+}
+.board-block > :first-child { margin-top: 0; }
+.board-block > :last-child { margin-bottom: 0; }
+
+.board-block h1,
+.board-block h2,
+.board-block h3,
+.board-block h4,
+.board-block h5,
+.board-block h6 {
+    margin: 22px 0 6px;
+    line-height: 1.3;
+    font-weight: 600;
+}
+.board-block h1 { font-size: 1.9em; }
+.board-block h2 { font-size: 1.5em; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.board-block h3 { font-size: 1.25em; }
+.board-block h4 { font-size: 1.1em; }
+.board-block h5,
+.board-block h6 { font-size: 1em; color: var(--muted); }
+
+.board-block p { margin: 0 0 10px; }
+
+.board-block ul,
+.board-block ol {
+    margin: 0 0 10px;
+    padding-left: 26px;
+}
+.board-block li { margin: 3px 0; }
+.board-block li > p { margin: 0; }
+
+.board-block blockquote {
+    margin: 0;
+    padding: 2px 14px;
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+}
+
+.board-block a { color: var(--link); }
+
+.board-block hr {
+    border: none;
+    border-top: 1px solid var(--border);
+}
+
+.board-block code {
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--code-bg);
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+}
+
+.board-block img { max-width: 100%; }
+
+/* Raw HTML shows as its text. */
+.board-block[data-kind='html'] {
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--muted);
+}
+
+/* Wide tables scroll sideways inside their block. */
+.board-block[data-kind='table'] {
+    overflow-x: auto;
+}
+.board-block table {
+    border-collapse: collapse;
+    font-size: 14px;
+}
+.board-block th,
+.board-block td {
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    text-align: left;
+    vertical-align: top;
+}
+.board-block th {
+    background: var(--tint);
+    font-weight: 600;
+}
+.board-block tr:nth-child(even) td {
+    background: var(--tint-faint);
+}

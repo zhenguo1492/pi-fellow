@@ -1,6 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceStatus } from '../../../shared/voiceViewProtocol';
 
@@ -20,6 +18,7 @@ const label = () => $('.voice-bar-label').textContent;
 beforeEach(() => {
     document.body.innerHTML = voiceBarHtml;
     applyVoiceBarStatus(undefined);
+    setBotViewShown(false);
     // Module state: each test starts with both services working.
     setVoiceReadiness({ stt: { ok: true }, tts: { ok: true } });
     bindVoiceBar();
@@ -43,11 +42,11 @@ describe('voice bar with a speech service not working', () => {
         expect(tag('tts').title).toContain(TTS_DOWN);
     });
 
-    it('opens Settings → Voice from a tag', () => {
+    it("opens Settings → Voice at the tag's service", () => {
         setVoiceReadiness({ stt: { ok: true }, tts: { ok: false, reason: TTS_DOWN } });
         expect(tag('stt').hidden).toBe(true);
         tag('tts').click();
-        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'openSettings', section: 'voice' });
+        expect(vscode.postMessage).toHaveBeenCalledWith({ type: 'openSettings', section: 'tts' });
         expect(vscode.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'voiceAgent' }));
     });
 
@@ -164,34 +163,28 @@ describe('voice bar avatar button', () => {
     it('says where a click leads: the Bot view, back to the running TUI, or back to the worker conversation', () => {
         setBotViewShown(false, true);
         expect(view().title).toMatch(/^Show the conversation with/);
-        expect(view().getAttribute('aria-pressed')).toBe('false');
 
         setBotViewShown(true, true);
         expect(view().title).toBe('Back to the terminal (TUI); it kept running');
-        expect(view().getAttribute('aria-pressed')).toBe('true');
 
         setBotViewShown(true, false);
         expect(view().title).toBe('Back to the worker conversation');
     });
-});
 
-describe('voice bar avatar button while the Bot view is shown', () => {
-    const view = () => $<HTMLButtonElement>('[data-act="view"]');
-    const css = readFileSync(join(__dirname, '../../../webview/styles/chat/voiceBar.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-
-    it('is selected (aria-pressed) whatever voice mode does, and not once the tab goes back', () => {
+    it("shows π and the worker's backend in the Bot view whatever voice mode does, and the voice agent again on the way back", () => {
+        setVoiceBarBot('Bob', '<img class="av-img" alt="Bob">');
+        const robot = $('.voice-bar-robot');
         for (const status of [undefined, on(), on({ phase: 'off', starting: true }), on({ phase: 'speaking' })]) {
             applyVoiceBarStatus(status);
-            setBotViewShown(true);
-            expect(view().getAttribute('aria-pressed')).toBe('true');
-            setBotViewShown(false);
-            expect(view().getAttribute('aria-pressed')).toBe('false');
+            setBotViewShown(true, false, 'omp');
+            expect(label()).toBe('OMP');
+            expect(robot.querySelector('img')).toBeNull();
+            expect(robot.classList.contains('av-motion')).toBe(false);
+            setBotViewShown(true, true, 'pi');
+            expect(label()).toBe('Pi');
+            setBotViewShown(false, false, 'omp');
+            expect(label()).not.toMatch(/^(OMP|Pi)$/);
+            expect(robot.querySelector('img.av-img')).not.toBeNull();
         }
-    });
-
-    it('highlights the selected state with a neutral tint, not the red/orange voice or error colours', () => {
-        const pressed = [...css.matchAll(/([^{}]*\.voice-bar-toggle\[aria-pressed='true'\][^{}]*)\{([^}]*)\}/g)].map((m) => m[2]).join('\n');
-        expect(pressed).toMatch(/background\s*:/);
-        expect(pressed).not.toMatch(/--voice-accent|--error-fg|--ansi-bright-red|--warning-fg|#[0-9a-f]{3,8}\b|\bred\b/i);
     });
 });

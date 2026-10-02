@@ -46,13 +46,13 @@ describe('voiceLlmArgs: skills', () => {
 
     it('omp: adds the built-ins\' plugin folder once, and filters discovery to built-ins and chosen alike', () => {
         const builtins = [
-            { name: 'show-me', filePath: '/ext/media/voiceAgent/skills/show-me/SKILL.md', pluginDir: '/ext/media/voiceAgent' },
+            { name: 'explain', filePath: '/ext/media/voiceAgent/skills/explain/SKILL.md', pluginDir: '/ext/media/voiceAgent' },
             { name: 'grilling', filePath: '/ext/media/voiceAgent/skills/grilling/SKILL.md', pluginDir: '/ext/media/voiceAgent' },
         ];
         const omp = voiceLlmArgs('omp', { ...base, skills: [...builtins, ...chosen] });
         expect(omp).not.toContain('--no-skills');
         expect(flag(omp, '--plugin-dir')).toEqual(['/ext/media/voiceAgent']);
-        expect(flag(omp, '--skills')).toEqual(['show-me,grilling,voice-notes,standup']);
+        expect(flag(omp, '--skills')).toEqual(['explain,grilling,voice-notes,standup']);
 
         const pi = voiceLlmArgs('pi', { ...base, skills: [...builtins, ...chosen] });
         expect(flag(pi, '--plugin-dir')).toEqual([]);

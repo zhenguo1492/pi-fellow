@@ -12,7 +12,7 @@
  * the user types; without TTS nothing is synthesized or played and replies are only shown as
  * text; without both there is no audio page at all, and voice mode is a typed conversation.
  */
-import { voiceUserText, type VoiceAttachments, type VoiceSpeechCall, type VoiceUnavailable } from '../shared/voiceViewProtocol';
+import { voiceUserMessage, type VoiceAttachments, type VoiceSpeechCall, type VoiceUnavailable, type VoiceUserMessage } from '../shared/voiceViewProtocol';
 import type { CodeAnchor } from './codeAnchors';
 import { echoSource, floorFree, initialState, phaseOf, reduce, type ConvEvent, type ConvState, type Effect, type Metrics, type Phase } from './conversation';
 import { classifyBargeIn, isEchoOf, isHallucination, type BargeInVerdict } from './echoFilter';
@@ -55,7 +55,7 @@ export interface VoiceModeOptions {
      * Output-channel transcript of one user turn; `turnId` scopes the reply's audio events.
      * `metrics`: the exchange's timestamps as the prompt goes out (how long hearing it took).
      */
-    transcript(text: string, source: 'text' | 'stt', turnId: number, metrics: Metrics): VoiceTurnListener;
+    transcript(user: VoiceUserMessage, source: 'text' | 'stt', turnId: number, metrics: Metrics): VoiceTurnListener;
     /** No Chromium browser found: open the audio page in the default browser instead. */
     openExternal(url: string): void;
     onPhase(phase: Phase): void;
@@ -648,8 +648,7 @@ export class VoiceMode {
             case 'prompt': {
                 const turn = { id: effect.turnId, ctl: new AbortController() };
                 this._turn = turn;
-                const shown = voiceUserText(effect.text, effect.attachments);
-                const listener = this._replyListener(turn, this._options.transcript(shown, effect.source, turn.id, this._state.metrics));
+                const listener = this._replyListener(turn, this._options.transcript(voiceUserMessage(effect.text, effect.attachments), effect.source, turn.id, this._state.metrics));
                 // A turn that cannot run ends through the listener with its error (VoiceAgent.say never rejects).
                 void this._options.agent.say(effect.text, effect.source, listener, {
                     signal: turn.ctl.signal,

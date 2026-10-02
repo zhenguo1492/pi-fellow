@@ -5,6 +5,14 @@
 - `SidebarProvider` (`src/providers/sidebar.ts`) keeps `tabs: Map<string, TabState>` and `activeTabId`, per backend (`src/providers/sidebarBackends.ts`).
 - Each tab has its own `PiChatSession` (its own omp/pi process). Switching tabs pushes that tab's full history and streaming state via `pushStateSync`, so tabs never interfere.
 
+### No tabs
+
+- Every tab can be closed, the last one too (`SidebarTabs._closeTab`; each tab, in the strip and in the overflow menu, has its ×). Then `activeTabId` is `''` and `activeTab` is undefined: host code takes no tab for granted.
+- The chat gets a `stateSync` with no tabs (`tabs: []`, `activeTabId: ''`, the backend and voice status) and shows its empty state (`#app.no-tabs-mode`, `.no-tabs` in `src/webview/chat/layout.ts`, `styles/chat/welcome.css`): the Bot view's intro (`voiceIntro` in `src/webview/voicePanel.ts`: the voice agent's avatar, name, what it does, the speech-to-text and text-to-speech rows; see [voice-agent.md](./voice-agent.md)), its **Call** button while voice mode is off, then **Open worker** (`createTab`) and **Resume a session** (the resume panel). A call needs a tab: Call sends `callInNewTab`, and `SidebarBotView` opens a new tab, awaits `tabReady`, and starts voice mode as the phone button does, unless the user left that tab meanwhile (a worker that failed to start shows its error instead). The conversation, composer, model status, TUI toggle and mode switch are hidden; the header's New Agent, Resume and Settings stay.
+- Webview messages: a handler that takes the tab (`MessageHandler`'s second parameter) runs only while a tab is open; one that takes none (tabs, resume panel, settings, TUI auth, voice) runs anyway (`SidebarProvider._handleMessage` dispatches by the handler's arity).
+- The resume panel lists the workspace folder's sessions of the current backend, and a resumed session opens in a new tab. The New Chat command opens a new tab. Commands that act on the shown tab's session (select model, thinking level, reload, packages) do nothing; Settings works without a session, as for another backend's tab.
+- Persisted open tabs are then none; the next window starts with one new tab, as when nothing was open. Switching the backend (Settings) to one with no tabs restores its open tabs or opens a new one.
+
 ### Composer drafts per tab
 
 `src/webview/chat/stateSync.ts` calls `stashComposerDraft` before replacing the current tab's state and `restoreComposerDraft` after rebuilding the composer. `src/webview/chat/composer.ts` saves unsent text, selection, height, and any edit-and-resend context.

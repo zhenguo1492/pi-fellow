@@ -25,10 +25,12 @@ import { PairHands } from './pairHands';
 import { OutputReader } from './vscodeOutput';
 import { WorkerFocusTracker } from './workerFocus';
 import { formatAnchor, type CodeAnchor } from './codeAnchors';
+import { routeAnchors, withBoards } from './boardWiring';
+import { Blackboards, pruneBoardFolders } from './blackboard';
 import { editorSnapshot } from './editorSnapshot';
 import type { Metrics, Phase } from './conversation';
 import {
-    voiceUserText,
+    voiceUserMessage,
     type VoiceAgentAction,
     type VoiceAttachments,
     type VoiceEngines,
@@ -36,6 +38,7 @@ import {
     type VoicePhase,
     type VoiceStatus,
     type VoiceUnavailable,
+    type VoiceUserMessage,
 } from '../shared/voiceViewProtocol';
 import type { SkillInfo, VoiceLevelSource, VoiceServiceCheck } from '../shared/protocol';
 import { ActiveVoiceWindow } from './activeWindow';
@@ -90,7 +93,7 @@ export interface VoiceAgentWiring {
 /**
  * The voice agent's commands, the chat's voice controls and the Bot view. The conversation shows in
  * the Bot view, which a chat tab shows in place of its conversation when its icon is clicked (design
- * §11), and, as a log, in the "PI Buddy: Voice Agent"
+ * §11), and, as a log, in the "Pi Fellow: Voice Agent"
  * output channel.
  * - Chat: the phone button above the composer starts voice mode and, while it is on, hangs up; the
  *   avatar and status text next to it show its phase and switch the tab to the Bot view and back;
@@ -114,7 +117,7 @@ export interface VoiceAgentWiring {
  */
 export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wiring: VoiceAgentWiring): vscode.Disposable[] {
     const { worker, chat, resumeList, installedSkills } = wiring;
-    const channel = vscode.window.createOutputChannel('PI Buddy: Voice Agent');
+    const channel = vscode.window.createOutputChannel('Pi Fellow: Voice Agent');
     let captured = '';
     const output = {
         append(text: string): void {
@@ -181,11 +184,13 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     const builtinSkills = builtinVoiceSkills(context.extensionPath);
     /** What the worker reads and writes shows as Pi's focus while the voice agent is on. */
     let workerFocus: WorkerFocusTracker | undefined;
+    /** The voice agent's blackboards (docs/blackboard.md); a board comes into view on a point only while the user follows Pi. */
+    const boards = new Blackboards({ extensionUri: context.extensionUri, following: () => cursor.following, log });
     /** Marks the anchor in the output channel; in a text turn the agent points at once, in voice mode as the sentence plays. */
     const anchorLogged = (anchor: CodeAnchor) => {
         output.append(`⟦${formatAnchor(anchor)}⟧`);
         if (!voiceMode) {
-            cursor.point([anchor]);
+            routeAnchors([anchor], boards, cursor);
         }
     };
 
@@ -212,6 +217,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             running: voiceMode !== undefined,
             llm: {
                 model: voiceModel(),
+                setting: config.get<string>('model', '').trim(),
                 thinking: config.get<string>('thinking', 'off'),
             },
             stt: {
@@ -258,7 +264,22 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
     });
 
     // The Bot view, drawn by a chat tab in place of its conversation.
-    const view = new VoicePanel(store, worker, { phase: viewPhase, engines, agent: () => agent, replay }, chat);
+    const view = new VoicePanel(
+        store,
+        worker,
+        {
+            phase: viewPhase,
+            engines,
+            agent: () => agent,
+            replay,
+            openBoard: (voiceSessionFile, board) => {
+                boards.openFromHistory(voiceSessionFile, board).catch((err: unknown) => {
+                    void vscode.window.showWarningMessage(`Board ${board}: ${err instanceof Error ? err.message : String(err)}`);
+                });
+            },
+        },
+        chat,
+    );
 
     /** The robot status line, follow button and composer mic follow voice mode and Pi's focus. */
     const publishStatus = () =>
@@ -286,21 +307,23 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         `\n  ⟶ ${name} ${JSON.stringify(args)}\n  ${r.isError ? '✗' : '✓'} ${r.text}\nVoice: `;
 
     /** A user turn: logged to the output channel, recorded in the view. */
-    const userListener = (text: string, source: 'text' | 'stt', turnId?: number, metrics?: Metrics): VoiceTurnListener => {
+    const userListener = (user: VoiceUserMessage, source: 'text' | 'stt', turnId?: number, metrics?: Metrics): VoiceTurnListener => {
         const task = worker.activeTask();
-        store.addUser(text, source, metrics);
+        store.addUser(user.text, source, metrics, user.images);
         const reply = store.beginReply({ turnId }).listener;
+        const logged = [user.text, ...(user.images ?? []).map((image) => `[${image.name}]`)].filter(Boolean).join(' ');
         return {
             onPrompt: reply.onPrompt,
-            onStart: (task) => output.append(`\nYou${source === 'stt' ? ' (voice)' : ''} [${task.name}]: ${text}\nVoice: `),
+            onStart: (task) => output.append(`\nYou${source === 'stt' ? ' (voice)' : ''} [${task.name}]: ${logged}\nVoice: `),
             onText: (delta) => {
                 output.append(delta);
                 reply.onText?.(delta);
             },
             onAnchor: anchorLogged,
-            onToolCall: (name, args, r) => {
+            onToolStart: reply.onToolStart,
+            onToolCall: (id, name, args, r) => {
                 output.append(toolLine(name, args, r));
-                reply.onToolCall?.(name, args, r);
+                reply.onToolCall?.(id, name, args, r);
             },
             onLookup: (lookup) => {
                 output.append(`\n  · ${lookup.description}\nVoice: `);
@@ -336,10 +359,14 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 begin();
                 anchorLogged(anchor);
             },
-            onToolCall: (name, args, r) => {
+            onToolStart: (id, name, args) => {
+                begin();
+                reply.onToolStart?.(id, name, args);
+            },
+            onToolCall: (id, name, args, r) => {
                 begin();
                 output.append(toolLine(name, args, r));
-                reply.onToolCall?.(name, args, r);
+                reply.onToolCall?.(id, name, args, r);
             },
             onLookup: (lookup) => {
                 begin();
@@ -368,7 +395,8 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 worker,
                 cwd: root,
                 sessionDir,
-                contexts: store,
+                // Boards belong to the voice context: they follow it as it is bound.
+                contexts: withBoards(store, boards, log),
                 model: config.get<string>('model', '').trim(),
                 thinking: config.get<string>('thinking', 'off'),
                 // Read at every process start, so a change applies once voice starts again.
@@ -413,6 +441,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 editor: () => fileEditor.editor && editorSnapshot(fileEditor.editor),
                 onRead: (target) => cursor.activity('reading', target),
                 hands,
+                boards,
                 log,
             });
             workerFocus = new WorkerFocusTracker(worker, root, (kind, target) => cursor.activity(kind, target));
@@ -424,7 +453,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         if (voiceMode) {
             throw new Error('Voice mode is on: typed messages go through Voice Agent — Type a Message.');
         }
-        return getAgent().say(text, 'text', userListener(voiceUserText(text, attachments), 'text'), { attachments });
+        return getAgent().say(text, 'text', userListener(voiceUserMessage(text, attachments), 'text'), { attachments });
     };
 
     /** Typed to the voice agent: like speech in voice mode, a text turn otherwise. */
@@ -454,6 +483,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         setPhase(undefined);
         store.endRun();
         cursor.clear();
+        boards.clearPoint();
         workerFocus?.dispose();
         workerFocus = undefined;
         try {
@@ -462,7 +492,11 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             if (stoppingAgent) {
                 await stoppingAgent.stop();
                 // Only once omp is gone, so nothing writes the files any more.
-                await (persistentSessions ? store.pruneContexts(sessionDir) : fs.rm(sessionDir, { recursive: true, force: true }));
+                if (persistentSessions) {
+                    await pruneBoardFolders(sessionDir, await store.pruneContexts(sessionDir));
+                } else {
+                    await fs.rm(sessionDir, { recursive: true, force: true });
+                }
             }
         }
     };
@@ -539,7 +573,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 onBotLevel: (level, wave) => chat.postVoiceLevel(level, 'bot', wave),
                 onMetrics: (turnId, metrics) => store.metrics(turnId, metrics),
                 onAudio: (event) => store.audio(event),
-                onAnchors: (anchors) => cursor.point(anchors),
+                onAnchors: (anchors) => routeAnchors(anchors, boards, cursor),
                 // What a reply said out loud is the audio Alt+click reads its sentences from.
                 onSpoken: (turnId, pieces) => {
                     const entryId = store.entryIdOfTurn(turnId);
@@ -652,6 +686,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         store,
         fileEditor,
         cursor,
+        boards,
         hands,
         debug,
         outputs,
@@ -670,6 +705,14 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
             // The system prompt is read only when the process starts.
             if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent.extraPrompt')) {
                 void agent?.restartProcess();
+            }
+            // The model switches between turns, without a restart.
+            if (e.affectsConfiguration('oh-my-pi-chater.voiceAgent.model')) {
+                const model = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent').get<string>('model', '').trim();
+                agent?.setModel(model).catch((err: unknown) => {
+                    void vscode.window.showWarningMessage(err instanceof Error ? err.message : String(err));
+                });
+                view.refresh();
             }
         }),
         chat.onVoiceAction((action) => {
@@ -692,6 +735,17 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                         .getConfiguration('oh-my-pi-chater.voiceAgent')
                         .update('followPi', action.following, vscode.ConfigurationTarget.Global);
                     return;
+                case 'model': {
+                    // Saved where it is set: a workspace value would hide a user one.
+                    const config = vscode.workspace.getConfiguration('oh-my-pi-chater.voiceAgent');
+                    const target = config.inspect<string>('model')?.workspaceValue !== undefined
+                        ? vscode.ConfigurationTarget.Workspace
+                        : vscode.ConfigurationTarget.Global;
+                    void config.update('model', action.model, target).then(undefined, (err: unknown) => {
+                        void vscode.window.showWarningMessage(`Voice agent model: ${err instanceof Error ? err.message : String(err)}`);
+                    });
+                    return;
+                }
                 case 'send':
                     if (action.text.trim() || action.attachments) {
                         type(action.text.trim(), action.attachments);
@@ -714,7 +768,10 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
         vscode.commands.registerCommand('oh-my-pi-chater.voiceView.history', () => view.pickSession()),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceView.state', () => view.snapshot()),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.say', say),
-        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.clearHighlight', () => cursor.clear()),
+        vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.clearHighlight', () => {
+            cursor.clear();
+            boards.clearPoint();
+        }),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.agentFocus', () => cursor.current()),
         vscode.commands.registerCommand('oh-my-pi-chater.voiceAgent.takeProactiveTurns', () => {
             const taken = proactiveTurns;

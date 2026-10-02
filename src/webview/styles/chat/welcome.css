@@ -1,4 +1,4 @@
-/* Welcome screen and the restored-conversation placeholder. */
+/* Welcome screen, the restored-conversation placeholder, and the empty state when every tab is closed. */
 
 /* ── Welcome ── */
 .welcome {
@@ -34,10 +34,61 @@
     font-size: 13px;
 }
 
+/*
+ * ── Every tab closed (#app.no-tabs-mode, stateSync.ts): this in place of the conversation and composer ──
+ * The Bot view's intro and Call button (.vp-welcome column, voice.css), the one filled button; under a
+ * thin divider, Open worker and Resume a session as two equal outline buttons. Centred, and scrolled
+ * when taller than the view.
+ */
+.no-tabs {
+    display: none;
+}
+#app.no-tabs-mode .no-tabs {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    overflow-y: auto;
+    text-align: center;
+}
+#app.no-tabs-mode :is(.ms-head, .tui-host, .messages, .bot-host, .scroll-btn-wrap, .input-container, .tab-overflow, #mode-switch, #btn-tui) {
+    display: none !important;
+}
+.no-tabs-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    align-self: stretch;
+    max-width: 320px;
+    width: 100%;
+    margin: 16px auto 0;
+    padding-top: 16px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.no-tabs-btn {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+}
+.no-tabs-btn:hover {
+    background: var(--tint);
+}
+.no-tabs-btn:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 2px;
+}
+
+/* The π (media/icons/pi.svg) as a mask, so it takes the theme's text color. */
 .welcome-icon {
-    font-size: 48px;
+    width: 56px;
+    height: 56px;
     margin-bottom: 16px;
-    font-weight: 700;
+    background: currentColor;
+    mask: url('../../../../media/icons/pi.svg') center / contain no-repeat;
     opacity: 0.3;
 }
 

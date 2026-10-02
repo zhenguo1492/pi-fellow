@@ -1,4 +1,4 @@
-import { AVATAR_PRESET_PREFIX, type AvatarThinking } from './avatarPresets';
+import { AVATAR_PRESET_PREFIX, type AvatarAnimation } from './avatarPresets';
 
 /**
  * Who talks in the Bot view: the user and the voice agent, each with a name and an avatar
@@ -17,11 +17,15 @@ export const MAX_SPEAKER_NAME = 40;
 const MAX_AVATAR_CHARS = 2;
 
 /**
- * `text`: an emoji or initials; `image`: a data URI of the picture (`think`: a pixel-art preset's
- * thinking animation); `icon`: one of the default line icons (the person or the robot), drawn in
- * the avatar box's colour. Absent: the speaker's own default icon.
+ * `text`: an emoji or initials; `image`: a data URI of the picture (`think` / `talk`: a pixel-art
+ * preset's thinking and talking animations); `icon`: one of the line icons (the person or the
+ * robot), drawn in the avatar box's colour. Absent (a setting that could not be resolved): the
+ * speaker's own line icon.
  */
-export type VoiceAvatar = { kind: 'text'; text: string } | { kind: 'image'; src: string; think?: AvatarThinking } | { kind: 'icon'; icon: VoiceSpeakerId };
+export type VoiceAvatar =
+    | { kind: 'text'; text: string }
+    | { kind: 'image'; src: string; think?: AvatarAnimation; talk?: AvatarAnimation }
+    | { kind: 'icon'; icon: VoiceSpeakerId };
 
 export interface VoiceSpeaker {
     name: string;
@@ -39,7 +43,7 @@ export function speakerName(id: VoiceSpeakerId, raw: unknown): string {
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 
 /**
- * What an avatar setting says: nothing (the default icon), a pixel-art preset (`preset:<id>`,
+ * What an avatar setting says: nothing (the speaker's default preset, `DEFAULT_AVATAR_PRESETS`), a pixel-art preset (`preset:<id>`,
  * avatarPresets.ts), an image file (`path`, as written: `~` and workspace-relative paths are the
  * host's to resolve), or text, cut to its first two characters. A path is anything with a slash,
  * starting with `~`, or ending in an image extension.

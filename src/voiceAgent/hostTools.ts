@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { showMeIsCard, type BoardHands, type BoardMarkStyle, type BoardMoveTo, type BoardViewAction } from '../shared/board';
 import type { RpcHostToolDefinition } from '../pi/rpcTypes';
 import type { CodeAnchor } from './codeAnchors';
 import type { WorkerAnswer, WorkerController, WorkerSendOutcome } from './workerController';
@@ -27,6 +28,22 @@ const TERMINAL_KEYS: Record<string, string> = {
 
 /** Names terminal_send's description offers; any ctrl-<letter> works too. */
 const TERMINAL_KEY_NAMES = `${Object.keys(TERMINAL_KEYS).join(', ')}, and ctrl-a to ctrl-z (e.g. ctrl-c)`;
+
+const MARK_STYLES: Record<BoardMarkStyle, true> = { highlight: true, underline: true, box: true };
+const BOARD_VIEW_ACTIONS: Record<BoardViewAction, true> = {
+    open: true,
+    close: true,
+    focus: true,
+    move: true,
+    maximize: true,
+    restore: true,
+    expand: true,
+    collapse: true,
+    scroll: true,
+    list: true,
+    looking: true,
+};
+const BOARD_MOVES: Record<BoardMoveTo, true> = { main: true, left: true, right: true, beside: true, window: true };
 
 /** How far back worker_status and terminal_read look at most, in screens. */
 const MAX_PAGES_BACK = 20;
@@ -228,18 +245,71 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         loadMode: 'essential',
     },
     {
-        name: 'show_text',
-        label: 'Show text',
+        name: 'show_me',
+        label: 'Show me',
         description:
-            'Show text as a card under your reply in the chat, never read aloud: a code example, a SQL query, a command line, a config snippet, or anything else the user should see or copy rather than hear. Say in a sentence what it is instead of reading it. Changes nothing.',
+            'Show the user what they should see rather than hear: a code example, a command, a diagram, a table, a short document, a UI prototype or a live demo. Never read aloud; say in a sentence what it is. ' +
+            'Short content (no Mermaid or web page, at most 5 lines, e.g. one command) is a card under your reply in the chat. Everything else goes on a board: one Markdown document in its own editor tab, like a teacher\'s blackboard, with text, tables, lists, highlighted code, ```mermaid diagrams and ```html web pages. ' +
+            'A ```html block is a live web page in a sandboxed frame: a UI prototype the user can click, or an interactive or animated demo such as an algorithm visualization (a stack with Push and Pop buttons animating each step). Write one self-contained page: inline <style> and <script> elements, handlers attached with addEventListener (inline onclick=… attributes do not run), no external scripts, stylesheets, images or fonts (data: URLs work), no network. The page is laid out once at its design width and shown whole, scaled down to fit the board like a picture, never reflowed; the user zooms and pans it or fills the board with it. Declare a design size with <meta name="viewport" content="width=1920, height=1080"> when the page is made for a large screen or a fixed frame (height is optional: without it the page is as tall as its content, and 100vh is that height); without the tag it is laid out at the board\'s column width. The user can show its source. To show HTML as code to read, fence it ```xml. ' +
+            'Same topic: add to the current board (mode append) or rewrite one of its blocks (mode block). New topic: board "new" with a title. ' +
+            'The result is the board\'s outline, block ids per kind (h heading, p paragraph, l list, t table, q quote, c code, d diagram, w web page), plus any Mermaid errors and web page script errors to fix. ' +
+            'Write the whole view first, then explain it, starting each sentence with a board marker; you point at a web page only as a whole block, while the user can mark an element in it (Alt+click), which comes in <board> with its selector and HTML. A new board opens as a tab in the editor group of the user\'s code, in front of it, without the focus; board_view moves it (beside, right, a new window) or maximizes it when the user asks. ' +
+            'Links work when the user clicks them: [text](src/file.ts) opens a workspace file (src/file.ts#L12 or src/file.ts:12 at a line), https links open in their browser; link to code you talk about. ' +
+            'Draw the smallest view that makes the point: logic as pseudocode, runtime flow as an indented call tree, UI as a component tree (a web page when the user should see or try it), layout as a shallow file tree, interaction and data flow as Mermaid, how an algorithm or data structure changes step by step as an animated web page, a change as a ```diff block in the same shape, and whole code only when most of it is new or the user needs to copy it. Keep only what the current question needs. Works in Plan mode; changes no workspace file.',
         parameters: {
             ...OBJECT,
             properties: {
-                text: { type: 'string', description: 'Exactly what to show, as the user would copy it.' },
-                language: { type: 'string', description: 'Its language for highlighting, e.g. sql, bash, typescript, json; leave out for plain text.' },
-                title: { type: 'string', description: 'A few words on what it is, shown on the card.' },
+                markdown: { type: 'string', description: 'Markdown: text, tables, lists, fenced code with its language, ```mermaid diagrams, ```html web pages.' },
+                title: { type: 'string', description: 'A few words on what it is: the card title or a new board\'s title. Given for an existing board, it renames it: leave it out when adding to one.' },
+                board: { type: 'string', description: 'A board id, or "new" for a new board; leave out for the current board.' },
+                mode: { type: 'string', enum: ['append', 'replace', 'block'], description: 'append (default): at the end; replace: the whole board; block: replace block `block` (empty markdown removes it).' },
+                block: { type: 'string', description: 'mode block: the block id to replace, e.g. d1.' },
             },
-            required: ['text'],
+            required: ['markdown'],
+        },
+        loadMode: 'essential',
+    },
+    {
+        name: 'board_point',
+        label: 'Point at the board',
+        description:
+            'Point at a place on a board without speaking, with an explicit mark style. While speaking, use board markers instead. The mark replaces your previous point.',
+        parameters: {
+            ...OBJECT,
+            properties: {
+                board: { type: 'string', description: 'Board id; leave out for the current board.' },
+                block: { type: 'string', description: 'Block id, e.g. c1. A web page (w1) only as a whole block.' },
+                startLine: { type: 'number', description: 'Code blocks: first line, 1-based. Sequence diagrams: first message step, 1-based, messages counted in the order written (notes not counted), as autonumber shows them.' },
+                endLine: { type: 'number', description: 'Last line or step, inclusive.' },
+                text: {
+                    type: 'string',
+                    description: 'A passage in the block. In a diagram: a node by id or label, else an arrow by its label (a sequence message such as "sends token", a flowchart edge label); the arrow line and its label are marked.',
+                },
+                style: { type: 'string', enum: ['highlight', 'underline', 'box'] },
+            },
+            required: ['block'],
+        },
+        loadMode: 'essential',
+    },
+    {
+        name: 'board_view',
+        label: 'Board view',
+        description:
+            'Open, close, focus, move or scroll a board; maximize it (its editor group fills the editor area; it takes the focus) and restore it; expand one diagram or web page so it alone fills the board (the user\'s ⤢ button; a web page then fills the whole board, so a demo gets room; Escape or collapse goes back; pointing into it keeps it at its zoom, a diagram panned to the target; pointing elsewhere collapses it); list the boards; or ask which board and blocks the user is looking at, with what they zoomed or expanded. Boards open in the editor group of the user\'s code, in front of it, without the focus; move (or open with to) puts one elsewhere when the user asks: "beside" or "right" in a group next to it, "window" in a new window, "main" back in the group of the user\'s code.',
+        parameters: {
+            ...OBJECT,
+            properties: {
+                action: { type: 'string', enum: ['open', 'close', 'focus', 'move', 'maximize', 'restore', 'expand', 'collapse', 'scroll', 'list', 'looking'] },
+                board: { type: 'string', description: 'Board id; leave out for the current board.' },
+                to: {
+                    type: 'string',
+                    enum: ['main', 'left', 'right', 'beside', 'window'],
+                    description: 'move, or open: where. main: the editor group of the user\'s code; left/right: the neighboring group; beside: next to the active group; window: a new window.',
+                },
+                where: { type: 'string', description: 'scroll: up, down, top, bottom, or a block id.' },
+                block: { type: 'string', description: 'expand: the diagram or web page block, e.g. d1 or w1.' },
+            },
+            required: ['action'],
         },
         loadMode: 'essential',
     },
@@ -581,7 +651,7 @@ const DEFAULT_TERMINAL_WAIT_SECS = 2;
 const DEFAULT_DEBUG_START_SECS = 15;
 const DEFAULT_DEBUG_STEP_SECS = 10;
 const DEFAULT_OUTPUT_LINES = 80;
-/** Longest show_text: the transcript, with every tool call's arguments, lives in workspace state. */
+/** Longest show_me: the transcript, with every tool call's arguments, lives in workspace state. */
 const MAX_SHOWN_CHARS = 20000;
 /** Settled proposals remembered for a late confirm_task. */
 const MAX_SETTLED = 20;
@@ -618,6 +688,8 @@ export class HostToolRouter {
         private readonly _startResearch: (tabId: string, question: string) => ResearchJob,
         /** Absent without an editor: open_file and the pair tools fail. */
         private readonly _hands?: EditorHands,
+        /** Absent without an editor: show_me on a board and the board tools fail. */
+        private readonly _boards?: BoardHands,
     ) {}
 
     /** Own changes waiting on the approval card, shown on every turn so the model keeps reminding the user. */
@@ -904,14 +976,87 @@ export class HostToolRouter {
                     ...(symbol ? { symbol } : {}),
                 });
             }
-            case 'show_text': {
-                const text = requireString(args, 'text');
-                if (text.length > MAX_SHOWN_CHARS) {
+            case 'show_me': {
+                if (typeof args.markdown !== 'string') {
+                    throw new Error('Missing markdown.');
+                }
+                const markdown = args.markdown;
+                if (markdown.length > MAX_SHOWN_CHARS) {
                     throw new Error(
-                        `Not shown: ${text.length} characters, at most ${MAX_SHOWN_CHARS}. Show a shorter excerpt, or put it in a file with create_file.`,
+                        `Not shown: ${markdown.length} characters, at most ${MAX_SHOWN_CHARS}. Show a shorter excerpt, or put it in a file with create_file.`,
                     );
                 }
-                return 'Shown as a card under your reply in the chat; it is not read aloud.';
+                if (showMeIsCard({ markdown, board: args.board, mode: args.mode })) {
+                    if (!markdown.trim()) {
+                        throw new Error('Missing markdown.');
+                    }
+                    return 'Shown as a card under your reply in the chat; it is not read aloud. Say in a sentence what it is.';
+                }
+                const mode = args.mode ?? 'append';
+                if (mode !== 'append' && mode !== 'replace' && mode !== 'block') {
+                    throw new Error(`Unknown mode ${String(mode)}: use append, replace or block.`);
+                }
+                const block = optionalString(args, 'block');
+                if (mode === 'block' && !block) {
+                    throw new Error('Missing block: mode block replaces the block with that id.');
+                }
+                const title = optionalString(args, 'title');
+                const board = optionalString(args, 'board');
+                return this._requireBoards().write({
+                    markdown,
+                    mode,
+                    ...(block ? { block: block.trim() } : {}),
+                    ...(title ? { title } : {}),
+                    ...(board ? { board: board.trim() } : {}),
+                });
+            }
+            case 'board_point': {
+                const style = optionalString(args, 'style');
+                if (style !== undefined && !Object.hasOwn(MARK_STYLES, style)) {
+                    throw new Error(`Unknown style ${style}: use one of ${Object.keys(MARK_STYLES).join(', ')}.`);
+                }
+                const board = optionalString(args, 'board');
+                const text = optionalString(args, 'text');
+                const startLine = typeof args.startLine === 'number' && args.startLine >= 1 ? Math.round(args.startLine) : undefined;
+                const endLine = startLine !== undefined && typeof args.endLine === 'number' ? Math.max(Math.round(args.endLine), startLine) : startLine;
+                return this._requireBoards().point(
+                    {
+                        ...(board ? { board } : {}),
+                        block: requireString(args, 'block').trim(),
+                        ...(startLine !== undefined ? { startLine, endLine } : {}),
+                        ...(text ? { text } : {}),
+                    },
+                    style as BoardMarkStyle | undefined,
+                );
+            }
+            case 'board_view': {
+                const action = requireString(args, 'action');
+                if (!Object.hasOwn(BOARD_VIEW_ACTIONS, action)) {
+                    throw new Error(`Unknown action ${action}: use one of ${Object.keys(BOARD_VIEW_ACTIONS).join(', ')}.`);
+                }
+                const board = optionalString(args, 'board');
+                const to = optionalString(args, 'to');
+                const where = optionalString(args, 'where')?.trim();
+                if ((action === 'move' || to !== undefined) && (to === undefined || !Object.hasOwn(BOARD_MOVES, to))) {
+                    throw new Error(`${to === undefined ? 'Missing to' : `Unknown to ${to}`}: use one of ${Object.keys(BOARD_MOVES).join(', ')}.`);
+                }
+                if (to !== undefined && action !== 'move' && action !== 'open') {
+                    throw new Error(`to goes with move or open, not ${action}.`);
+                }
+                if (action === 'scroll' && !where) {
+                    throw new Error('Missing where: up, down, top, bottom, or a block id.');
+                }
+                const block = optionalString(args, 'block')?.trim();
+                if (action === 'expand' && !block) {
+                    throw new Error('Missing block: expand fills the board with that diagram, e.g. d1.');
+                }
+                return this._requireBoards().view({
+                    action: action as BoardViewAction,
+                    ...(board ? { board } : {}),
+                    ...(to !== undefined ? { to: to as BoardMoveTo } : {}),
+                    ...(action === 'scroll' && where ? { where: where === 'up' || where === 'down' || where === 'top' || where === 'bottom' ? where : { block: where } } : {}),
+                    ...(action === 'expand' && block ? { block } : {}),
+                });
             }
             case 'list_viewers':
                 return formatViewers(await this._requireHands().listViewers(requireString(args, 'path')));
@@ -1020,6 +1165,13 @@ export class HostToolRouter {
             'Tell the user now, in a sentence, what needs approving and to approve or reject it there. ' +
             `Do not call ${toolName} again for this; the outcome arrives as <approval-settled id="${id}">.`
         );
+    }
+
+    private _requireBoards(): BoardHands {
+        if (!this._boards) {
+            throw new Error('There is no board here.');
+        }
+        return this._boards;
     }
 
     private _requireHands(): EditorHands {

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SettingsData, SkillInfo } from '../../../../shared/protocol';
+import { applySavedSettings } from '../../../../webview/settings/edits';
 import { settingsState } from '../../../../webview/settings/state';
 import { bindVoiceSkills, renderVoiceSkills } from '../../../../webview/settings/voice';
 import { buildVoiceTab } from '../../../../webview/settings/voiceSetup';
@@ -18,6 +19,8 @@ const data = {
     voiceReadiness: { stt: { ok: true }, tts: { ok: true } },
     voiceApiKeys: { openai: false, groq: false },
     voiceSkills: ['grill-with-docs'],
+    voiceModel: '',
+    voiceModels: [],
     voiceExtraPrompt: '',
     voiceDefaultPrompt: 'You are the voice agent.',
     voiceSpeakers: { user: { name: 'User', avatar: '' }, bot: { name: 'Bot', avatar: '' } },
@@ -27,9 +30,10 @@ const data = {
 /** The Voice tab with the skills dropdown open and the filter focused, as clicking it leaves it. */
 function openDropdown() {
     document.body.innerHTML = '';
-    settingsState.currentSettings = structuredClone(data);
+    settingsState.edits.clear();
+    applySavedSettings(structuredClone(data));
     settingsState.loadedSkills = [skill('grill-with-docs'), skill('grill-me'), skill('grilling')];
-    document.body.append(buildVoiceTab(settingsState.currentSettings), Object.assign(document.createElement('button'), { id: 'outside' }));
+    document.body.append(buildVoiceTab(settingsState.currentSettings!), Object.assign(document.createElement('button'), { id: 'outside' }));
     bindVoiceSkills();
     renderVoiceSkills();
     const picker = document.querySelector<HTMLDetailsElement>('.voice-skills-picker')!;
@@ -60,7 +64,7 @@ describe('voice agent skills dropdown', () => {
         name('grill-me').dispatchEvent(press);
         expect(press.defaultPrevented).toBe(true);
         (name('grill-me') as HTMLElement).click();
-        expect(posted).toEqual([{ type: 'updateSetting', key: 'voiceAgent.skills', value: ['grill-with-docs', 'grill-me'] }]);
+        expect(settingsState.currentSettings?.voiceSkills).toEqual(['grill-with-docs', 'grill-me']);
         expect(picker.open).toBe(true);
     });
 

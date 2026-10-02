@@ -27,4 +27,9 @@ export interface ToolRenderer {
     summary(props: ToolRenderProps): Child[];
     /** Expanded body blocks. Omit when the summary says everything. */
     body?(props: ToolRenderProps): Child[];
+    /**
+     * Controls beside the header, outside the toggle button, so they work with the card collapsed.
+     * The view that shows the card handles their clicks.
+     */
+    actions?(props: ToolRenderProps): Child[];
 }

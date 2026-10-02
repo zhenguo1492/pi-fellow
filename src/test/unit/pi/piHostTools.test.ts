@@ -105,7 +105,7 @@ describe('Pi host tools emulation', () => {
         host.writeTools([tool('echo')]);
         const pi = fakePi(host);
         const result = pi.call('echo', { text: 'hi' });
-        expect(pi.emitted).toEqual([{ type: 'host_tool_call', id: 'ui1', toolName: 'echo', arguments: { text: 'hi' } }]);
+        expect(pi.emitted).toEqual([{ type: 'host_tool_call', id: 'ui1', toolCallId: 'call-echo', toolName: 'echo', arguments: { text: 'hi' } }]);
         pi.answer(host.response('ui1', { content: [{ type: 'text', text: 'echoed hi' }] }) as { id: string; value: string });
         await expect(result).resolves.toEqual({ content: [{ type: 'text', text: 'echoed hi' }], details: undefined });
     });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ImageContent } from '../shared/piTypes';
-import type { VoiceAttachments } from '../shared/voiceViewProtocol';
+import type { VoiceAttachments, VoiceImage } from '../shared/voiceViewProtocol';
 import type { ProcessedFileAttachment } from './fileAttachments';
 
 export interface PendingAttachment {
@@ -66,8 +66,19 @@ export function toVoiceAttachments(items: PendingAttachment[]): VoiceAttachments
     if (items.length === 0) {
         return undefined;
     }
+    const names: string[] = [];
+    const imageFiles: VoiceImage[] = [];
+    for (const a of items) {
+        const path = a.isImage ? (a.absolutePath ?? absolutePathFromFragment(a.textFragment)) : undefined;
+        if (path) {
+            imageFiles.push({ name: a.displayName, path });
+        } else {
+            names.push(a.displayName);
+        }
+    }
     return {
-        names: items.map((a) => a.displayName),
+        names,
+        imageFiles,
         images: items.flatMap((a) => (a.image ? [a.image] : [])),
         files: items.map((a) => a.textFragment).join(''),
     };

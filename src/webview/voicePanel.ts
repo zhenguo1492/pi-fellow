@@ -6,16 +6,19 @@
  * the transcript is updated per entry id and per part, keeping scroll position, open folds and
  * running CSS animations intact.
  */
+import { showMeCallIsCard } from '../shared/board';
 import { escapeHtml } from '../shared/html';
 import type { ClientMessage, VoiceReadiness, VoiceServiceCheck } from '../shared/protocol';
 import {
     type VoiceEntry,
+    type VoiceImage,
     type VoiceProposalCard,
     type VoiceResearchCard,
     type VoiceSentence,
     type VoiceToolEntry,
     type VoiceReplayPiece,
     type VoiceEngines,
+    type VoicePhase,
     type VoiceViewClientMessage,
     type VoiceViewHostMessage,
     type VoiceViewState,
@@ -30,6 +33,7 @@ import type { ToolResultPayload } from './toolCards/types';
 import { createToolView, toToolResult, updateToolView, type ToolViewPayload } from './toolView';
 import { ICON_CALL, callVoiceAgent, setVoiceBarBot } from './voiceBar';
 import { paragraphPieces, pickedOf, pieceAt, rangeInNodes, textNodesIn, type PickedSentence, type SentenceSurface } from './sentencePick';
+import { imageCardHtml, loadImageFiles, mountImageViewer, showImage } from './voiceImages';
 import { vscode } from './vscodeApi';
 
 /** Within this many pixels of the bottom, the transcript follows new content. */
@@ -46,6 +50,17 @@ const SOURCE_ICON: Record<'stt' | 'text' | 'panel', [icon: string, title: string
 /** Stopwatch (reply latency), drawn in the text colour. */
 const TIMING_ICON =
     '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="9.2" r="5.3"/><path d="M8 9.2V6.4M6.3 1.6h3.4M12.2 4.6l1-1"/></g></svg>';
+
+/**
+ * A scroll with a quill: three lines get written one after another, top to bottom, the quill's nib
+ * moving along each (voice.css): the reply is drawing on a board.
+ */
+const BRUSH_ICON =
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M4.5 2.5h7a1.5 1.5 0 0 1 1.5 1.5v1.5M4.5 2.5A1.5 1.5 0 0 0 3 4c0 .8.7 1.5 1.5 1.5H6M6 3v10M13 9v2.5M6 13a1.3 1.3 0 0 0 1.3 1.5h6a1.5 1.5 0 0 0 0-3H6.8"/>' +
+    '<path class="vp-ln vp-ln1" d="M7.5 6.5h3.5"/><path class="vp-ln vp-ln2" d="M7.5 8.5h3.5"/><path class="vp-ln vp-ln3" d="M7.5 10.5h3.5"/>' +
+    '<g class="vp-quill"><path d="M0 0c.8-3 3-6.6 8-9 .2 2.2-.6 3.6-1.6 4.6l.9.2c-1 1.4-2.3 2.3-3.8 2.8l.6.4C2.9 0 1.4.2 0 0Z" fill="currentColor" stroke="none"/></g>' +
+    '</svg>';
 
 /** Clock with a back arrow: past voice conversations. */
 const HISTORY_ICON =
@@ -76,6 +91,7 @@ async function applySpeakers(speakers: VoiceSpeakers): Promise<void> {
     speakerView.user = { name: escapeHtml(speakers.user.name), avatar: user };
     speakerView.bot = { name: escapeHtml(speakers.bot.name), avatar: bot };
     setVoiceBarBot(speakers.bot.name, bot);
+    renderIntro();
     if (lastState) {
         renderStream(lastState);
     }
@@ -153,7 +169,7 @@ root.innerHTML = `
     <div class="vp-detail"></div>
 </div>
 <div class="vp-cards"></div>
-<div class="vp-banner">Viewing a past session — read only</div>
+<div class="vp-pin"><div class="vp-pin-bar" hidden><div class="vp-tools"></div></div></div>
 <div class="vp-stream" role="log" aria-live="polite"><div class="vp-empty"></div></div>`;
 
 const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
@@ -165,6 +181,7 @@ const cardsEl = q('.vp-cards');
 const stream = q('.vp-stream');
 /** Stays last in the stream, shown only while there are no turns: a new conversation's welcome, or a note on a past one. */
 const emptyEl = q('.vp-empty');
+mountImageViewer(root);
 
 function isFollowing(): boolean {
     return stream.scrollHeight - stream.scrollTop - stream.clientHeight < FOLLOW_SLACK_PX;
@@ -246,7 +263,18 @@ function renderHead(s: VoiceViewState): void {
             'Tokens of the voice agent’s LLM calls in this conversation: input not read from cache, output, and their cost',
         ),
         ...(llmTokens && (llmTokens.cacheRead > 0 || llmTokens.cacheWrite > 0)
-            ? [row('Cache', [`read ${formatTokenCount(llmTokens.cacheRead)}`, `write ${formatTokenCount(llmTokens.cacheWrite)}`].join(SEP), 'Prompt tokens the voice LLM read from and wrote to the provider’s cache', true)]
+            ? [
+                  row(
+                      'Cache',
+                      [
+                          `read ${formatTokenCount(llmTokens.cacheRead)}`,
+                          `write ${formatTokenCount(llmTokens.cacheWrite)}`,
+                          `hit ${Math.round((llmTokens.cacheRead / (llmTokens.input + llmTokens.cacheRead + llmTokens.cacheWrite)) * 100)}%`,
+                      ].join(SEP),
+                      'Prompt tokens the voice LLM read from and wrote to the provider’s cache; hit: the share of all prompt tokens read from the cache',
+                      true,
+                  ),
+              ]
             : []),
         row(
             'STT',
@@ -329,6 +357,8 @@ interface TurnView {
     time: HTMLElement;
     /** The time in the avatar column, shown on hover when the header is left out (`.cont`). */
     gutterTime: HTMLElement;
+    /** A brush that keeps writing beside the time while a show_me of this reply is drawing on a board. */
+    drawing: HTMLElement;
     attach: HTMLElement;
     pre: HTMLElement;
     /** Holds `pre`, `body` and `post`; clamped to three lines for long user / setting texts. */
@@ -342,6 +372,10 @@ interface TurnView {
     /** Show more / Copy under a clamped `line`; hidden unless the text overflows three lines. */
     clamp: HTMLElement;
     more: HTMLButtonElement;
+    /** The image card of a user turn with attached images (voiceImages.ts); empty otherwise. */
+    images: HTMLElement;
+    /** The images `images` shows. */
+    imageList?: readonly VoiceImage[];
     /** The full text of a user / setting turn (clampable); undefined for the bot's replies. */
     clampText?: string;
     /** Stopwatch button after the header's time, shown on hover; toggles `timingBody` (the turn's latency breakdown). */
@@ -354,6 +388,8 @@ const turns = new Map<string, TurnView>();
 const openTimings = new Set<string>();
 /** Entry ids of long user / setting turns the user expanded. */
 const expandedTurns = new Set<string>();
+/** Entry ids of image cards the user opened to larger tiles. */
+const openImageCards = new Set<string>();
 let sessionId: string | undefined;
 /** The avatar animated (`.av-motion`): of the reply being read aloud, else of the latest reply; undefined when neither is shown. */
 let liveAvatar: HTMLElement | undefined;
@@ -377,9 +413,11 @@ function placeLiveAvatar(): void {
 function createTurn(): TurnView {
     const el = document.createElement('div');
     el.innerHTML =
-        '<div class="vp-av" aria-hidden="true"></div><time class="vp-gtime"></time><div class="vp-who"><span class="vp-name"></span><time class="vp-time"></time><button type="button" class="vp-timing" aria-expanded="false" hidden>' +
+        '<div class="vp-av" aria-hidden="true"></div><time class="vp-gtime"></time><div class="vp-who"><span class="vp-name"></span><time class="vp-time"></time><span class="vp-drawing" title="Drawing on the board" hidden>' +
+        BRUSH_ICON +
+        '<span class="vp-drawing-label">Drawing on the board…</span></span><button type="button" class="vp-timing" aria-expanded="false" hidden>' +
         TIMING_ICON +
-        '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-clamp" hidden><button type="button" class="vp-more"></button><button type="button" class="vp-copy" title="Copy message">Copy</button></div><div class="vp-err" hidden></div><div class="vp-tools"></div><div class="vp-timing-body" hidden></div></div>';
+        '</button></div><div class="vp-txt"><div class="vp-attach"></div><div class="vp-line"><span class="vp-pre"></span><span class="vp-body"></span><span class="vp-post"></span></div><div class="vp-clamp" hidden><button type="button" class="vp-more"></button><button type="button" class="vp-copy" title="Copy message">Copy</button></div><div class="vp-images"></div><div class="vp-err" hidden></div><div class="vp-tools"></div><div class="vp-timing-body" hidden></div></div>';
     const part = <T extends HTMLElement = HTMLElement>(sel: string) => el.querySelector<T>(sel)!;
     return {
         el,
@@ -387,6 +425,7 @@ function createTurn(): TurnView {
         who: part('.vp-name'),
         time: part('.vp-time'),
         gutterTime: part('.vp-gtime'),
+        drawing: part('.vp-drawing'),
         attach: part('.vp-attach'),
         pre: part('.vp-pre'),
         line: part('.vp-line'),
@@ -396,6 +435,7 @@ function createTurn(): TurnView {
         tools: part('.vp-tools'),
         clamp: part('.vp-clamp'),
         more: part<HTMLButtonElement>('.vp-more'),
+        images: part('.vp-images'),
         timing: part<HTMLButtonElement>('.vp-timing'),
         timingBody: part('.vp-timing-body'),
     };
@@ -415,6 +455,7 @@ function renderStream(s: VoiceViewState): void {
         turns.clear();
         openTimings.clear();
         expandedTurns.clear();
+        openImageCards.clear();
         stream.replaceChildren(emptyEl);
     }
     const follow = isFollowing();
@@ -462,12 +503,14 @@ function renderStream(s: VoiceViewState): void {
     latestReplyAvatar = prevEntry?.kind === 'assistant' ? header?.avatar : undefined;
     placeLiveAvatar();
     if (entries.length === 0) {
+        // A new conversation's welcome: the intro, and how to start talking.
         emptyEl.classList.toggle('vp-welcome', !s.session.readonly);
-        setHtml(emptyEl, s.session.readonly ? 'Nothing was said in this session.' : welcomeHtml(s));
+        setHtml(emptyEl, s.session.readonly ? 'Nothing was said in this session.' : `${introHtml(s.engines)}\n${startHtml(s.phase, false)}`);
     }
     if (follow) {
         stream.scrollTop = stream.scrollHeight;
     }
+    schedulePin();
 }
 
 /** Green check: a speech service that answered its last check. */
@@ -484,6 +527,7 @@ export function setVoicePanelReadiness(next: VoiceReadiness): void {
         return;
     }
     readiness = next;
+    renderIntro();
     if (lastState) {
         renderStream(lastState);
     }
@@ -501,19 +545,13 @@ function serviceHtml(label: string, service: 'stt' | 'tts', config: VoiceEngines
     }${state === 'bad' ? '<span class="vp-svc-link">Open Settings → Voice to set it up</span>' : ''}</span></button>`;
 }
 
-/** A new conversation's empty Bot view: who the voice agent is, what it does, whether its speech services work, and how to start talking. */
-function welcomeHtml(s: VoiceViewState): string {
+/**
+ * Who the voice agent is, what it does and whether its speech services work: the top of a new
+ * conversation's welcome, and the chat's empty state when every tab is closed (`voiceIntro`).
+ * The service rows wait for the engines, which come with the host's first snapshot.
+ */
+function introHtml(engines: VoiceEngines | undefined): string {
     const bot = speakerView.bot;
-    const phase = s.phase;
-    const start =
-        phase === 'off'
-            ? `<button type="button" class="vp-welcome-call" title="Start voice mode: microphone, speech services and voice model">${ICON_CALL}<span>Call ${bot.name}</span></button>
-<div class="vp-welcome-hint">Or type in the input box below: without a call it is a text chat.</div>`
-            : phase === 'standby'
-              ? '<div class="vp-welcome-hint">Voice mode is on, but another VS Code window has the microphone: focus this window to talk here.</div>'
-              : phase === 'muted'
-                ? '<div class="vp-welcome-hint">Voice mode is on and the microphone is muted: unmute it with the mic in the input box, or type there.</div>'
-                : '<div class="vp-welcome-hint">Voice mode is on: just start talking, or type in the input box below.</div>';
     return `<div class="vp-welcome-av">${bot.avatar}</div>
 <div class="vp-welcome-title">${bot.name}</div>
 <div class="vp-welcome-sub">Your voice pair programmer. Talk through the code out loud while the agent in this tab does the heavy lifting.</div>
@@ -524,12 +562,65 @@ function welcomeHtml(s: VoiceViewState): string {
 <li><b>Directs the agent.</b> Hands big jobs to this tab's agent, keeps you posted, and passes on its questions and approvals.</li>
 <li><b>Researches.</b> Digs through the codebase in the background and reports back.</li>
 </ul>
-<div class="vp-welcome-svcs">
-${serviceHtml('Speech-to-text', 'stt', s.engines.stt, readiness?.stt)}
-${serviceHtml('Text-to-speech', 'tts', s.engines.tts, readiness?.tts)}
-</div>
-${start}`;
+${
+    engines
+        ? `<div class="vp-welcome-svcs">
+${serviceHtml('Speech-to-text', 'stt', engines.stt, readiness?.stt)}
+${serviceHtml('Text-to-speech', 'tts', engines.tts, readiness?.tts)}
+</div>`
+        : ''
+}`;
 }
+
+/**
+ * How to start talking, under the intro. Voice mode off: the Call button; in the Bot view it starts
+ * voice mode in the tab, with a note that typing is a text chat, and in the chat's empty state
+ * (`emptyState`) it opens a new tab first (`callInNewTab`). Voice mode on: in the Bot view a hint for
+ * the phase; in the empty state nothing, its Open worker and Resume a session follow.
+ */
+function startHtml(phase: VoicePhase, emptyState: boolean): string {
+    if (phase === 'off') {
+        const title = emptyState ? 'Open a new conversation and start voice mode in it' : 'Start voice mode: microphone, speech services and voice model';
+        const call = `<button type="button" class="vp-welcome-call" title="${title}">${ICON_CALL}<span>Call ${speakerView.bot.name}</span></button>`;
+        return emptyState ? call : `${call}\n<div class="vp-welcome-hint">Or type in the input box below: without a call it is a text chat.</div>`;
+    }
+    if (emptyState) {
+        return '';
+    }
+    return phase === 'standby'
+        ? '<div class="vp-welcome-hint">Voice mode is on, but another VS Code window has the microphone: focus this window to talk here.</div>'
+        : phase === 'muted'
+          ? '<div class="vp-welcome-hint">Voice mode is on and the microphone is muted: unmute it with the mic in the input box, or type there.</div>'
+          : '<div class="vp-welcome-hint">Voice mode is on: just start talking, or type in the input box below.</div>';
+}
+
+/**
+ * The intro with its Call button, kept up to date with the names, the engines, the services'
+ * readiness and voice mode: the chat's empty state when every tab is closed (chat/layout.ts) shows
+ * it over its own actions. `display: contents` (voice.css): its parts lay out in the column it is put in.
+ */
+export const voiceIntro = document.createElement('div');
+voiceIntro.className = 'vp-intro';
+
+function renderIntro(): void {
+    setHtml(voiceIntro, `${introHtml(lastState?.engines)}\n${startHtml(lastState?.phase ?? 'off', true)}`);
+}
+
+function openServiceSettings(target: Element): boolean {
+    const svc = target.closest<HTMLElement>('.vp-svc');
+    if (svc) {
+        vscode.postMessage({ type: 'openSettings', section: svc.dataset.service ?? 'voice' } satisfies ClientMessage);
+    }
+    return !!svc;
+}
+voiceIntro.addEventListener('click', (e) => {
+    if ((e.target as Element).closest('.vp-welcome-call')) {
+        // No tab to call in yet: the host opens one and starts voice mode once its worker is ready.
+        vscode.postMessage({ type: 'callInNewTab' } satisfies ClientMessage);
+        return;
+    }
+    openServiceSettings(e.target as Element);
+});
 
 function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     view.el.dataset.id = entry.id;
@@ -556,6 +647,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         setText(view, entry.text);
         setClampText(view, entry.text);
         setHtml(view.post, '');
+        setImages(view, entry.id, entry.images);
         setError(view, undefined);
         view.tools.replaceChildren();
         const heard = entry.latency;
@@ -580,6 +672,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
         setText(view, entry.text);
         setClampText(view, entry.text);
         setHtml(view.post, '');
+        setImages(view, entry.id, undefined);
         setError(view, undefined);
         view.tools.replaceChildren();
         setTiming(view, entry.id, []);
@@ -589,6 +682,7 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     // A reply the agent started on its own is still the agent's: its kind shows as a tag before the text.
     view.el.className = `vp-turn bot${entry.silent ? ' silent' : ''}`;
     setClampText(view, undefined);
+    setImages(view, entry.id, undefined);
     setHtml(view.avatar, speakerView.bot.avatar);
     setHtml(view.who, `<span class="vp-nm">${speakerView.bot.name}</span><span class="vp-badge">AI</span>`);
     setHtml(view.attach, debug && entry.input ? escapeHtml(entry.input) : '');
@@ -619,6 +713,8 @@ function updateTurn(view: TurnView, entry: VoiceEntry, debug: boolean): void {
     }
     setError(view, entry.error);
     renderTools(view.tools, entry.id, entry.tools);
+    // Drawing: a show_me writing a board, from when the model starts writing it until it is done.
+    view.drawing.hidden = !entry.tools.some((tool) => tool.name === 'show_me' && tool.running === true && !showMeCallIsCard(tool.args));
     const latency = entry.latency;
     setTiming(
         view,
@@ -684,6 +780,13 @@ function scheduleClamps(): void {
             measureClamps();
         });
     }
+}
+
+/** The image card under a user turn, open or closed as the user left it; images without a webview URI load from the host. */
+function setImages(view: TurnView, id: string, images: readonly VoiceImage[] | undefined): void {
+    view.imageList = images;
+    setHtml(view.images, images ? imageCardHtml(images, openImageCards.has(id)) : '');
+    loadImageFiles(view.images);
 }
 
 function setClampText(view: TurnView, text: string | undefined): void {
@@ -812,6 +915,9 @@ function toolLook(tool: VoiceToolEntry): { label: string; kind: string } {
             return { label: 'Research', kind: 'research' };
         case 'worker_status':
             return { label: 'Checked worker', kind: 'status' };
+        case 'show_me':
+            return showMeCallIsCard(tool.args) ? { label: 'Snippet', kind: 'snippet' } : { label: 'Board', kind: 'board' };
+        // Saved transcripts before show_me.
         case 'show_text':
             return { label: 'Snippet', kind: 'snippet' };
         // Lookups saved as descriptions only, before they were tool entries.
@@ -826,7 +932,7 @@ function toolLook(tool: VoiceToolEntry): { label: string; kind: string } {
  * A host tool call or lookup as a tool card. `research` only starts a job: its card runs until the job
  * settles, then holds the findings. Every field is set, so an update clears what no longer applies.
  */
-function toolCard(tool: VoiceToolEntry, label: string): ToolViewPayload {
+function toolCard(tool: VoiceToolEntry, look: { label: string; kind: string }): ToolViewPayload {
     const { research } = tool;
     let result: ToolResultPayload | undefined;
     if (research) {
@@ -836,34 +942,34 @@ function toolCard(tool: VoiceToolEntry, label: string): ToolViewPayload {
     }
     return {
         name: tool.name,
-        label,
+        label: look.label,
         args: tool.args,
         result,
         running: tool.running === true || research?.status === 'running',
         // Lookups are the worker's own tools; host tools have renderers of their own.
         renderer: tool.id === undefined ? voiceToolRenderer(tool.name) : undefined,
-        // Shown instead of spoken: open from the start. Others keep whether the user opened them.
-        defaultOpen: tool.id === undefined && tool.name === 'show_text' ? true : undefined,
+        // Snippets are shown instead of spoken: open from the start. Others keep whether the user opened them.
+        defaultOpen: tool.id === undefined && look.kind === 'snippet' ? true : undefined,
     };
 }
 
 function renderTools(container: HTMLElement, entryId: string, tools: VoiceToolEntry[]): void {
     const existing = container.children;
     tools.forEach((tool, i) => {
-        // A tool entry's arguments never change; its result and research state fill in once.
-        const shown = `${tool.name}|${tool.running}|${tool.isError}|${tool.result.length}|${tool.research?.status}|${tool.research?.result?.length}`;
+        // A tool entry's arguments fill in once (a call starts before the model has written them); its result and research state too.
+        const shown = `${tool.name}|${Object.keys(tool.args).length}|${tool.running}|${tool.isError}|${tool.result.length}|${tool.research?.status}|${tool.research?.result?.length}`;
         let card = existing[i] as HTMLElement | undefined;
         if (card && cardShown.get(card) === shown) {
             return;
         }
-        const { label, kind } = toolLook(tool);
+        const look = toolLook(tool);
         if (card) {
-            updateToolView(card, toolCard(tool, label));
+            updateToolView(card, toolCard(tool, look));
         } else {
-            card = createToolView(`${entryId}:t${i}`, toolCard(tool, label));
+            card = createToolView(`${entryId}:t${i}`, toolCard(tool, look));
             container.append(card);
         }
-        card.dataset.kind = kind;
+        card.dataset.kind = look.kind;
         cardShown.set(card, shown);
     });
     while (existing.length > tools.length) {
@@ -871,13 +977,106 @@ function renderTools(container: HTMLElement, entryId: string, tools: VoiceToolEn
     }
 }
 
+// ── Pinned board: as the chat pins a prompt, a board scrolled past stays at the top, to open any time ──
+
+const pinBar = q('.vp-pin-bar');
+const pinTools = pinBar.firstElementChild as HTMLElement;
+/** The board card the pin shows a copy of, and what that card showed (`cardShown`) when copied. */
+let pinned: { card: HTMLElement; shown: string | undefined } | undefined;
+let pinFrame = 0;
+
+/**
+ * The pin shows the header of the last finished board (it has Open) whose top went above the view;
+ * the next board pushes it up as it reaches the top, then takes its place.
+ */
+function updatePin(): void {
+    pinFrame = 0;
+    const top = stream.getBoundingClientRect().top;
+    const cards = Array.from(stream.querySelectorAll('.vp-tools .tv-card[data-kind="board"] .vp-open-board'), (open) => open.closest<HTMLElement>('.tv-card')!);
+    // A card the pin's header brought to the top is in view, not past it: a pixel's slack for fractional layout.
+    let i = cards.length - 1;
+    while (i >= 0 && cards[i].getBoundingClientRect().top >= top - 1) {
+        i--;
+    }
+    const card = cards[i];
+    if (!card || stream.clientHeight === 0) {
+        pinBar.hidden = true;
+        pinned = undefined;
+        pinTools.replaceChildren();
+        return;
+    }
+    const shown = cardShown.get(card);
+    if (pinned?.card !== card || pinned.shown !== shown) {
+        // The card's own element without its body (class and data-kind keep its look), and its header row.
+        const copy = card.cloneNode(false) as HTMLElement;
+        copy.removeAttribute('data-tool-call-id');
+        copy.append(card.querySelector('.tv-row')!.cloneNode(true));
+        copy.querySelector('.tv-head')!.setAttribute('aria-expanded', 'false');
+        pinTools.replaceChildren(copy);
+        pinned = { card, shown };
+    }
+    pinBar.hidden = false;
+    const next = cards[i + 1];
+    const push = next ? Math.min(0, next.getBoundingClientRect().top - top - pinBar.offsetHeight) : 0;
+    pinBar.style.transform = push < 0 ? `translateY(${push}px)` : '';
+}
+
+function schedulePin(): void {
+    if (!pinFrame) {
+        pinFrame = requestAnimationFrame(updatePin);
+    }
+}
+
+stream.addEventListener('scroll', schedulePin, { passive: true });
+// Opening or closing a card moves the boards below it; the view shown again or resized moves them all.
+stream.addEventListener('click', schedulePin);
+new ResizeObserver(schedulePin).observe(stream);
+
+// Open opens the board; the header brings the card back into view, opened to the board's outline.
+pinBar.addEventListener('click', (e) => {
+    const target = e.target as Element;
+    const open = target.closest<HTMLElement>('.vp-open-board');
+    if (open?.dataset.board) {
+        post({ type: 'openBoard', board: open.dataset.board });
+        return;
+    }
+    const card = pinned?.card;
+    if (!target.closest('.tv-head') || !card?.isConnected) {
+        return;
+    }
+    const head = card.querySelector<HTMLElement>('.tv-row > .tv-head');
+    if (head?.getAttribute('aria-expanded') === 'false') {
+        head.click();
+    }
+    stream.scrollTop += card.getBoundingClientRect().top - stream.getBoundingClientRect().top;
+});
+
 stream.addEventListener('click', (e) => {
     if ((e.target as Element).closest('.vp-welcome-call')) {
         callVoiceAgent();
         return;
     }
-    if ((e.target as Element).closest('.vp-svc')) {
-        vscode.postMessage({ type: 'openSettings', section: 'voice' } satisfies ClientMessage);
+    if (openServiceSettings(e.target as Element)) {
+        return;
+    }
+    const openBoard = (e.target as Element).closest<HTMLElement>('.vp-open-board');
+    if (openBoard?.dataset.board) {
+        post({ type: 'openBoard', board: openBoard.dataset.board });
+        return;
+    }
+    const imageCard = (e.target as Element).closest('.vp-imgs');
+    const imageTurn = imageCard?.closest<HTMLElement>('.vp-turn')?.dataset.id;
+    const imageView = imageTurn ? turns.get(imageTurn) : undefined;
+    if (imageTurn && imageView?.imageList) {
+        const tile = (e.target as Element).closest<HTMLElement>('.vp-img-tile');
+        if (tile) {
+            showImage(imageView.imageList, Number(tile.dataset.index));
+        } else if ((e.target as Element).closest('.vp-imgs-toggle')) {
+            if (!openImageCards.delete(imageTurn)) {
+                openImageCards.add(imageTurn);
+            }
+            setImages(imageView, imageTurn, imageView.imageList);
+        }
         return;
     }
     const clampButton = (e.target as Element).closest<HTMLButtonElement>('.vp-more, .vp-copy');
@@ -1108,10 +1307,10 @@ cardsEl.addEventListener('click', (e) => {
 export function handleVoiceMessage(msg: VoiceViewHostMessage): void {
     if (msg.type === 'state') {
         root.dataset.state = msg.state.phase;
-        root.classList.toggle('readonly', msg.state.session.readonly);
         renderHead(msg.state);
         renderCards(msg.state);
         renderStream(msg.state);
+        renderIntro();
     } else if (msg.type === 'speakers') {
         void applySpeakers(msg.speakers);
     } else {
@@ -1123,4 +1322,5 @@ export function handleVoiceMessage(msg: VoiceViewHostMessage): void {
     }
 }
 
+renderIntro();
 post({ type: 'ready' });

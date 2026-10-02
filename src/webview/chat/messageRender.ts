@@ -78,8 +78,8 @@ export function renderMessage(
         const imageFiles = fileAttachments.filter((f) => isImageFilePath(f.path));
         const extractedImgs = extractImages(msg);
 
-        // 如果 content 中含有提取出的图片数据：
-        // 优先将 base64 数据附加给已有的对应图片附件（避免同一张图片重复渲染为两个 chip）
+        // When the content carries extracted image data, attach the base64 to the image
+        // attachment it belongs to, so one image does not render as two chips.
         const unassignedExtracted: typeof extractedImgs = [];
         if (imageFiles.length === extractedImgs.length) {
             for (let i = 0; i < imageFiles.length; i++) {
@@ -113,7 +113,7 @@ export function renderMessage(
             }
         }
 
-        // 仅在没有对应本地文件附件时，才作为独立内联图片追加
+        // Only an image with no matching local file attachment is appended as its own inline image.
         for (const img of unassignedExtracted) {
             const dataUrl = `data:${img.mimeType};base64,${img.data}`;
             const pathKey = `inline-image-${Math.random().toString(36).slice(2, 8)}.png`;

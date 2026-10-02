@@ -1,19 +1,26 @@
 import type { AgentBackend } from '../pi/agentBackend';
 import { resolveCliTarget } from '../pi/piCliPaths';
 import { PiRpcBridge } from '../pi/piRpcBridge';
-import type { RpcHostToolDefinition } from '../pi/rpcTypes';
+import type { RpcHostToolDefinition, RpcSessionState } from '../pi/rpcTypes';
 import type { ImageContent } from '../shared/piTypes';
 import type { VoiceCallUsage, VoiceUsageTotals } from '../shared/voiceViewProtocol';
 
 export interface HostToolCall {
     /** Correlates `host_tool_result`/`host_tool_cancel`; not the model's toolCallId. */
     id: string;
+    /** The model's tool call id: the one `onToolStart` named. */
+    toolCallId: string;
     toolName: string;
     arguments: Record<string, unknown>;
 }
 
 export interface VoiceTurnHandlers {
     onText(delta: string): void;
+    /**
+     * The model began writing a host tool call: its name is known, its arguments are still streaming.
+     * `id` is the model's tool call id; the finished call arrives through `onToolCall` with it as `toolCallId`.
+     */
+    onToolStart(call: { id: string; toolName: string }): void;
     onToolCall(call: HostToolCall): void;
     onToolCancel(callId: string): void;
     /** One of the voice agent's own lookup tools started; `description` is omp's intent line or name + target. */
@@ -73,7 +80,8 @@ interface OmpFrame {
     id?: unknown;
     success?: unknown;
     error?: unknown;
-    assistantMessageEvent?: { type?: string; delta?: unknown };
+    /** `toolcall_start`: pi names the call itself (`id`, `toolName`); omp sends the partial message holding it. */
+    assistantMessageEvent?: { type?: string; delta?: unknown; contentIndex?: unknown; id?: unknown; toolName?: unknown; partial?: { content?: unknown } };
     toolName?: unknown;
     arguments?: unknown;
     targetId?: unknown;
@@ -85,7 +93,7 @@ interface OmpFrame {
     toolCallId?: unknown;
     result?: unknown;
     isError?: unknown;
-    message?: { role?: unknown; usage?: OmpUsage };
+    message?: { role?: unknown; usage?: OmpUsage; content?: unknown };
 }
 
 /** `usage` of an assistant message in omp's `message_end` frame. */
@@ -111,9 +119,10 @@ export class VoiceLlm {
 
     private constructor(
         private readonly _bridge: PiRpcBridge,
-        readonly model: string,
-        /** The model's context window, as the agent reported it at start. */
-        private readonly _contextWindow: number | undefined,
+        /** `provider/id` the process runs. */
+        private _model: string,
+        /** That model's context window, as the agent reported it. */
+        private _contextWindow: number | undefined,
         private readonly _onExit: (error: Error | null) => void,
     ) {
         // Outbound omp frames; each case below reads only the fields it checks.
@@ -133,14 +142,27 @@ export class VoiceLlm {
         await bridge.start(options.cwd, voiceLlmArgs(backend, options), backend, { hostTools: true });
         try {
             await bridge.setHostTools(options.tools);
-            const state = await bridge.getState();
-            const model = state.model ? `${state.model.provider}/${state.model.id}` : 'unknown';
-            const contextWindow = state.model?.contextWindow;
-            return new VoiceLlm(bridge, model, typeof contextWindow === 'number' && contextWindow > 0 ? contextWindow : undefined, onExit);
+            const { model, contextWindow } = runningModel(await bridge.getState());
+            return new VoiceLlm(bridge, model, contextWindow, onExit);
         } catch (err) {
             await bridge.stop();
             throw err;
         }
+    }
+
+    /** The model the process runs, `provider/id`. */
+    get model(): string {
+        return this._model;
+    }
+
+    /** Switches the process to `model` (`provider/id`). Only while idle. Throws when the agent does not have it. */
+    async setModel(model: string): Promise<void> {
+        const slash = model.indexOf('/');
+        if (slash <= 0 || slash === model.length - 1) {
+            throw new Error(`"${model}" is not a provider/id model`);
+        }
+        await this._bridge.setModel(model.slice(0, slash), model.slice(slash + 1));
+        await this._readModel();
     }
 
     get alive(): boolean {
@@ -195,12 +217,22 @@ export class VoiceLlm {
         return sessionFile;
     }
 
-    /** Only while idle. Throws when the agent cannot load it. */
+    /**
+     * Only while idle. Throws when the agent cannot load it. The agent may take the model the
+     * session file was last on: `model` follows.
+     */
     async switchSession(sessionFile: string): Promise<void> {
         const { cancelled } = await this._bridge.switchSession(sessionFile);
         if (cancelled) {
             throw new Error(`The agent did not switch to ${sessionFile}`);
         }
+        await this._readModel();
+    }
+
+    private async _readModel(): Promise<void> {
+        const { model, contextWindow } = runningModel(await this._bridge.getState());
+        this._model = model;
+        this._contextWindow = contextWindow;
     }
 
     /** Token totals and context window use of the loaded voice context. */
@@ -231,11 +263,21 @@ export class VoiceLlm {
     private _onEvent(event: OmpFrame): void {
         const turn = this._turn;
         switch (event.type) {
-            case 'message_update':
-                if (turn && !turn.signal.aborted && event.assistantMessageEvent?.type === 'text_delta') {
-                    turn.handlers.onText(String(event.assistantMessageEvent.delta ?? ''));
+            case 'message_update': {
+                const update = event.assistantMessageEvent;
+                if (!turn || turn.signal.aborted) {
+                    return;
+                }
+                if (update?.type === 'text_delta') {
+                    turn.handlers.onText(String(update.delta ?? ''));
+                } else if (update?.type === 'toolcall_start') {
+                    const call = startedCall(update, event.message?.content);
+                    if (call && !BUILTIN_TOOLS[this._bridge.backend].includes(call.toolName)) {
+                        turn.handlers.onToolStart(call);
+                    }
                 }
                 return;
+            }
             case 'message_end': {
                 const usage = event.message?.role === 'assistant' ? event.message.usage : undefined;
                 if (turn && usage) {
@@ -276,6 +318,7 @@ export class VoiceLlm {
                 if (turn) {
                     turn.handlers.onToolCall({
                         id: String(event.id),
+                        toolCallId: String(event.toolCallId ?? event.id),
                         toolName: String(event.toolName),
                         arguments: (event.arguments ?? {}) as Record<string, unknown>,
                     });
@@ -323,6 +366,22 @@ export class VoiceLlm {
     }
 }
 
+/**
+ * The call a `toolcall_start` began, once its id and name are known (before any argument). pi puts
+ * them on the event; omp in the partial message's block at `contentIndex` (`messageContent`: the frame's `message.content`).
+ */
+function startedCall(update: NonNullable<OmpFrame['assistantMessageEvent']>, messageContent: unknown): { id: string; toolName: string } | undefined {
+    let { id, toolName } = update;
+    if (id === undefined) {
+        const content = update.partial?.content ?? messageContent;
+        const block: unknown = Array.isArray(content) && typeof update.contentIndex === 'number' ? content[update.contentIndex] : undefined;
+        if (typeof block === 'object' && block !== null) {
+            ({ id, name: toolName } = block as { id?: unknown; name?: unknown });
+        }
+    }
+    return typeof id === 'string' && id && typeof toolName === 'string' ? { id, toolName } : undefined;
+}
+
 /** The text blocks of a `tool_execution_end` result (`{ content, details }`), joined; images are left out. */
 function resultText(result: unknown): string {
     const content = typeof result === 'object' && result !== null && 'content' in result ? result.content : undefined;
@@ -339,6 +398,15 @@ function resultText(result: unknown): string {
                 : [],
         )
         .join('\n');
+}
+
+/** The model in the agent's `get_state`, as `provider/id`, with its context window when it reports one. */
+function runningModel(state: RpcSessionState): { model: string; contextWindow: number | undefined } {
+    const contextWindow = state.model?.contextWindow;
+    return {
+        model: state.model ? `${state.model.provider}/${state.model.id}` : 'unknown',
+        contextWindow: typeof contextWindow === 'number' && contextWindow > 0 ? contextWindow : undefined,
+    };
 }
 
 /** The voice agent process's command line after `--mode rpc`. */

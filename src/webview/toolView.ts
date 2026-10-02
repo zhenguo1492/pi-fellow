@@ -126,7 +126,7 @@ function toggleCard(view: HTMLElement, head: HTMLElement, state: CardState): voi
     const id = view.dataset.toolCallId;
     if (id && state.open) openToolCalls.add(id);
     else if (id) openToolCalls.delete(id);
-    if (state.open) head.after(buildBody(cardModel(state.payload)));
+    if (state.open) (head.closest('.tv-row') ?? head).after(buildBody(cardModel(state.payload)));
     else view.querySelector(':scope > .tv-body')?.remove();
 }
 
@@ -186,7 +186,9 @@ function renderCard(view: HTMLElement, state: CardState): void {
     });
 
     view.className = isError ? 'tv-card tv-card--error' : 'tv-card';
-    view.replaceChildren(head);
+    // Actions sit in a row with the header, outside the toggle button, whatever width the body has.
+    const actions = model.renderer.actions?.(model.props).filter(Boolean) ?? [];
+    view.replaceChildren(actions.length > 0 ? h('div', 'tv-row', head, h('span', 'tv-actions', ...actions)) : head);
     if (state.open) view.append(buildBody(model));
     syncPartial(view, payload);
 }

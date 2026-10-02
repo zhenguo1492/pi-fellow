@@ -3,15 +3,17 @@ import type { SettingsData } from '../../shared/protocol';
 import { buildAuthTab } from './auth';
 import { buildCommandsTab } from './commands';
 import { el } from './dom';
+import { discardEdits, saveEdits, withMcpEdits } from './edits';
 import { bindEvents } from './events';
 import { buildGeneralTab } from './general';
 import { bindMcpServerCards, buildMcpServerCard, buildMcpTab } from './mcp';
 import { buildOmpPluginsTab, buildPackagesTab } from './packages';
+import { bindSaveBar, buildSaveBar } from './saveBar';
 import { buildSkillsTab, renderSkillsSection } from './skills';
 import { settingsState } from './state';
 import { buildTabNav, switchSettingsTab } from './tabs';
 import { renderVoiceSkills } from './voice';
-import { buildVoiceTab, restoreVoiceDrafts } from './voiceSetup';
+import { buildVoiceTab, discardVoiceChanges, restoreVoiceDrafts, saveVoice } from './voiceSetup';
 
 function buildHeader(data: SettingsData): HTMLElement {
     const header = el('div', 'settings-header');
@@ -20,7 +22,7 @@ function buildHeader(data: SettingsData): HTMLElement {
     header.innerHTML = `
         <div class="settings-header-top">
             <div class="settings-title-group">
-                <h1>PI Buddy Settings</h1>
+                <h1>Pi Fellow Settings</h1>
                 <p class="settings-version">Extension v${escapeHtml(data.extensionVersion ?? '?')}</p>
             </div>
             <div class="backend-toggle-group">
@@ -38,10 +40,15 @@ function buildHeader(data: SettingsData): HTMLElement {
     return header;
 }
 
-export function render(data: SettingsData): void {
+/** Builds the whole page from the settings as shown (`currentSettings`: saved, with the unsaved edits). */
+export function render(): void {
+    const data = settingsState.currentSettings;
+    if (!data) {
+        return;
+    }
     const app = document.getElementById('settings-app')!;
-    // Saving a text field echoes the settings back and rebuilds the page; keep
-    // the field being typed in (value, caret, focus) and the scroll position.
+    // Settings echoed back rebuild the page; keep the field being typed in (value, caret, focus)
+    // and the scroll position.
     const active = document.activeElement;
     const focused = (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) && active.id ? active : null;
     const typing = focused && {
@@ -68,10 +75,22 @@ export function render(data: SettingsData): void {
     panels.appendChild(buildMcpTab(data));
     panels.appendChild(buildCommandsTab(data));
     container.appendChild(panels);
+    container.appendChild(buildSaveBar());
 
     app.appendChild(container);
     switchSettingsTab(settingsState.activeTab, false);
     bindEvents();
+    bindSaveBar({
+        save: () => {
+            saveVoice();
+            saveEdits();
+        },
+        discard: () => {
+            discardEdits();
+            discardVoiceChanges();
+            render();
+        },
+    });
     restoreVoiceDrafts();
     renderSkillsSection();
     renderVoiceSkills();
@@ -97,14 +116,15 @@ export function renderMcpSection(): void {
     }
     const list = document.getElementById('mcp-server-list-root');
     if (!list || !settingsState.mcpSnapshot) {
-        render(settingsState.currentSettings);
+        render();
         return;
     }
+    const snapshot = withMcpEdits(settingsState.mcpSnapshot);
     list.innerHTML = '';
-    if (settingsState.mcpSnapshot.servers.length === 0) {
+    if (snapshot.servers.length === 0) {
         list.innerHTML = '<p class="setting-description">No MCP servers configured.</p>';
     } else {
-        for (const server of settingsState.mcpSnapshot.servers) {
+        for (const server of snapshot.servers) {
             list.appendChild(buildMcpServerCard(server));
         }
     }

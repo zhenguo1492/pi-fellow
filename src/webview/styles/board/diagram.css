@@ -1,0 +1,191 @@
+/*
+ * Mermaid diagrams, each in a view (diagrams.ts) that its own zoom works in (zoom.ts). `--natural` is
+ * the width Mermaid drew it at, `--ratio` its height / width, `--dz` its zoom; `--fit` is the width it
+ * shows at 100%: Mermaid's, at most the text column's (100cqw of its .board-diagram). At 100% the whole
+ * drawing shows, as tall as it is. Zoomed out, the view shrinks with it. Zoomed in, the view grows past
+ * the text column, centered, up to the board's width (`--board-width`) and the window's height below
+ * the header (`--board-height`, both set by zoom.ts in the column's own px), and the drawing pans
+ * inside it by dragging beyond that. Expanded (⤢), the diagram alone fills the board below the header.
+ * A failed diagram shows its error and source. The selection, the expanded layer and the tools are
+ * shared with web pages (web.css).
+ */
+
+.board-block[data-kind="diagram"] {
+    position: relative;
+    border-radius: 6px;
+}
+/* Selected by a click: Ctrl/Cmd + wheel and keys zoom this diagram or web page (zoom.ts). */
+.board-block[data-kind="diagram"].is-selected,
+.board-block[data-kind="web"].is-selected {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 2px;
+}
+.board-block.is-expanded.is-selected {
+    outline-offset: -2px;
+}
+
+/* Not clipping: a view zoomed past the text column overflows it on both sides, still centered. */
+.board-diagram {
+    container-type: inline-size;
+    display: flex;
+    justify-content: center;
+    padding: 6px 0;
+}
+
+.board-diagram-view {
+    --fit: min(var(--natural), 100cqw);
+    flex-shrink: 0;
+    width: min(calc(var(--fit) * var(--dz, 1)), var(--board-width, 100cqw));
+    height: min(calc(var(--fit) * var(--ratio) * var(--dz, 1)), max(calc(var(--fit) * var(--ratio)), var(--board-height, 80vh)));
+    overflow: hidden;
+}
+/* Content Mermaid draws past its viewBox (a long label) shows, as far as the view goes. */
+.board-diagram-view > svg {
+    display: block;
+    width: calc(var(--fit) * var(--dz, 1));
+    max-width: none;
+    height: auto;
+    overflow: visible;
+}
+.board-diagram-view.is-zoomed {
+    overflow: auto;
+    scrollbar-width: thin;
+    user-select: none;
+}
+/* Zoomed in beyond what the view can show: framed, and dragged around. */
+.board-diagram-view.can-pan {
+    cursor: grab;
+    border-radius: 4px;
+    box-shadow: inset 0 0 0 1px var(--border);
+}
+.board-diagram-view.is-panning {
+    cursor: grabbing;
+}
+
+/*
+ * Expanded: the diagram or web page alone, over the board below the header (the overlay's marks stay
+ * above it). The board behind stays put: no scrolling, and no scroll anchoring moving it as the block
+ * leaves the flow.
+ */
+body.board-expanded {
+    overflow: hidden;
+    overflow-anchor: none;
+}
+.board-block.is-expanded {
+    position: fixed;
+    top: var(--board-top, 0);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    margin: 0;
+    padding: var(--board-margin, 16px);
+    background: var(--bg);
+}
+.board-block.is-expanded > .board-diagram {
+    padding: 0;
+}
+/* At 100% it fills the board: as wide as the board, or as tall, whichever comes first. */
+.board-block.is-expanded .board-diagram-view {
+    --fit: min(100cqw, calc(var(--board-height, 80vh) / var(--ratio)));
+}
+
+/*
+ * A diagram's or web page's own − / percent / + / ⤢: over a diagram's top right corner, in a web
+ * page's header (web.css), while the pointer is on the block, it is selected or they have the focus;
+ * always while expanded.
+ */
+.board-block-tools {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 1;
+    display: flex;
+    opacity: 0;
+    transition: opacity 0.12s;
+}
+.board-block:hover > .board-block-tools,
+.board-block.is-selected > .board-block-tools,
+.board-block.is-expanded > .board-block-tools,
+.board-block-tools:focus-within {
+    opacity: 1;
+}
+.board-block.is-expanded > .board-block-tools {
+    top: var(--board-margin, 16px);
+    right: var(--board-margin, 16px);
+}
+/* Nothing to zoom until it is drawn, or when it failed. */
+.board-block:not(:has(.board-diagram-view)) > .board-block-tools {
+    display: none;
+}
+.board-block-tools > button {
+    min-width: 24px;
+    margin-left: -1px;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 12px;
+    line-height: 18px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+.board-block-tools > button:first-child {
+    border-radius: 4px 0 0 4px;
+}
+.board-block-tools > button:last-child {
+    border-radius: 0 4px 4px 0;
+}
+.board-block-tools > button:hover {
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-bg));
+}
+.board-block-tools > button:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 1px;
+}
+.board-block-tools > button[aria-pressed="true"] {
+    border-color: var(--focus-border);
+    background: color-mix(in srgb, var(--focus-border) 18%, var(--card-bg));
+}
+
+.board-diagram-pending {
+    color: var(--muted);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.board-diagram-error {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 12px;
+    border: 1px solid color-mix(in srgb, var(--error-fg) 45%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--error-fg) 7%, transparent);
+}
+.board-diagram-error-title {
+    color: var(--error-fg);
+    font-size: 12px;
+    font-weight: 600;
+}
+.board-diagram-error pre {
+    margin: 6px 0 0;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+}
+.board-diagram-error .board-diagram-error-message {
+    color: var(--error-fg);
+    white-space: pre-wrap;
+}
+.board-diagram-source {
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: var(--code-bg);
+    color: var(--fg);
+}

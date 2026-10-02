@@ -9,9 +9,9 @@ import { normalizePiPackageSource } from './piPackageCatalog';
 import { installPiPackage, removePiPackageBySource } from './piPackageInstall';
 import { getPiPackagesFromSettings, readPiSettingsJson, writePiSettingsJson } from './piSettingsJson';
 import {
-    addOmpSkillPath,
+    cleanPaths,
     readOmpAgentConfigData,
-    removeOmpSkillPathAt,
+    setOmpSkillPaths,
     setOmpEnableSkillCommands,
     setOmpFollowUpMode,
     setOmpSteeringMode,
@@ -282,83 +282,26 @@ export async function removePiPackageAt(
     await removePiPackageBySource(source, sessionManager, outputChannel);
 }
 
-/** Extension files the CLI loads: omp `config.yml#extensions`, pi `settings.json#extensions`. */
-export async function addPiExtensionPath(filePath: string, preferredBackend?: AgentBackend): Promise<void> {
-    const trimmed = filePath.trim();
-    if (!trimmed) {
-        throw new Error('Extension path is empty');
-    }
-    const add = (paths: unknown): string[] => {
-        const list = Array.isArray(paths) ? paths : [];
-        return list.includes(trimmed) ? list : [...list, trimmed];
-    };
+/** Extension files the CLI loads, as given: omp `config.yml#extensions`, pi `settings.json#extensions`. */
+export async function setPiExtensionPaths(paths: readonly string[], preferredBackend?: AgentBackend): Promise<void> {
+    const extensions = cleanPaths(paths);
     const layout = getAgentLayout(preferredBackend);
     if (layout.backend === 'omp') {
-        writeOmpConfig((current) => ({ ...current, extensions: add(current.extensions) }), layout.agentDir);
+        writeOmpConfig((current) => ({ ...current, extensions }), layout.agentDir);
     } else {
-        writePiSettingsJson((current) => ({ ...current, extensions: add(current.extensions) }));
+        writePiSettingsJson((current) => ({ ...current, extensions }));
     }
 }
 
-export async function removePiExtensionPathAt(index: number, preferredBackend?: AgentBackend): Promise<void> {
-    const remove = (paths: unknown): string[] => {
-        const list = Array.isArray(paths) ? paths : [];
-        if (index < 0 || index >= list.length) {
-            throw new Error('Invalid extension path index');
-        }
-        return list.filter((_, i) => i !== index);
-    };
+/** Directories of SKILL.md files, as given: omp `config.yml#skills.customDirectories`, pi `settings.json#skills`. */
+export async function setPiSkillPaths(paths: readonly string[], preferredBackend?: AgentBackend): Promise<void> {
     const layout = getAgentLayout(preferredBackend);
     if (layout.backend === 'omp') {
-        writeOmpConfig((current) => ({ ...current, extensions: remove(current.extensions) }), layout.agentDir);
-    } else {
-        writePiSettingsJson((current) => ({ ...current, extensions: remove(current.extensions) }));
-    }
-}
-
-export async function addPiSkillPath(
-    skillPath: string,
-    sessionManager?: PiChatSession,
-    preferredBackend?: AgentBackend,
-): Promise<void> {
-    const layout = getAgentLayout(preferredBackend);
-    if (layout.backend === 'omp') {
-        await addOmpSkillPath(skillPath, layout.agentDir);
+        await setOmpSkillPaths(paths, layout.agentDir);
         return;
     }
-    const trimmed = skillPath.trim();
-    if (!trimmed) {
-        throw new Error('Skill path is empty');
-    }
-    writePiSettingsJson((current) => {
-        const paths = [...(current.skills ?? [])];
-        if (!paths.includes(trimmed)) {
-            paths.push(trimmed);
-        }
-        return { ...current, skills: paths };
-    });
-    void sessionManager;
-}
-
-export async function removePiSkillPathAt(
-    index: number,
-    sessionManager?: PiChatSession,
-    preferredBackend?: AgentBackend,
-): Promise<void> {
-    const layout = getAgentLayout(preferredBackend);
-    if (layout.backend === 'omp') {
-        await removeOmpSkillPathAt(index, layout.agentDir);
-        return;
-    }
-    writePiSettingsJson((current) => {
-        const paths = [...(current.skills ?? [])];
-        if (index < 0 || index >= paths.length) {
-            throw new Error('Invalid skill path index');
-        }
-        paths.splice(index, 1);
-        return { ...current, skills: paths };
-    });
-    void sessionManager;
+    const skills = cleanPaths(paths);
+    writePiSettingsJson((current) => ({ ...current, skills }));
 }
 
 export async function setPiEnableSkillCommands(

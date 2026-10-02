@@ -224,7 +224,7 @@ describe('VoiceTranscriptStore: tool cards', () => {
         const { store, m } = setup();
         const { listener } = store.beginReply();
         const job: ResearchJob = { id: 'r1', question: 'How does replay work?', startedAt: 1000, status: 'running' };
-        listener.onToolCall?.('research', { question: job.question }, { text: 'Started research r1', isError: false, research: job });
+        listener.onToolCall?.('t1', 'research', { question: job.question }, { text: 'Started research r1', isError: false, research: job });
         listener.onEnd?.(result());
         expect(assistant(store.current()!.entries).tools[0].research).toEqual({ status: 'running', startedAt: 1000 });
 
@@ -238,7 +238,7 @@ describe('VoiceTranscriptStore: tool cards', () => {
         });
 
         // A job still running when the window closed shows as stopped after a reload, not running forever.
-        store.beginReply().listener.onToolCall?.('research', { question: 'q2' }, { text: 'Started research r2', isError: false, research: { id: 'r2', question: 'q2', startedAt: 2000, status: 'running' } });
+        store.beginReply().listener.onToolCall?.('t2', 'research', { question: 'q2' }, { text: 'Started research r2', isError: false, research: { id: 'r2', question: 'q2', startedAt: 2000, status: 'running' } });
         store.flush();
         const reloaded = setup({ initial: m.saved() }).store;
         const tools = reloaded.sessions()[0].entries.flatMap((e) => (e.kind === 'assistant' ? e.tools : []));
@@ -258,6 +258,29 @@ describe('VoiceTranscriptStore: tool cards', () => {
         expect(grep.running).toBe(true);
         listener.onEnd?.(result({ interrupted: true }));
         expect(grep.running).toBeUndefined();
+    });
+
+    it('records a host tool call running from when the model starts writing it, settled into that one entry', () => {
+        const { store, m } = setup();
+        const { listener } = store.beginReply();
+        listener.onToolStart?.('t1', 'show_me');
+        expect(assistant(store.current()!.entries).tools).toEqual([{ name: 'show_me', args: {}, result: '', isError: false, running: true }]);
+        const args = { markdown: '# Plan\n\n```mermaid\ngraph TD\nA-->B\n```' };
+        listener.onToolStart?.('t1', 'show_me', args);
+        expect(assistant(store.current()!.entries).tools).toEqual([{ name: 'show_me', args, result: '', isError: false, running: true }]);
+        listener.onToolCall?.('t1', 'show_me', args, { text: 'Board b1 written', isError: false });
+        listener.onEnd?.(result());
+        expect(assistant(store.current()!.entries).tools).toEqual([{ name: 'show_me', args, result: 'Board b1 written', isError: false }]);
+
+        // A call the cut-off model never finished writing did nothing: gone at the reply's end, and after a reload.
+        const cut = store.beginReply().listener;
+        cut.onToolStart?.('t2', 'show_me');
+        cut.onEnd?.(result({ interrupted: true }));
+        expect(assistant(store.current()!.entries).tools).toEqual([]);
+        store.beginReply().listener.onToolStart?.('t3', 'show_me');
+        store.flush();
+        const reloaded = setup({ initial: m.saved() }).store;
+        expect(reloaded.sessions()[0].entries.flatMap((e) => (e.kind === 'assistant' ? e.tools : [])).map((t) => t.result)).toEqual(['Board b1 written']);
     });
 
     it('turns lookups saved as descriptions into tool entries', () => {

@@ -66,6 +66,7 @@ import {
 import { SidebarTuiMode } from './sidebarTuiMode';
 import { SidebarVoiceSessions } from './sidebarVoiceSessions';
 import { SidebarWorker } from './sidebarWorker';
+import { insideFolder } from '../voiceAgent/pairText';
 
 export class SidebarProvider implements vscode.WebviewViewProvider, WorkerController, VoiceChatControls {
     private _view?: vscode.WebviewView;
@@ -83,6 +84,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     private _modelStatus?: ModelStatusTracker;
     /** Mic dictation into the composer. */
     readonly voiceInput: VoiceInput;
+    private readonly _pastedStorageDir: string;
+    /** Folders besides the extension's the webview may load files from (`localResourceRoots`), as of the view's last resolve. */
+    private _imageFolders: string[] = [];
 
     // ---- WorkerController: voice agent task control (docs/voice-agent-design.md §5.11) ----
 
@@ -159,6 +163,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             this.sendStateSync();
         });
         this._tui = new SidebarTuiMode(this._host, (tabId, event) => this._tabEvent.fire({ tabId, event }));
+        this._pastedStorageDir = pastedStorageDir;
         this._attachments = new SidebarAttachments(this._host, pastedStorageDir);
         this._voiceSessions = new SidebarVoiceSessions(outputChannel);
         this._queue = new SidebarPromptQueue(this._host, this._attachments);
@@ -180,6 +185,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             this.voiceInput,
             this._tabs,
             this._botViewVisibility,
+            () => this._voiceActions.fire({ type: 'start' }),
         );
         this._handlers = {
             ...this._queue.handlers(),
@@ -234,6 +240,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         return this._backends.activeTab?.session;
     }
 
+    /** A new conversation tab in the current backend, shown. */
+    async createTab(): Promise<void> {
+        await this._tabs.createTab();
+    }
+
     disposePrewarmedSession(): Promise<void> {
         return this._backends.disposePrewarmedSession();
     }
@@ -254,13 +265,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     ): void {
         this._view = webviewView;
 
+        // Attached images show in the Bot view straight from disk: pasted ones, and the workspace's files.
+        this._imageFolders = [
+            this._pastedStorageDir,
+            ...(vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file').map((folder) => folder.uri.fsPath),
+        ];
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [this._extensionUri],
+            localResourceRoots: [this._extensionUri, ...this._imageFolders.map((folder) => vscode.Uri.file(folder))],
         };
 
         webviewView.webview.html = getSidebarHtml(webviewView.webview, this._extensionUri);
-        this._wireRpcSessionUi(this._backends.activeTab.session);
+        const shown = this._backends.activeTab;
+        if (shown) this._wireRpcSessionUi(shown.session);
         this._tabs.subscribeMissing();
 
         webviewView.webview.onDidReceiveMessage((received: ClientMessage) => {
@@ -461,7 +478,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
     sendStateSync(): void {
         this._noteActiveTask();
         const tab = this._backends.activeTab;
-        if (!tab) return;
+        if (!tab) {
+            // Every tab closed: the chat shows its empty state, with the backend and the voice status.
+            this._post({
+                type: 'stateSync',
+                state: {
+                    messages: [],
+                    isStreaming: false,
+                    tools: [],
+                    tabs: [],
+                    activeTabId: '',
+                    activeBackend: this._backends.current,
+                    voiceReadiness: voiceReadiness(),
+                    voice: this._botView.voiceStatus,
+                },
+            });
+            this._tabs.schedulePersistOpenTabs();
+            this._botView.syncBotViewVisibility();
+            return;
+        }
 
         const state = tab.session.serializeState();
         state.isStreaming = this._queue.uiIsStreaming(tab);
@@ -545,6 +580,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
         this._post({ type: 'voice', message });
     }
 
+    imageSrc(path: string): string | undefined {
+        const webview = this._view?.webview;
+        return webview && this._imageFolders.some((folder) => insideFolder(folder, path)) ? webview.asWebviewUri(vscode.Uri.file(path)).toString() : undefined;
+    }
+
     showBotView(preserveFocus: boolean, options?: { onlyIfWorkerUnused?: boolean }): Promise<void> {
         return this._botView.showBotView(preserveFocus, options);
     }
@@ -578,7 +618,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider, WorkerContro
             const handler = Object.hasOwn(this._handlers, msg.type)
                 ? (this._handlers[msg.type] as MessageHandler<ClientMessage['type']>)
                 : undefined;
-            await handler?.(msg, tab);
+            // With every tab closed only handlers that take no tab run (MessageHandler); the rest, sent just
+            // before the last tab went, have nothing to act on.
+            if (tab) {
+                await handler?.(msg, tab);
+            } else if (handler && handler.length < 2) {
+                await (handler as (msg: ClientMessage) => Promise<void> | void)(msg);
+            }
         } catch (err: unknown) {
             // Errors and RPC error objects carry `message`; whatever else was thrown is read the same way.
             const thrown = err as { message?: string };

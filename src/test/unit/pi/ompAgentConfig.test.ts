@@ -7,8 +7,7 @@ import {
     writeOmpConfig,
     readOmpConfigSummary,
     updateOmpDefaults,
-    addOmpSkillPath,
-    removeOmpSkillPathAt,
+    setOmpSkillPaths,
     setOmpEnableSkillCommands,
     setOmpSteeringMode,
     setOmpFollowUpMode,
@@ -63,18 +62,16 @@ describe('ompAgentConfig', () => {
         }
     });
 
-    it('adds and removes custom skill paths', async () => {
+    it('writes custom skill paths trimmed, without blanks or repeats, keeping the rest of skills', async () => {
         const dir = createTempAgentDir();
         try {
-            await addOmpSkillPath('/path/to/skill1', dir);
-            await addOmpSkillPath('/path/to/skill2', dir);
-            // duplicate add should be no-op
-            await addOmpSkillPath('/path/to/skill1', dir);
+            await setOmpEnableSkillCommands(false, dir);
+            await setOmpSkillPaths([' /path/to/skill1 ', '/path/to/skill2', '', '/path/to/skill1'], dir);
 
             let cfg = readOmpConfig(dir);
-            expect(cfg.skills?.customDirectories).toEqual(['/path/to/skill1', '/path/to/skill2']);
+            expect([cfg.skills?.customDirectories, cfg.skills?.enableSkillCommands]).toEqual([['/path/to/skill1', '/path/to/skill2'], false]);
 
-            await removeOmpSkillPathAt(0, dir);
+            await setOmpSkillPaths(['/path/to/skill2'], dir);
             cfg = readOmpConfig(dir);
             expect(cfg.skills?.customDirectories).toEqual(['/path/to/skill2']);
         } finally {

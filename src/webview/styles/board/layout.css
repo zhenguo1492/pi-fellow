@@ -1,0 +1,132 @@
+/* The board page: a sticky header over a centered document column on the editor background. */
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+    font-size: 15px;
+    line-height: 1.65;
+    color: var(--fg);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+}
+
+.board-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.board-title {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* The header buttons: the zoom's, Edit source, and Maximize / Restore. */
+.board-edit,
+.board-maximize,
+.board-zoom > button {
+    flex-shrink: 0;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+.board-edit:hover,
+.board-maximize:hover,
+.board-zoom > button:hover {
+    background: var(--tint);
+}
+.board-edit:focus-visible,
+.board-maximize:focus-visible,
+.board-zoom > button:focus-visible {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 1px;
+}
+/* Pressed while maximized, so Restore reads as a state to leave. */
+.board-maximize[aria-pressed="true"] {
+    border-color: var(--focus-border);
+    background: var(--tint-faint);
+}
+/* An icon (screen-full / screen-normal), square and as tall as the text buttons beside it (12px × 1.65 line). */
+.board-maximize {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+}
+.board-maximize > svg {
+    display: block;
+}
+
+/* The header's zoom: − / percent / + joined into one control, the percent (a reset) fixed-width. */
+.board-zoom {
+    display: flex;
+    flex-shrink: 0;
+}
+.board-zoom > button {
+    min-width: 26px;
+    padding: 3px 6px;
+    font-variant-numeric: tabular-nums;
+}
+.board-zoom > button:not(:first-child) {
+    margin-left: -1px;
+}
+.board-zoom > button:first-child {
+    border-radius: 4px 0 0 4px;
+}
+.board-zoom > button:last-child {
+    border-radius: 0 4px 4px 0;
+}
+.board-zoom > .board-zoom-reset {
+    min-width: 52px;
+    border-radius: 0;
+}
+
+/*
+ * The column the page zoom scales (a transform, set from zoom.ts: --board-zoom); the mark overlay is
+ * outside it. Laid out 1/zoom of the window's width, so that scaled from its top left it spans the
+ * window; its text keeps to 920px (at 100%) in the middle of it.
+ */
+.board-doc {
+    width: calc(100% / var(--board-zoom, 1));
+    padding: 20px max(32px, calc((100% / var(--board-zoom, 1) - 920px) / 2 + 32px)) 40vh;
+    transform-origin: 0 0;
+}
+
+.board-empty {
+    color: var(--muted);
+    font-style: italic;
+}
+.board-empty[hidden] {
+    display: none;
+}
+
+.board-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+    z-index: 5;
+}

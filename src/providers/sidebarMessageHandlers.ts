@@ -11,7 +11,11 @@ import { applyTabPermission } from './sidebarPermission';
 
 export type ClientMessageOf<T extends ClientMessage['type']> = Extract<ClientMessage, { type: T }>;
 
-/** Handles one webview message for the tab that was active when it arrived; errors post an `error` message. */
+/**
+ * Handles one webview message for the tab that was active when it arrived; errors post an `error` message.
+ * A handler that declares `tab` runs only while a tab is open; one that does not (no second parameter)
+ * also runs when the user closed every tab (`SidebarProvider._handleMessage` dispatches by its arity).
+ */
 export type MessageHandler<T extends ClientMessage['type']> = (msg: ClientMessageOf<T>, tab: TabState) => Promise<void> | void;
 
 /** The sidebar's webview messages by type; a type without a handler is ignored. */

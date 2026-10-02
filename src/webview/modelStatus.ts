@@ -262,17 +262,26 @@ function renderHeader(s: ModelStatusInfo): void {
     }
     const t = s.tokens;
     if (t) {
+        // One short row each, like the Bot view's usage, so nothing is cut off at the panel's edge.
         rows.push(
             row(
                 'Session',
-                [
-                    `in ${formatTokenCount(t.input)}`,
-                    `out ${formatTokenCount(t.output)}`,
-                    ...(t.cacheRead > 0 || t.cacheWrite > 0 ? [`cache read ${formatTokenCount(t.cacheRead)}`, `write ${formatTokenCount(t.cacheWrite)}`] : []),
-                    ...(t.cost > 0 ? [`$${t.cost.toFixed(4)}`] : []),
-                ].join(SEP),
+                [`in ${formatTokenCount(t.input)}`, `out ${formatTokenCount(t.output)}`, ...(t.cost > 0 ? [`$${t.cost.toFixed(4)}`] : [])].join(SEP),
             ),
         );
+        if (t.cacheRead > 0 || t.cacheWrite > 0) {
+            // Hit: share of all prompt tokens served from the cache (`input` is the uncached part); first, so it shows however narrow the panel.
+            rows.push(
+                row(
+                    'Cache',
+                    [
+                        `hit ${Math.round((t.cacheRead / (t.input + t.cacheRead + t.cacheWrite)) * 100)}%`,
+                        `read ${formatTokenCount(t.cacheRead)}`,
+                        `write ${formatTokenCount(t.cacheWrite)}`,
+                    ].join(SEP),
+                ),
+            );
+        }
     }
     for (const acct of s.usage) {
         rows.push(`<div class="ms-group">${escapeHtml(acct.title)} usage</div>`);

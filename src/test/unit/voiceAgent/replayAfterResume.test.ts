@@ -100,6 +100,7 @@ describe('Bot view replay of a reply spoken after the window reloaded', () => {
             onDidChangeBotViewVisibility: () => ({ dispose: () => {} }),
             isBotViewVisible: () => false,
             postVoice: () => {},
+            imageSrc: () => undefined,
             showBotView: async () => {},
         };
         const worker = { onActiveTaskChanged: () => ({ dispose: () => {} }), onRequestsChanged: () => ({ dispose: () => {} }) } as unknown as WorkerController;

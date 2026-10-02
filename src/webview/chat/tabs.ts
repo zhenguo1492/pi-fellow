@@ -1,5 +1,6 @@
 import type { TabInfo } from '../../shared/protocol';
 import { ICON_ROBOT } from '../avatar';
+import { setWorkerBusy } from '../voiceBar';
 import { vscode } from '../vscodeApi';
 import { el } from './helpers';
 import { iconsBaseUri } from './icons';
@@ -36,23 +37,15 @@ function setTabOverflowOpen(open: boolean): void {
     button.classList.toggle('active', open);
 }
 
-function updateTabOverflowMenu(hasOverflow: boolean): void {
-    const root = document.getElementById('tab-overflow');
+/** The dropdown listing every tab; always shown, the strip may not fit them all. */
+function updateTabOverflowMenu(): void {
     const menu = document.getElementById('tab-overflow-menu');
-    const count = root?.querySelector('.tab-overflow-count');
-    if (!root || !menu || !count) return;
-
-    root.hidden = !hasOverflow;
-    count.textContent = String(state.tabs.length);
-    if (!hasOverflow) {
-        setTabOverflowOpen(false);
-        menu.innerHTML = '';
-        return;
-    }
+    if (!menu) return;
 
     menu.innerHTML = '';
     for (const tab of state.tabs) {
-        const item = el('button', `tab-overflow-item${tab.isActive ? ' active' : ''}`);
+        const row = el('div', `tab-overflow-row${tab.isActive ? ' active' : ''}`);
+        const item = el('button', 'tab-overflow-item');
         item.type = 'button';
         item.dataset.tabId = tab.id;
         item.setAttribute('role', 'menuitem');
@@ -65,7 +58,16 @@ function updateTabOverflowMenu(hasOverflow: boolean): void {
         const marker = el('span', 'tab-overflow-item-marker');
         marker.textContent = tab.isActive ? '✓' : '';
         item.append(status, label, marker);
-        menu.appendChild(item);
+
+        const closeBtn = el('button', 'tab-overflow-close');
+        closeBtn.type = 'button';
+        closeBtn.innerHTML = '&times;';
+        closeBtn.title = 'Close tab';
+        closeBtn.setAttribute('aria-label', `Close ${tab.name}`);
+        closeBtn.dataset.tabId = tab.id;
+
+        row.append(item, closeBtn);
+        menu.appendChild(row);
     }
 }
 
@@ -75,12 +77,10 @@ function recalculateTabCapacity(): void {
     const headerActions = document.querySelector('.header-right') as HTMLElement | null;
     if (!header || !modeSwitch || !headerActions) return;
 
-    const fixedWidth = modeSwitch.offsetWidth + headerActions.offsetWidth + 24;
-    const withoutOverflow = Math.max(0, header.clientWidth - fixedWidth);
-    let nextCapacity = Math.max(1, Math.floor(withoutOverflow / TAB_MIN_VISIBLE_WIDTH));
-    if (state.tabs.length > nextCapacity) {
-        nextCapacity = Math.max(1, Math.floor((withoutOverflow - 34) / TAB_MIN_VISIBLE_WIDTH));
-    }
+    // The strip's room left after the mode switch, the actions, and the always-shown dropdown button.
+    const fixedWidth = modeSwitch.offsetWidth + headerActions.offsetWidth + 24 + 34;
+    const available = Math.max(0, header.clientWidth - fixedWidth);
+    const nextCapacity = Math.max(1, Math.floor(available / TAB_MIN_VISIBLE_WIDTH));
     if (nextCapacity === visibleTabCapacity) return;
     visibleTabCapacity = nextCapacity;
     updateTabs();
@@ -137,7 +137,6 @@ export function updateTabs(): void {
     tabStrip.innerHTML = '';
 
     const visibleTabs = tabsForVisibleCapacity(state.tabs, state.activeTabId, visibleTabCapacity);
-    const hasOverflow = visibleTabs.length < state.tabs.length;
     for (const tab of visibleTabs) {
         const tabEl = el('div', `tab${tab.isActive ? ' tab-active' : ''}${tab.isStreaming ? ' tab-streaming' : ''}`);
         tabEl.dataset.tabId = tab.id;
@@ -160,18 +159,18 @@ export function updateTabs(): void {
         tabEl.appendChild(icon);
         tabEl.appendChild(name);
 
-        if (state.tabs.length > 1) {
-            const closeBtn = el('button', 'tab-close');
-            closeBtn.innerHTML = '&times;';
-            closeBtn.title = 'Close tab';
-            closeBtn.dataset.tabId = tab.id;
-            tabEl.appendChild(closeBtn);
-        }
+        // The last tab closes too: the chat then shows its empty state.
+        const closeBtn = el('button', 'tab-close');
+        closeBtn.innerHTML = '&times;';
+        closeBtn.title = 'Close tab';
+        closeBtn.dataset.tabId = tab.id;
+        tabEl.appendChild(closeBtn);
 
         tabStrip.appendChild(tabEl);
     }
 
-    updateTabOverflowMenu(hasOverflow);
+    setWorkerBusy(state.tabs.some((tab) => tab.id === state.activeTabId && tab.isStreaming));
+    updateTabOverflowMenu();
     bindTabEvents();
     scheduleTabCapacityUpdate();
 }
@@ -187,7 +186,14 @@ export function bindTabOverflow(): void {
         setTabOverflowOpen(!isOpen);
     });
     tabOverflowMenu?.addEventListener('click', (e) => {
-        const item = (e.target as HTMLElement).closest('.tab-overflow-item') as HTMLElement | null;
+        const target = e.target as HTMLElement;
+        // Closing keeps the menu open so several tabs can be closed in a row.
+        const closeBtn = target.closest('.tab-overflow-close') as HTMLElement | null;
+        if (closeBtn?.dataset.tabId) {
+            vscode.postMessage({ type: 'closeTab', tabId: closeBtn.dataset.tabId });
+            return;
+        }
+        const item = target.closest('.tab-overflow-item') as HTMLElement | null;
         const tabId = item?.dataset.tabId;
         if (!tabId) return;
         setTabOverflowOpen(false);

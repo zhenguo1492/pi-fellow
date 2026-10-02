@@ -1,6 +1,7 @@
 import type { AgentBackend } from '../../shared/protocol';
 import { vscode } from './api';
-import { el, showToast } from './dom';
+import { el } from './dom';
+import { buildUnsavedDot, renderSaveBar } from './saveBar';
 import { settingsState } from './state';
 import { switchVoiceSubtab, voiceSubtabOf } from './voiceTabs';
 
@@ -22,10 +23,14 @@ const SECTION_TO_TAB: Record<string, SettingsTabId> = {
     'chat-ui': 'general',
     voice: 'voice',
     stt: 'voice',
-    tts: 'voice',
+    'stt-server': 'voice',
     'voice-listening': 'voice',
     voiceprint: 'voice',
+    tts: 'voice',
+    'tts-server': 'voice',
+    'voice-speaking': 'voice',
     'voice-agent': 'voice',
+    'voice-sentences': 'voice',
     auth: 'auth',
     defaults: 'auth',
     packages: 'packages',
@@ -47,8 +52,8 @@ export function scrollToSettingsSection(section: string): void {
         if (subtab) {
             switchVoiceSubtab(subtab, false);
         }
-        // A section of a Voice setup not shown (e.g. the server fields on Built-in): the setup choice instead.
-        const target = found?.closest('[hidden]') && tab === 'voice' ? document.getElementById('section-voice') : found;
+        // A section of a setup not shown (e.g. the server fields on Built-in): that service's engine choice instead.
+        const target = found?.closest('[hidden]') && subtab ? document.getElementById(`section-${subtab}`) : found;
         if (target) {
             target.scrollIntoView({ behavior: 'smooth', block: 'start' });
             target.classList.add('section-highlight');
@@ -58,9 +63,6 @@ export function scrollToSettingsSection(section: string): void {
 }
 
 export function switchSettingsTab(tabId: SettingsTabId, persist = true): void {
-    if (settingsState.activeTab === 'voice' && tabId !== 'voice' && settingsState.voiceDirty) {
-        showToast('The Voice tab has unsaved changes: they wait there until you Save or Discard.', 'error');
-    }
     settingsState.activeTab = tabId;
     if (persist) {
         vscode.setState({ ...(vscode.getState() ?? {}), activeTab: tabId });
@@ -74,6 +76,7 @@ export function switchSettingsTab(tabId: SettingsTabId, persist = true): void {
         const id = (panel as HTMLElement).dataset.tabPanel as SettingsTabId;
         panel.classList.toggle('active', id === tabId);
     });
+    renderSaveBar();
 }
 
 export function buildTabNav(backend: AgentBackend = 'pi'): HTMLElement {
@@ -86,7 +89,9 @@ export function buildTabNav(backend: AgentBackend = 'pi'): HTMLElement {
         btn.dataset.tab = tab.id;
         btn.setAttribute('role', 'tab');
         btn.setAttribute('aria-selected', tab.id === settingsState.activeTab ? 'true' : 'false');
-        btn.textContent = tab.id === 'packages' && backend === 'omp' ? 'Plugins' : tab.label;
+        const label = el('span');
+        label.textContent = tab.id === 'packages' && backend === 'omp' ? 'Plugins' : tab.label;
+        btn.append(label, buildUnsavedDot());
         if (tab.id === settingsState.activeTab) {
             btn.classList.add('active');
         }

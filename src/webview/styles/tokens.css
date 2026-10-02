@@ -46,6 +46,8 @@
     --ansi-bright-red: var(--vscode-terminal-ansiBrightRed, #f14c4c);
     /* The voice agent's colour; the voice panel (voice.css) uses it too. */
     --voice-accent: #ff8a5c;
+    /* The voice agent's model chip and list in the Bot view: light blue, unlike the worker's. */
+    --voice-model-fg: #9cdcfe;
     --font-mono: var(--vscode-editor-font-family, 'Cascadia Code', Consolas, 'Courier New', monospace);
     --radius: 8px;
     --radius-lg: 12px;
@@ -54,6 +56,6 @@
     --chat-pad-x: 12px;
     --chat-pad-y: 8px;
 }
-body.vscode-light { --voice-accent: #d9480f; }
-body.vscode-high-contrast { --voice-accent: #ffa07a; }
-body.vscode-high-contrast-light { --voice-accent: #b33c00; }
+body.vscode-light { --voice-accent: #d9480f; --voice-model-fg: #0070c1; }
+body.vscode-high-contrast { --voice-accent: #ffa07a; --voice-model-fg: #9cdcfe; }
+body.vscode-high-contrast-light { --voice-accent: #b33c00; --voice-model-fg: #0f4a85; }

@@ -179,3 +179,53 @@ describe('tuiQuestionLine', () => {
         expect(tuiQuestionLine(undefined)).toBe('');
     });
 });
+
+describe('turn message: boards', () => {
+    const base: TurnInput = {
+        trigger: { kind: 'user', text: 'why here?', source: 'text' },
+        status: { phase: 'idle', queued: 0 },
+        updates: [],
+        requests: [],
+        proposals: [],
+        research: [],
+    };
+
+    it("shows the user's mark, saved edits and the board list", () => {
+        const message = buildTurnMessage({
+            ...base,
+            board: { board: 'b1', title: 'Login "flow"', latest: true, mark: { block: 'c1', kind: 'code', startLine: 3, endLine: 5, text: 'refresh()' } },
+            boardEdits: [{ board: 'b1', title: 'Login', summary: 'changed p2; added c3', outline: 'h1 heading "Login"\np2 paragraph "x"' }],
+            boards: [
+                { id: 'b1', title: 'Login', open: true, current: true },
+                { id: 'b2', title: 'Cache', open: false, current: false },
+            ],
+        });
+        expect(message).toContain(`<board board="b1" title="Login 'flow'" block="c1" kind="code" lines="3-5" latest="true">refresh()</board>`);
+        expect(message).toContain('<board-edited board="b1" title="Login" changes="changed p2; added c3">\nh1 heading "Login"\np2 paragraph "x"\n</board-edited>');
+        expect(message).toContain('<boards>\nb1 "Login" open current\nb2 "Cache"\n</boards>');
+        const node = buildTurnMessage({ ...base, board: { board: 'b1', title: 'Login', latest: false, mark: { block: 'd1', kind: 'diagram', node: 'Token' } } });
+        expect(node).toContain('<board board="b1" title="Login" block="d1" kind="diagram" node="Token"></board>');
+        const arrow = buildTurnMessage({ ...base, board: { board: 'b1', title: 'Login', latest: false, mark: { block: 'd2', kind: 'diagram', message: 'show_me 写"内容"', step: 2 } } });
+        expect(arrow).toContain(`<board board="b1" title="Login" block="d2" kind="diagram" step="2" message="show_me 写'内容'"></board>`);
+        const element = buildTurnMessage({
+            ...base,
+            board: {
+                board: 'b1',
+                title: 'Stack',
+                latest: true,
+                mark: {
+                    block: 'w1',
+                    kind: 'web',
+                    element: { selector: '#app > button.primary:nth-of-type(2)', tag: 'button', classes: ['primary', 'big'], text: 'Push "1"', html: '<button class="primary big">Push "1"</button>' },
+                },
+            },
+        });
+        expect(element).toContain(
+            `<board board="b1" title="Stack" block="w1" kind="web" selector="#app > button.primary:nth-of-type(2)" tag="button" class="primary big" text="Push '1'" latest="true"><button class="primary big">Push "1"</button></board>`,
+        );
+    });
+
+    it('says nothing about boards without any', () => {
+        expect(buildTurnMessage({ ...base, boardEdits: [], boards: [] })).not.toContain('<board');
+    });
+});

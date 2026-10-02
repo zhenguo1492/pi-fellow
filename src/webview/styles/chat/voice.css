@@ -1,10 +1,12 @@
 /*
  * The Bot view a chat tab shows in place of its conversation (docs/voice-agent-design.md §11,
  * src/webview/voicePanel.ts), after the xterm styles in main.css: the engines and token use at the top, then
- * cards and the transcript, filling the tab body. Everything is scoped under .vp.
+ * cards and the transcript, filling the tab body. Everything is scoped under .vp, and the intro the chat's
+ * empty state shows (.vp-intro in a .vp-welcome column, chat/layout.ts) takes the same variables.
  */
 
-.vp {
+.vp,
+.vp-intro {
     --voice: var(--voice-accent);
     --user: var(--user-accent);
     --ok: var(--success-fg);
@@ -28,7 +30,14 @@
     --speaking-fg: #fff;
     /* Opaque fills (floating details, sticky headers) match the sidebar the view sits in. */
     --vp-bg: var(--vscode-sideBar-background, var(--bg));
-
+}
+/* The empty state's intro: its parts lay out in the column it is put in, in the transcript's type. */
+.vp-intro {
+    display: contents;
+    font-size: var(--vp-font);
+    line-height: var(--vp-line);
+}
+.vp {
     position: relative;
     flex: 1;
     min-height: 0;
@@ -120,7 +129,7 @@ body.vscode-high-contrast-light .vp {
 
 /* ── Cards: tasks to confirm, background research; one line each ── */
 .vp-cards { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 0; }
-.vp-cards:empty, .vp.readonly .vp-cards { display: none; }
+.vp-cards:empty { display: none; }
 .vp-card {
     display: flex; align-items: center; gap: 6px; min-width: 0;
     padding: 3px 4px 3px 8px; border: 1px solid var(--border); border-radius: 6px;
@@ -147,9 +156,6 @@ body.vscode-high-contrast-light .vp {
 .vp-research.failed .vp-q { color: var(--muted); }
 .vp-spin { flex-shrink: 0; display: inline-block; width: 8px; height: 8px; border: 1.5px solid var(--link); border-right-color: transparent; border-radius: 50%; animation: vp-spin .8s linear infinite; }
 
-.vp-banner { display: none; flex-shrink: 0; margin: 8px 10px 0; padding: 3px 10px; border-radius: 5px; font-size: var(--vp-small); color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
-.vp.readonly .vp-banner { display: block; }
-
 /* ── Transcript: Slack-style messages, avatar + name and time over the text; a speaker's consecutive turns share one header ── */
 .vp-stream {
     flex: 1;
@@ -166,7 +172,7 @@ body.vscode-high-contrast-light .vp {
 .vp-stream::-webkit-scrollbar-thumb { background: var(--scrollbar); border: 2px solid transparent; background-clip: content-box; border-radius: 5px; }
 .vp-empty { margin: auto 0; padding: 4px 8px; color: var(--muted); text-align: center; }
 /* A new conversation's welcome: who the voice agent is, what it does, how to start. */
-.vp-empty.vp-welcome {
+.vp-welcome {
     display: flex; flex-direction: column; align-items: center;
     max-width: 420px; margin: auto; padding: 16px 20px; color: var(--fg);
 }
@@ -292,6 +298,51 @@ body.vscode-high-contrast-light .vp {
 .vp-more:hover { color: color-mix(in srgb, var(--link) 80%, var(--fg)); }
 .vp-copy:hover { color: var(--fg); }
 
+/*
+ * A user turn's attached images (voiceImages.ts): a strip of thumbnails, opened to larger tiles. Every
+ * thumbnail and tile has a fixed size, so the card has its height before any image loads.
+ */
+.vp-images { margin-top: 4px; }
+.vp-images:empty { display: none; }
+.vp-imgs-toggle {
+    display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 3px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--tint-faint); color: var(--muted);
+    font: inherit; font-size: calc(var(--vp-small) - .5px); line-height: 1.4; cursor: pointer;
+}
+.vp-imgs-toggle:hover { color: var(--fg); background: var(--hover); }
+.vp-imgs.open .vp-imgs-toggle { padding: 1px 6px; }
+.vp-imgs-car { font-size: .7em; opacity: .7; }
+.vp-imgs-n { padding: 0 4px; white-space: nowrap; }
+.vp-img-thumb { flex: none; width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 4px; background: var(--tint); }
+.vp-img-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.vp-img-more { font-weight: 600; color: var(--fg); }
+.vp-imgs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; max-width: 520px; margin-top: 4px; }
+.vp-imgs-grid.one { grid-template-columns: minmax(0, 320px); }
+.vp-img-tile {
+    display: flex; flex-direction: column; min-width: 0; padding: 0; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--tint-faint); color: var(--muted);
+    font: inherit; cursor: zoom-in;
+}
+.vp-img-tile:hover { border-color: var(--focus); }
+.vp-img-tile img { display: block; width: 100%; height: 120px; object-fit: contain; background: var(--tint); }
+.vp-imgs-grid.one .vp-img-tile img { height: 200px; }
+.vp-img-name { padding: 2px 6px; font-size: calc(var(--vp-small) - 1px); line-height: 1.5; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vp-imgs-toggle:focus-visible, .vp-img-tile:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
+
+/* One attached image full size over the Bot view; Escape, ✕ or the backdrop close it. */
+.vp-lightbox { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; background: color-mix(in srgb, var(--vp-bg) 94%, transparent); outline: none; }
+.vp-lightbox[hidden] { display: none; }
+.vp-lb-bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--border); font-size: var(--vp-small); }
+.vp-lb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+.vp-lb-pos { white-space: nowrap; color: var(--muted); }
+.vp-lb-btn { flex: none; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--btn2-bg); color: var(--btn2-fg); font: inherit; cursor: pointer; }
+.vp-lb-btn:hover { background: var(--btn2-hover); }
+.vp-lb-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 8px; }
+.vp-lb-img { min-width: 0; max-width: 100%; max-height: 100%; object-fit: contain; }
+.vp-lb-nav { flex: none; width: 28px; height: 48px; padding: 0; border: 0; border-radius: 4px; background: var(--tint); color: var(--fg); font-size: 22px; line-height: 1; cursor: pointer; }
+.vp-lb-nav:hover { background: var(--tint-strong); }
+.vp-lb-btn:focus-visible, .vp-lb-nav:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
+
 /* Spoken sentences: pending dim, playing highlighted, played normal, cut struck through. */
 .vp-s { border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; transition: opacity .2s, background-color .2s, color .2s; }
 .vp-s.pending { opacity: .42; }
@@ -322,6 +373,7 @@ body.vscode-high-contrast-light .vp {
 .vp-tools .tv-card[data-kind="confirm"] { --c: var(--ok); }
 .vp-tools .tv-card:is([data-kind="answer"], [data-kind="proposal"]) { --c: var(--warn); }
 .vp-tools .tv-card:is([data-kind="read"], [data-kind="research"], [data-kind="snippet"]) { --c: var(--link); }
+.vp-tools .tv-card[data-kind="board"] { --c: var(--violet); }
 .vp-tools .tv-card:is([data-kind="stop"], .tv-card--error) { --c: var(--error); }
 .vp-tools .tv-head { width: fit-content; max-width: 100%; gap: 6px; padding: 0 7px 0 6px; border: 1px solid var(--border); border-radius: 4px; }
 .vp-tools .tv-head:hover { color: var(--fg); background: var(--hover); }
@@ -343,11 +395,63 @@ body.vscode-high-contrast-light .vp {
 .vp-tools :is(.tv-pre, .tv-diff) { padding: 0; background: none; font-size: inherit; }
 .vp-tools .tv-diff-row { padding: 0 4px; }
 .vp-tools .tv-partial { margin-top: 2px; border-top: 0; font-size: inherit; }
+/* Header actions (a Board card's "Open"): one row with the header, which shrinks first. */
+.vp-tools .tv-row { display: flex; align-items: center; gap: 6px; max-width: 100%; }
+.vp-tools .tv-row > .tv-head { min-width: 0; }
+.vp-tools .tv-actions { flex: none; display: inline-flex; gap: 6px; }
+.vp-open-board { padding: 0; border: 0; background: transparent; font: inherit; line-height: inherit; cursor: pointer; color: var(--link); }
+.vp-open-board:hover { text-decoration: underline; }
+.vp-open-board:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
+/*
+ * A board scrolled past stays pinned at the top of the transcript (voicePanel.ts updatePin), its header
+ * aligned with the header line's text above it, frosted as the chat's pinned prompt. Takes no room: a
+ * zero-height anchor at the stream's top, the bar over the transcript, clear of its scrollbar.
+ */
+.vp-pin { position: relative; z-index: 4; flex-shrink: 0; height: 0; }
+.vp-pin-bar {
+    position: absolute; top: 0; left: 0; right: 8px;
+    padding: 3px 12px 4px;
+    background: color-mix(in srgb, var(--vp-bg) 88%, transparent);
+    backdrop-filter: blur(14px) saturate(1.15);
+    -webkit-backdrop-filter: blur(14px) saturate(1.15);
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+.vp-pin-bar[hidden] { display: none; }
+.vp-pin-bar .vp-tools { margin-top: 0; }
 .vp-st-ok { color: var(--ok); } .vp-st-no { color: var(--error); }
 
 /* Debug transcript: what went to the voice model this turn. */
 .vp-attach { margin: 2px 0 4px; padding: 4px 8px; font-family: var(--font-mono); font-size: calc(var(--vp-small) - 1px); line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; border: 1px dashed color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 4px; }
 .vp-attach:empty { display: none; }
+
+/* Drawing on a board: a white brush after the header's time sways as if writing, with a short label, until the show_me ends. */
+.vp-drawing { align-self: center; display: inline-flex; align-items: center; gap: 4px; color: var(--fg); }
+.vp-drawing[hidden] { display: none; }
+/* The quill leans out past the scroll's right edge; leave it room before the label. */
+.vp-drawing svg { overflow: visible; margin-right: 5px; }
+.vp-drawing-label { font-size: calc(var(--vp-small) - .5px); color: var(--muted); }
+/* The scroll's three lines are written top to bottom, one per third of the cycle; the quill's nib (its origin) walks along each. */
+.vp-drawing .vp-ln { stroke-dasharray: 3.5; stroke-dashoffset: 3.5; animation: 2.4s linear infinite; }
+.vp-drawing .vp-ln1 { animation-name: vp-ln1; }
+.vp-drawing .vp-ln2 { animation-name: vp-ln2; }
+.vp-drawing .vp-ln3 { animation-name: vp-ln3; }
+@keyframes vp-ln1 { 0% { stroke-dashoffset: 3.5; } 28%, 94% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 3.5; } }
+@keyframes vp-ln2 { 0%, 33% { stroke-dashoffset: 3.5; } 61%, 94% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 3.5; } }
+@keyframes vp-ln3 { 0%, 66% { stroke-dashoffset: 3.5; } 94% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: 3.5; } }
+.vp-drawing .vp-quill { transform: translate(7.5px, 6.5px); animation: vp-quill-write 2.4s linear infinite; }
+@keyframes vp-quill-write {
+    0% { transform: translate(7.5px, 6.5px); }
+    28% { transform: translate(11px, 6.5px); }
+    33% { transform: translate(7.5px, 8.5px); }
+    61% { transform: translate(11px, 8.5px); }
+    66% { transform: translate(7.5px, 10.5px); }
+    94% { transform: translate(11px, 10.5px); }
+    100% { transform: translate(7.5px, 6.5px); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .vp-drawing .vp-ln { animation: none; stroke-dashoffset: 0; }
+    .vp-drawing .vp-quill { animation: none; transform: translate(11px, 10.5px); }
+}
 
 /* Latency: a stopwatch after the header's time, shown on hover (Slack's message actions), toggles the breakdown under the turn. */
 .vp-timing {

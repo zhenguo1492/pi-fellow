@@ -92,6 +92,7 @@ describe('settings backend selection', () => {
         const staleSession = {
             backend: 'pi',
             getSkillsAsync: async () => [],
+            getModels: () => [],
         } as unknown as PiChatSession;
         SettingsPanel.show({} as vscode.Uri, () => staleSession);
         const shownBackend = () => state.messages.filter((msg) => msg.type === 'settings').at(-1)?.data?.backend;

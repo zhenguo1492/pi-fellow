@@ -1,0 +1,106 @@
+# Local voice services for Pi Fellow.
+# Start: docker/up.sh  (picks the GPU or CPU Kokoro by itself)
+# STT (Whisper via speaches):  http://127.0.0.1:8010/v1
+# TTS (Kokoro-FastAPI):        http://127.0.0.1:8880/v1
+# TTS (chatterbox-tts, GPU):   http://127.0.0.1:8881/v1
+
+services:
+  stt:
+    build: ./speaches-lang
+    image: speaches-lang:latest
+    container_name: whisper-speaches
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8010:8000"
+    environment:
+      # Languages Whisper's auto-detection may pick, ISO-639-1, comma-separated; the first is preferred on near-ties.
+      WHISPER_ALLOWED_LANGUAGES: ${WHISPER_ALLOWED_LANGUAGES:-zh,en}
+      # How many times more likely another allowed language must be to beat the preferred one.
+      WHISPER_LANGUAGE_MARGIN: ${WHISPER_LANGUAGE_MARGIN:-10}
+    volumes:
+      - ${HOME}/.cache/huggingface:/home/ubuntu/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Kokoro TTS: up.sh enables profile "gpu" when nvidia-smi works, else "cpu".
+  tts:
+    profiles: [gpu]
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    container_name: kokoro-tts
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8880:8880"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  tts-cpu:
+    profiles: [cpu]
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: kokoro-tts
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8880:8880"
+
+  # chatterbox-tts (multilingual, voice cloning from ./voices). GPU only, so profile "gpu".
+  # local/chatterbox-tts is built from the chatterbox-docker repo (server.py + Dockerfile); see README.
+  chatterbox:
+    profiles: [gpu]
+    image: local/chatterbox-tts:0.2.0
+    container_name: chatterbox-tts
+    restart: unless-stopped
+    shm_size: 2gb
+    ports:
+      # 0.0.0.0: reachable from other machines on the LAN.
+      - "0.0.0.0:8881:8000"
+    environment:
+      CHATTERBOX_DEVICE: cuda
+      # turbo | nano (English only) | multilingual (23 languages)
+      CHATTERBOX_MODEL: ${CHATTERBOX_MODEL:-multilingual}
+      CHATTERBOX_T3_MODEL: ${CHATTERBOX_T3_MODEL:-v3}
+      # Defaults for requests that leave them unset
+      CHATTERBOX_CFG_WEIGHT: ${CHATTERBOX_CFG_WEIGHT:-0.3}
+      CHATTERBOX_SENTENCE_PAUSE_MS: ${CHATTERBOX_SENTENCE_PAUSE_MS:-400}
+      # 0 reads numbers as digits again
+      CHATTERBOX_SPELL_NUMBERS: ${CHATTERBOX_SPELL_NUMBERS:-1}
+      # 0 reads "API" as one word again
+      CHATTERBOX_SPELL_ACRONYMS: ${CHATTERBOX_SPELL_ACRONYMS:-1}
+      # Abbreviations to read as words, on top of the built-in list
+      CHATTERBOX_ACRONYM_EXCEPTIONS: ${CHATTERBOX_ACRONYM_EXCEPTIONS:-}
+      # Syntheses sharing the loaded model, 1-16
+      CHATTERBOX_MAX_CONCURRENCY: ${CHATTERBOX_MAX_CONCURRENCY:-1}
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      - chatterbox-hf-cache:/root/.cache/huggingface
+      - ./voices:/voices:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  # Same volume the chatterbox-docker project downloaded the models into (~10 GB), so nothing downloads again.
+  chatterbox-hf-cache:
+    name: chatterbox-docker_chatterbox-hf-cache

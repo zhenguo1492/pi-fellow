@@ -1,148 +1,132 @@
-import type { AgentBackend } from '../../shared/protocol';
+import type { AgentBackend, SettingEdit } from '../../shared/protocol';
 import { vscode } from './api';
 import { modelOptionsHtml } from './auth';
-import { showToast } from './dom';
+import { buildListEditor, showToast } from './dom';
+import { setEdit, setSetting } from './edits';
 import { bindMcpServerCards } from './mcp';
 import { settingsState } from './state';
 import { bindVoiceSetup } from './voiceSetup';
 
+/** The path lists edited on the page (the list editors' kinds), and their edits. */
+const PATH_LISTS: Record<string, 'extensionPaths' | 'skillPaths'> = { extensions: 'extensionPaths', skillpaths: 'skillPaths' };
+
+/**
+ * Every setting is an edit until the page's Save (`edits.ts`, `saveBar.ts`); actions (log in,
+ * install a package, check a server, reload the session, …) still happen at once.
+ */
 export function bindEvents(): void {
     document.querySelectorAll('.backend-segment-btn').forEach((btn) => {
         btn.addEventListener('click', (e) => {
             const b = (e.currentTarget as HTMLElement).dataset.backend as AgentBackend;
-            if (b && b !== settingsState.currentSettings?.backend) {
-                vscode.postMessage({ type: 'setBackend', backend: b });
+            if (!b || b === settingsState.currentSettings?.backend) {
+                return;
             }
+            // The edits are for this backend's config: they would be saved into the other one's.
+            if (settingsState.dirty) {
+                showToast('Save or Discard your changes before switching the backend.', 'error');
+                return;
+            }
+            vscode.postMessage({ type: 'setBackend', backend: b });
         });
     });
 
-    document.querySelectorAll('.setting-select[data-key]').forEach((select) => {
-        // Voice sections save only through their Test button.
+    // The `[data-key]` fields outside the voice services' forms (those are voiceSetup.ts drafts).
+    document.querySelectorAll<HTMLSelectElement>('.setting-select[data-key]').forEach((select) => {
         if (select.closest('[data-draft]')) return;
-        select.addEventListener('change', () => {
-            const key = (select as HTMLSelectElement).dataset.key!;
-            vscode.postMessage({ type: 'updateSetting', key, value: (select as HTMLSelectElement).value });
-        });
+        select.addEventListener('change', () => setSetting(select.dataset.key!, select.value, select));
     });
-
-    // Save text inputs on 'change' (blur / Enter) to prevent re-rendering and flickering while typing
-    document.querySelectorAll('.setting-input[data-key]').forEach((input) => {
+    document.querySelectorAll<HTMLInputElement>('.setting-input[data-key]').forEach((input) => {
         if (input.closest('[data-draft]')) return;
-        input.addEventListener('change', () => {
-            const field = input as HTMLInputElement;
-            const key = field.dataset.key!;
-            let value: string | string[] | number = field.value;
-            if (key === 'allowedTools') {
-                value = field.value.split(',').map((s) => s.trim()).filter(Boolean);
-            } else if (field.type === 'number') {
-                if (Number.isNaN(field.valueAsNumber)) {
-                    return;
-                }
-                value = Math.min(Number(field.max), Math.max(Number(field.min), field.valueAsNumber));
-            }
-            vscode.postMessage({ type: 'updateSetting', key, value });
+        input.addEventListener('input', () => {
+            const key = input.dataset.key!;
+            setSetting(key, key === 'allowedTools' ? input.value.split(',').map((s) => s.trim()).filter(Boolean) : input.value, input);
         });
     });
-
-    // Voice tab: drafts until its Save (see voiceSetup.ts).
-    bindVoiceSetup();
-
-    document.querySelectorAll('input[type="checkbox"][data-key]').forEach((cb) => {
-        cb.addEventListener('change', () => {
-            vscode.postMessage({
-                type: 'updateSetting',
-                key: (cb as HTMLInputElement).dataset.key!,
-                value: (cb as HTMLInputElement).checked,
-            });
-        });
+    document.querySelectorAll<HTMLInputElement>('input[type="checkbox"][data-key]').forEach((cb) => {
+        if (cb.closest('[data-draft]')) return;
+        cb.addEventListener('change', () => setSetting(cb.dataset.key!, cb.checked, cb));
     });
-
-    document.querySelectorAll('.setting-range').forEach((range) => {
+    document.querySelectorAll<HTMLInputElement>('.setting-range[data-key]').forEach((range) => {
         range.addEventListener('input', () => {
-            const key = (range as HTMLInputElement).dataset.key!;
-            const value = parseInt((range as HTMLInputElement).value, 10);
+            const key = range.dataset.key!;
+            const value = parseInt(range.value, 10);
             const label = document.getElementById(`range-val-${key}`);
             if (label) label.textContent = `${value}%`;
-        });
-        range.addEventListener('change', () => {
-            vscode.postMessage({
-                type: 'updateSetting',
-                key: (range as HTMLInputElement).dataset.key!,
-                value: parseInt((range as HTMLInputElement).value, 10),
-            });
+            setSetting(key, value, range);
         });
     });
 
-    // Save writes both fields as shown ('' is auto); a model picked under (auto) brings its provider.
-    document.getElementById('btn-save-pi-defaults')?.addEventListener('click', () => {
-        const model = (document.getElementById('pi-default-model') as HTMLSelectElement).value;
-        const provider = (document.getElementById('pi-default-provider') as HTMLSelectElement).value
-            || (settingsState.currentSettings?.piConfig?.availableModels.find((m) => m.id === model)?.provider ?? '');
-        vscode.postMessage({
-            type: 'updatePiDefaults',
-            provider,
-            model,
-            thinkingLevel: (document.getElementById('pi-thinking') as HTMLSelectElement).value,
+    // Voice tab: the services' drafts, Test and Try (see voiceSetup.ts).
+    bindVoiceSetup();
+
+    // The default model: the list follows the provider, so it never pairs a model with another provider.
+    const provider = document.getElementById('pi-default-provider') as HTMLSelectElement | null;
+    const model = document.getElementById('pi-default-model') as HTMLSelectElement | null;
+    if (provider && model) {
+        const editModel = () => setEdit('piModel', { kind: 'piDefaults', provider: provider.value, model: model.value }, model);
+        provider.addEventListener('change', () => {
+            model.innerHTML = modelOptionsHtml(settingsState.currentSettings?.piConfig?.availableModels ?? [], provider.value, model.value);
+            editModel();
         });
-    });
+        model.addEventListener('change', editModel);
+    }
 
-    // The model list follows the provider, so Save can never pair a model with another provider.
-    document.getElementById('pi-default-provider')?.addEventListener('change', (e) => {
-        const models = settingsState.currentSettings?.piConfig?.availableModels ?? [];
-        const modelSelect = document.getElementById('pi-default-model') as HTMLSelectElement;
-        modelSelect.innerHTML = modelOptionsHtml(models, (e.target as HTMLSelectElement).value, modelSelect.value);
-    });
+    const thinking = document.getElementById('pi-thinking') as HTMLSelectElement | null;
+    thinking?.addEventListener('change', () => setEdit('piThinking', { kind: 'piDefaults', thinkingLevel: thinking.value }, thinking));
 
-    document.getElementById('pi-thinking')?.addEventListener('change', (e) => {
-        const thinkingLevel = (e.target as HTMLSelectElement).value;
-        vscode.postMessage({ type: 'updatePiDefaults', thinkingLevel });
-    });
-
-    document.querySelectorAll('[data-pi-mode]').forEach((sel) => {
+    document.querySelectorAll<HTMLSelectElement>('[data-pi-mode]').forEach((sel) => {
         sel.addEventListener('change', () => {
-            const kind = (sel as HTMLSelectElement).dataset.piMode!;
-            const mode = (sel as HTMLSelectElement).value as 'all' | 'one-at-a-time';
-            if (kind === 'steering') {
-                vscode.postMessage({ type: 'setPiSteeringMode', mode });
-            } else {
-                vscode.postMessage({ type: 'setPiFollowUpMode', mode });
-            }
+            const kind = sel.dataset.piMode === 'steering' ? 'steeringMode' : 'followUpMode';
+            setEdit(kind, { kind, mode: sel.value as 'all' | 'one-at-a-time' }, sel);
         });
     });
 
-    document.getElementById('pi-enable-skill-cmds')?.addEventListener('change', (e) => {
-        vscode.postMessage({
-            type: 'setPiEnableSkillCommands',
-            enabled: (e.target as HTMLInputElement).checked,
-        });
-    });
+    const skillCommands = document.getElementById('pi-enable-skill-cmds') as HTMLInputElement | null;
+    skillCommands?.addEventListener('change', () => setEdit('skillCommands', { kind: 'skillCommands', enabled: skillCommands.checked }, skillCommands));
 
-    document.querySelectorAll('[data-add-btn]').forEach((btn) => {
+    document.querySelectorAll<HTMLButtonElement>('[data-add-btn]').forEach((btn) => {
         btn.addEventListener('click', () => {
-            const kind = (btn as HTMLButtonElement).dataset.addBtn!;
-            const input = document.querySelector(`input[data-add-kind="${kind}"]`) as HTMLInputElement;
-            const value = input?.value?.trim();
-            if (!value) {
+            const kind = btn.dataset.addBtn!;
+            const input = document.querySelector<HTMLInputElement>(`input[data-add-kind="${kind}"]`);
+            const value = input?.value.trim();
+            if (!input || !value) {
                 showToast('Enter a value first', 'error');
                 return;
             }
-            postAdd(kind, value);
+            if (kind === 'packages') {
+                vscode.postMessage({ type: 'addPiPackage', source: value });
+            } else {
+                const paths = shownPaths(kind);
+                if (paths.includes(value)) {
+                    showToast('Already in the list', 'error');
+                    return;
+                }
+                editPaths(kind, [...paths, value], btn);
+            }
             input.value = '';
         });
     });
 
-    document.querySelectorAll('[data-remove-kind]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            const kind = (btn as HTMLButtonElement).dataset.removeKind!;
-            const index = parseInt((btn as HTMLButtonElement).dataset.removeIndex!, 10);
-            postRemove(kind, index);
-        });
+    // Delegated: a path list is built again after each edit.
+    document.querySelector('.settings-tab-panels')?.addEventListener('click', (e) => {
+        const btn = e.target instanceof Element ? e.target.closest<HTMLButtonElement>('[data-remove-kind]') : null;
+        if (!btn) {
+            return;
+        }
+        const kind = btn.dataset.removeKind!;
+        const index = parseInt(btn.dataset.removeIndex!, 10);
+        if (kind === 'packages') {
+            showToast('Uninstalling…', 'info');
+            vscode.postMessage({ type: 'removePiPackage', index });
+        } else {
+            const list = btn.closest('.pi-list') ?? btn;
+            editPaths(kind, shownPaths(kind).filter((_, i) => i !== index), list);
+        }
     });
 
-    document.querySelectorAll('[data-open-file]').forEach((btn) => {
+    document.querySelectorAll<HTMLButtonElement>('[data-open-file]').forEach((btn) => {
         btn.addEventListener('click', () => {
-            const file = (btn as HTMLButtonElement).dataset.openFile as 'settings' | 'auth' | 'mcp';
-            vscode.postMessage({ type: 'openPiAgentFile', file });
+            vscode.postMessage({ type: 'openPiAgentFile', file: btn.dataset.openFile as 'settings' | 'auth' | 'mcp' });
         });
     });
 
@@ -172,31 +156,16 @@ export function bindEvents(): void {
     bindMcpServerCards();
 }
 
-function postAdd(kind: string, value: string): void {
-    switch (kind) {
-        case 'packages':
-            vscode.postMessage({ type: 'addPiPackage', source: value });
-            break;
-        case 'extensions':
-            vscode.postMessage({ type: 'addPiExtensionPath', path: value });
-            break;
-        case 'skillpaths':
-            vscode.postMessage({ type: 'addPiSkillPath', path: value });
-            break;
-    }
+/** A path list as shown (with its edit). */
+function shownPaths(kind: string): string[] {
+    const cfg = settingsState.currentSettings?.piConfig;
+    return (PATH_LISTS[kind] === 'extensionPaths' ? cfg?.extensionPaths : cfg?.skillPaths) ?? [];
 }
 
-function postRemove(kind: string, index: number): void {
-    showToast('Removing…', 'info');
-    switch (kind) {
-        case 'packages':
-            vscode.postMessage({ type: 'removePiPackage', index });
-            break;
-        case 'extensions':
-            vscode.postMessage({ type: 'removePiExtensionPath', index });
-            break;
-        case 'skillpaths':
-            vscode.postMessage({ type: 'removePiSkillPath', index });
-            break;
-    }
+/** A path list edited: kept as an edit, and its list built again. */
+function editPaths(kind: string, paths: string[], from: Element): void {
+    const edit: SettingEdit = { kind: PATH_LISTS[kind], paths };
+    setEdit(edit.kind, edit, from);
+    const list = document.getElementById(`list-${kind}`);
+    list?.parentElement?.replaceWith(buildListEditor(kind, shownPaths(kind), list.dataset.hint ?? ''));
 }

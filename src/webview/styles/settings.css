@@ -98,6 +98,9 @@ body {
 
 .settings-tab-btn,
 .voice-subtab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 5px 12px;
     border-radius: 6px;
     border: 1px solid transparent;
@@ -378,20 +381,19 @@ body {
     gap: 4px;
     margin-bottom: 16px;
 }
-.voice-subtab-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-.voice-subtab-dot {
+/* On a tab or Voice sub-tab with unsaved changes. */
+.unsaved-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--warning-fg);
 }
+.unsaved-dot[hidden] {
+    display: none;
+}
 
-/* Save for the Voice tab's draft fields, in view at the bottom of the sub-tabs that hold them. */
-.voice-save-bar {
+/* Save and Discard for the whole page, in view at the bottom of every tab. */
+.settings-save-bar {
     position: sticky;
     bottom: 0;
     z-index: 5;
@@ -403,20 +405,23 @@ body {
     border-top: 1px solid var(--border);
     background: var(--bg);
 }
-.voice-save-state {
+.settings-save-bar [hidden] {
+    display: none;
+}
+.settings-save-state {
     flex: 1;
     font-size: 12px;
 }
-.voice-save-state[data-state='dirty'] {
+.settings-save-state[data-state='dirty'] {
     color: var(--warning-fg);
     font-weight: 600;
 }
-.voice-save-state[data-state='ok'],
-.voice-save-state[data-state='testing'] {
+.settings-save-state[data-state='ok'],
+.settings-save-state[data-state='saving'] {
     color: var(--muted);
 }
 
-/* Dry run at the bottom of a Voice section, and the section's state. */
+/* Buttons in a Voice section row, and the section's state. */
 .voice-actions-buttons {
     display: flex;
     gap: 8px;

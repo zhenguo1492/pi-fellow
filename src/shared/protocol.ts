@@ -197,6 +197,10 @@ export interface SettingsData {
     voiceOwnServers: OwnVoiceServers;
     /** `voiceAgent.skills`: names of the skills the voice agent loads. */
     voiceSkills: string[];
+    /** `voiceAgent.model`: the voice agent's model, `provider/id`; empty takes the chat tab's. */
+    voiceModel: string;
+    /** The models to pick it from: the shown chat tab's, when it runs this panel's backend (the voice agent's). */
+    voiceModels: ModelInfo[];
     /** `voiceAgent.messageButtons`: Alt over a sentence (Bot view and chat) reads it aloud and translates it. */
     voiceMessageButtons: boolean;
     /** `voiceAgent.translateTo`: the language those translations are in. */
@@ -251,7 +255,7 @@ export interface BuiltinVoiceStatus {
     running: boolean;
 }
 
-/** One service's check after "Save & test": `message` is plain language (see explainVoiceError). */
+/** One service's check after a Save that tests: `message` is plain language (see explainVoiceError). */
 export interface VoiceCheckResult {
     ok: boolean;
     message: string;
@@ -532,6 +536,8 @@ export type ClientMessage =
     | { type: 'redoCheckpoint' }
     | { type: 'confirmAction'; action: string; message: string; payload?: any }
     | { type: 'createTab'; backend?: AgentBackend }
+    /** The empty state's Call button: a new tab in the current backend, then voice mode once its worker is ready. */
+    | { type: 'callInNewTab' }
     | { type: 'closeTab'; tabId: string }
     | { type: 'switchTab'; tabId: string }
     /** The tab icon or the robot status line's log button; no `tabId`: the active tab. Switches to the tab. */
@@ -579,28 +585,33 @@ export type ClientMessage =
           confirmed?: boolean;
       };
 
+/**
+ * One setting changed on the settings page and not saved yet; Save sends them all (`saveSettings`).
+ * `setting`: `oh-my-pi-chater.<key>`; the others write the backend's agent config (settings.json /
+ * config.yml, mcp.json). Path lists are sent whole, as they should end up.
+ */
+export type SettingEdit =
+    | { kind: 'setting'; key: string; value: unknown }
+    | { kind: 'piDefaults'; provider?: string; model?: string; thinkingLevel?: string }
+    | { kind: 'steeringMode' | 'followUpMode'; mode: 'all' | 'one-at-a-time' }
+    | { kind: 'skillCommands'; enabled: boolean }
+    | { kind: 'mcpServer'; scope: McpScopeId; serverName: string; enabled: boolean }
+    | { kind: 'extensionPaths' | 'skillPaths'; paths: string[] };
+
 // Settings webview -> Extension messages
 export type SettingsClientMessage =
     | { type: 'setBackend'; backend: AgentBackend }
     | { type: 'getSettings' }
-    | { type: 'updateSetting'; key: string; value: any }
     | { type: 'getSkills' }
-    | { type: 'updatePiDefaults'; provider?: string; model?: string; thinkingLevel?: string }
+    /** Save: writes every edit in order, then answers `settingsSaved` and sends the settings again. */
+    | { type: 'saveSettings'; edits: SettingEdit[] }
     | { type: 'addPiPackage'; source: string }
     | { type: 'removePiPackage'; index: number }
-    | { type: 'addPiExtensionPath'; path: string }
-    | { type: 'removePiExtensionPath'; index: number }
-    | { type: 'addPiSkillPath'; path: string }
-    | { type: 'removePiSkillPath'; index: number }
-    | { type: 'setPiEnableSkillCommands'; enabled: boolean }
-    | { type: 'setPiSteeringMode'; mode: 'all' | 'one-at-a-time' }
-    | { type: 'setPiFollowUpMode'; mode: 'all' | 'one-at-a-time' }
     | { type: 'openPiAgentFile'; file: 'settings' | 'auth' | 'mcp' }
     | { type: 'reloadPiSession' }
     | { type: 'browsePiCatalog' }
     | { type: 'openExternalUrl'; url: string }
     | { type: 'getMcpSnapshot' }
-    | { type: 'setMcpServerEnabled'; scope: McpScopeId; serverName: string; enabled: boolean }
     | { type: 'testMcpServer'; serverName: string }
     | { type: 'testAllMcpServers' }
     | { type: 'runPiLogin' }
@@ -618,7 +629,7 @@ export type SettingsClientMessage =
     | { type: 'saveVoice'; stt: VoiceSettings; tts: TtsConfig; apiKeys: Record<string, string>; test: boolean }
     /** Removes a cloud provider's stored API key. */
     | { type: 'removeVoiceApiKey'; provider: string }
-    /** "Choose picture…": picks an image file and saves it as the speaker's avatar. */
+    /** Upload: picks an image file for the speaker's avatar and answers `avatarPicked`; Save keeps it. */
     | { type: 'pickAvatar'; speaker: VoiceSpeakerId }
     /** Dry runs use the form's values (and typed key), saved or not. `run` tags the events of one recording. */
     | { type: 'startSttDryRun'; run: number; settings: VoiceSettings; apiKey?: string }
@@ -626,17 +637,17 @@ export type SettingsClientMessage =
     | { type: 'ttsDryRun'; settings: TtsConfig; text: string; apiKey?: string }
     /** Opens the cloud provider's API key page (voicePresets.ts `CLOUD_PROVIDERS`) in the browser. */
     | { type: 'openVoiceKeyPage'; provider: string }
-    /** Asks for `builtinVoiceStatus`; `prepareBuiltinVoice` downloads the models and starts the engine first. */
-    | { type: 'getBuiltinVoiceStatus' }
-    | { type: 'prepareBuiltinVoice' }
+    /** Asks for `builtinVoiceStatus` of one service's models; `prepareBuiltinVoice` downloads them and starts the engine first. */
+    | { type: 'getBuiltinVoiceStatus'; service: keyof VoiceReadiness }
+    | { type: 'prepareBuiltinVoice'; service: keyof VoiceReadiness }
     /**
      * Records your voice: `enroll` reads the prompts and saves a new voiceprint, `test` compares each
      * utterance with the saved one. `run` tags its events; `stopSttDryRun` stops it too.
      */
     | { type: 'startVoiceprint'; run: number; mode: 'enroll' | 'test' }
     | { type: 'deleteVoiceprint' }
-    /** The Voice tab has unsaved changes (or not): closing the panel then warns. */
-    | { type: 'voiceDirty'; dirty: boolean };
+    /** The settings page has unsaved changes (or not): closing the panel then warns. */
+    | { type: 'settingsDirty'; dirty: boolean };
 
 // Extension -> Webview messages
 export type ServerMessage =
@@ -730,5 +741,9 @@ export type SettingsServerMessage =
      * passed; `tests`: each checked service's result (built-in ones are not checked).
      */
     | { type: 'voiceSaved'; saved: boolean; ok: boolean; message: string; tests: Partial<Record<keyof VoiceReadiness, VoiceCheckResult>> }
-    /** `busy`: downloading or starting; `error`: the last attempt failed (plain language). */
-    | { type: 'builtinVoiceStatus'; status?: BuiltinVoiceStatus; busy: boolean; error?: string };
+    /** Answer to `saveSettings`: `ok` when every edit was written; `message` says what was saved or what failed. */
+    | { type: 'settingsSaved'; ok: boolean; message: string }
+    /** Answer to `pickAvatar` when a file was picked: the avatar setting's value, and the picture as the Bot view would show it. */
+    | { type: 'avatarPicked'; speaker: VoiceSpeakerId; value: string; resolved?: VoiceAvatar; error?: string }
+    /** One service's built-in models. `busy`: downloading or starting; `error`: the last attempt failed (plain language). */
+    | { type: 'builtinVoiceStatus'; service: keyof VoiceReadiness; status?: BuiltinVoiceStatus; busy: boolean; error?: string };

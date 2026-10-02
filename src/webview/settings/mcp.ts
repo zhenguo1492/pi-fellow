@@ -2,6 +2,7 @@ import { escapeHtml } from '../../shared/html';
 import type { McpClient, McpServerSummary, McpSettingsSnapshot, SettingsData } from '../../shared/protocol';
 import { vscode } from './api';
 import { buildSection, el, showToast } from './dom';
+import { setEdit, withMcpEdits } from './edits';
 import { settingsState } from './state';
 import { buildTabPanel } from './tabs';
 
@@ -10,7 +11,8 @@ export function buildMcpTab(data: SettingsData): HTMLElement {
 }
 
 function buildMcpSection(data: SettingsData): HTMLElement {
-    const snap = settingsState.mcpSnapshot ?? data.mcpSnapshot;
+    const saved = settingsState.mcpSnapshot ?? data.mcpSnapshot;
+    const snap = saved && withMcpEdits(saved);
     const children: HTMLElement[] = [];
 
     // Until the snapshot arrives, only omp's client is known: pi's depends on its packages and version.
@@ -211,12 +213,7 @@ export function bindMcpServerCards(): void {
                 el.checked = !el.checked;
                 return;
             }
-            vscode.postMessage({
-                type: 'setMcpServerEnabled',
-                scope,
-                serverName,
-                enabled: el.checked,
-            });
+            setEdit(`mcp:${serverName}`, { kind: 'mcpServer', scope, serverName, enabled: el.checked }, el);
         });
     });
 }

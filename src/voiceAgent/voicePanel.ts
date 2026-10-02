@@ -21,6 +21,8 @@ export interface VoiceViewController {
     agent(): VoiceAgent | undefined;
     /** Alt+click on a sentence: reads it aloud. */
     readonly replay: ReplayPlayer;
+    /** A Board card: opens board `board` of the voice context in `voiceSessionFile` (docs/blackboard.md). */
+    openBoard(voiceSessionFile: string, board: string): void;
 }
 
 /**
@@ -29,10 +31,13 @@ export interface VoiceViewController {
  */
 export interface BotViewSurface {
     readonly onDidReceiveVoiceMessage: vscode.Event<VoiceViewClientMessage>;
-    /** The Bot view came into or went out of sight: tab switch, toggle, sidebar shown or hidden. */
+    /** The Bot view came into or went out of sight: tab switch, toggle, sidebar shown or hidden, every tab closed. */
     readonly onDidChangeBotViewVisibility: vscode.Event<void>;
+    /** The Bot view, or with every tab closed the chat's empty state that shows its intro, is on screen. */
     isBotViewVisible(): boolean;
     postVoice(message: VoiceViewHostMessage): void;
+    /** A webview URI the view can load the image file `path` from; undefined when the file is outside the folders the webview may load. */
+    imageSrc(path: string): string | undefined;
     /** Shows the Bot view in the active tab and reveals the chat. */
     showBotView(preserveFocus: boolean, options?: { onlyIfWorkerUnused?: boolean }): Promise<void>;
 }
@@ -207,7 +212,12 @@ export class VoicePanel implements vscode.Disposable {
             session: session
                 ? { id: session.id, title: session.title, startedAt: session.startedAt, readonly: !live }
                 : { id: '', title: 'Voice', startedAt: 0, readonly: false },
-            entries: session?.entries ?? [],
+            // Attached images go out with the URIs the view loads them from.
+            entries: (session?.entries ?? []).map((entry) =>
+                entry.kind === 'user' && entry.images
+                    ? { ...entry, images: entry.images.map((image) => ({ ...image, src: this._view.imageSrc(image.path) })) }
+                    : entry,
+            ),
             proposals: [],
             research: [],
             requests: [],
@@ -351,6 +361,13 @@ export class VoicePanel implements vscode.Disposable {
                     (outcome) => this._store.addSystem(outcome),
                     (err: unknown) => this._store.addSystem(`Could not send it: ${err instanceof Error ? err.message : String(err)}`),
                 );
+                return;
+            }
+            case 'openBoard': {
+                const file = this._shownSession().session?.voiceSessionFile;
+                if (file) {
+                    this._controller.openBoard(file, message.board);
+                }
                 return;
             }
         }

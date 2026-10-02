@@ -1,13 +1,14 @@
 import { escapeHtml } from '../../shared/html';
-import type { SettingsData, VoiceSettings } from '../../shared/protocol';
+import type { ModelInfo, SettingsData, SettingsServerMessage, VoiceSettings } from '../../shared/protocol';
 import { TRANSLATION_LANGUAGES, translationLanguage } from '../../shared/translationLanguages';
-import { AVATAR_PRESETS, AVATAR_PRESET_PREFIX, ICON_PRESETS, avatarPresetSrc } from '../../shared/avatarPresets';
+import { AVATAR_PRESETS, AVATAR_PRESET_PREFIX, DEFAULT_AVATAR_PRESETS, ICON_PRESETS, avatarPresetSrc } from '../../shared/avatarPresets';
 import { DEFAULT_SPEAKER_NAMES, type VoiceSpeakerId } from '../../shared/voiceSpeakers';
 import { BUILTIN_VOICE_SKILLS } from '../../shared/builtinVoiceSkills';
 import { TTS_LANGUAGE_FIELDS, type TtsConfig } from '../../voiceAgent/tts';
 import { DEFAULT_AVATAR, avatarMarkup } from '../avatar';
 import { vscode } from './api';
 import { buildSection, buildTextInput, el } from './dom';
+import { setSetting } from './edits';
 import { settingsState } from './state';
 
 export type VoiceService = 'stt' | 'tts';
@@ -199,16 +200,44 @@ function buildVoiceStatusRow(service: VoiceService): HTMLElement {
     return row;
 }
 
-/** A section whose fields are drafts until Save. */
+/** A service's server section (`section-stt-server` / `section-tts-server`): its fields are drafts until Save. */
 export function buildDraftSection(service: VoiceService, title: string, children: HTMLElement[]): HTMLElement {
-    const section = buildSection(title, [...children, buildVoiceStatusRow(service)], service);
+    const section = buildSection(title, [...children, buildVoiceStatusRow(service)], `${service}-server`);
     section.dataset.draft = service;
     return section;
 }
 
 /**
+ * `voiceAgent.model`: the voice agent's model, picked from the shown chat tab's models; an edit
+ * (the page's generic `[data-key]` handler) until Save. The Bot view's model chip sets the same setting.
+ */
+export function buildVoiceModelRow(selected: string, models: ModelInfo[]): HTMLElement {
+    const options = [
+        { value: '', label: 'Same as the chat tab’s model' },
+        ...models.map((m) => {
+            const key = `${m.provider}/${m.id}`;
+            return { value: key, label: m.name && m.name !== m.id ? `${key} — ${m.name}` : key };
+        }),
+    ];
+    if (selected && !options.some((o) => o.value === selected)) {
+        options.splice(1, 0, { value: selected, label: `${selected} (not among the chat tab’s models)` });
+    }
+    const row = el('div', 'setting-row');
+    row.innerHTML = `
+        <div class="setting-label-row">
+            <label for="setting-voiceAgent.model">Model</label>
+        </div>
+        <select id="setting-voiceAgent.model" class="setting-select" data-key="voiceAgent.model">${options
+            .map((o) => `<option value="${escapeHtml(o.value)}" ${o.value === selected ? 'selected' : ''}>${escapeHtml(o.label)}</option>`)
+            .join('')}</select>
+        <p class="setting-description">The voice agent’s own model, separate from the chat’s: changing one never changes the other. Same as the chat tab’s model takes the chat tab’s model when the voice agent starts. Once saved, a change applies to a running voice agent from its next reply, without Voice Agent — Stop. The model chip under the Bot view’s text box sets it too. The list is the shown chat tab’s models.</p>
+    `;
+    return row;
+}
+
+/**
  * `voiceAgent.messageButtons` (the Alt gestures on sentences in the Bot view and the chat) and, while it is on,
- * `voiceAgent.translateTo`; both saved at once by the page's generic `[data-key]` handlers.
+ * `voiceAgent.translateTo`; edits (the page's generic `[data-key]` handlers) until Save.
  */
 export function buildSentenceActionsRow(enabled: boolean, translateTo: string): HTMLElement {
     const row = el('div', 'setting-row voice-sentence-actions');
@@ -226,7 +255,7 @@ export function buildSentenceActionsRow(enabled: boolean, translateTo: string): 
                 <span>Read aloud and translate sentences (Alt)</span>
             </label>
         </div>
-        <p class="setting-description">In the Bot view and the chat (prompts, replies, Thought blocks, card text), hold Alt to highlight the sentence under the pointer: Alt+click reads it aloud with the text-to-speech above, Alt+right-click shows its translation in a floating panel (the text is sent to Google Translate). Hold Shift too (Alt+Shift) for the whole paragraph. Selecting text with the mouse shows Read aloud and Translate buttons for the selection. While text is read aloud, click it to pause or resume, double-click a word to read on from there, click elsewhere or press Escape to stop. Off by default.</p>
+        <p class="setting-description">In the Bot view and the chat (prompts, replies, Thought blocks, card text), hold Alt to highlight the sentence under the pointer: Alt+click reads it aloud with the voice set up on Text-to-speech, Alt+right-click shows its translation in a floating panel (the text is sent to Google Translate). Hold Shift too (Alt+Shift) for the whole paragraph. Selecting text with the mouse shows Read aloud and Translate buttons for the selection. While text is read aloud, click it to pause or resume, double-click a word to read on from there, click elsewhere or press Escape to stop. Off by default.</p>
         <div class="voice-translate-to">
             <div class="setting-label-row">
                 <label for="setting-voiceAgent.translateTo">Translate into</label>
@@ -246,25 +275,33 @@ let avatarMenuListeners: AbortController | undefined;
 
 /**
  * The names and avatars in the Bot view, you and the voice agent: the avatar, as the Bot view shows
- * it, beside the name. Clicking the avatar opens a picker under it: the two default icons, the
- * pixel-art presets, and Upload (a picture of your own). Saved at once: the name by the page's
- * generic `[data-key]` handler, an avatar on click.
+ * it, beside the name. Clicking the avatar opens a picker under it: the two line icons, the
+ * pixel-art presets (the speaker's default among them), and Upload (a picture of your own). Edits until Save: the name by the page's
+ * generic `[data-key]` handler, an avatar on click (or once Upload's picture is picked, `applyAvatarPicked`).
  */
 export function buildSpeakersRow(speakers: SettingsData['voiceSpeakers']): HTMLElement {
     const row = el('div', 'setting-row voice-speakers');
     const who: Record<VoiceSpeakerId, string> = { user: 'You', bot: 'Voice agent' };
-    // Each tile's setting value: the speaker's own default icon is the empty setting.
+    // Each tile's setting value: the speaker's default preset is the empty setting.
     const choices = (id: VoiceSpeakerId) => [
-        ...ICON_PRESETS.map((p) => ({ value: p.icon === id ? '' : AVATAR_PRESET_PREFIX + p.id, label: p.label, html: DEFAULT_AVATAR[p.icon] })),
-        ...AVATAR_PRESETS.map((p) => ({ value: AVATAR_PRESET_PREFIX + p.id, label: p.label, html: `<img src="${avatarPresetSrc(p.id)}" alt="">` })),
+        ...ICON_PRESETS.map((p) => ({ value: AVATAR_PRESET_PREFIX + p.id, label: p.label, html: DEFAULT_AVATAR[p.icon] })),
+        ...AVATAR_PRESETS.map((p) => ({
+            value: p.id === DEFAULT_AVATAR_PRESETS[id] ? '' : AVATAR_PRESET_PREFIX + p.id,
+            label: p.label,
+            html: `<img src="${avatarPresetSrc(p.id)}" alt="">`,
+        })),
     ];
+    // The avatar's tile value: the speaker's default preset set by its id is the empty setting too.
+    const currentValue = (id: VoiceSpeakerId) => {
+        const avatar = speakers[id].avatar.trim();
+        return avatar === AVATAR_PRESET_PREFIX + DEFAULT_AVATAR_PRESETS[id] ? '' : avatar;
+    };
     row.innerHTML = `
         <div class="setting-label-row"><label>Names and avatars</label></div>
         ${(['user', 'bot'] as const)
             .map((id) => {
-                const { name, avatar, error } = speakers[id];
-                const own = AVATAR_PRESET_PREFIX + ICON_PRESETS.find((p) => p.icon === id)!.id;
-                const current = avatar.trim() === own ? '' : avatar.trim();
+                const { name, error } = speakers[id];
+                const current = currentValue(id);
                 const tiles = choices(id);
                 // Anything else set (a picture, or text from settings.json) counts as uploaded.
                 const uploaded = !tiles.some((c) => c.value === current);
@@ -304,7 +341,10 @@ export function buildSpeakersRow(speakers: SettingsData['voiceSpeakers']): HTMLE
         }
     };
     for (const { speaker, id, toggle, menu } of menus) {
-        void avatarMarkup(speakers[id].resolved, DEFAULT_AVATAR[id]).then((html) => {
+        const { resolved } = speakers[id];
+        const tile = choices(id).find((c) => c.value === currentValue(id));
+        // A tile picked and not saved yet has no resolved picture: it shows as its tile.
+        void (resolved || !tile ? avatarMarkup(resolved, DEFAULT_AVATAR[id]) : Promise.resolve(tile.html)).then((html) => {
             toggle.innerHTML = html;
         });
         toggle.addEventListener('click', () => {
@@ -327,7 +367,7 @@ export function buildSpeakersRow(speakers: SettingsData['voiceSpeakers']): HTMLE
                 }
                 tiles.forEach((t) => t.setAttribute('aria-pressed', String(t === tile)));
                 toggle.innerHTML = tile.innerHTML;
-                vscode.postMessage({ type: 'updateSetting', key: `voiceAgent.${id}Avatar`, value: tile.dataset.avatarValue ?? '' });
+                setSetting(`voiceAgent.${id}Avatar`, tile.dataset.avatarValue ?? '', speaker);
             });
         });
     }
@@ -375,7 +415,7 @@ export function buildVoiceSkillsRow(): HTMLElement {
             </div>
         </details>
         <div class="voice-skills-chips"></div>
-        <p class="setting-description">The built-in skills (${BUILTIN_VOICE_SKILLS.join(', ')}) are always loaded. Beyond them, only the skills chosen here are, for skills written for the voice agent rather than for the coding worker; none by default. omp loads them by name, pi by their SKILL.md files. The list is the current chat tab's. Takes effect after Voice Agent — Stop, when it starts again.</p>
+        <p class="setting-description">Built in and always loaded: ${BUILTIN_VOICE_SKILLS.join(', ')}. Beyond them, only the skills chosen here are, for skills written for the voice agent rather than for the coding worker; none by default. omp loads them by name, pi by their SKILL.md files. The list is the current chat tab's. Takes effect after Voice Agent — Stop, when it starts again.</p>
     `;
     return row;
 }
@@ -444,13 +484,10 @@ function filterVoiceSkills(row: HTMLElement): void {
     });
 }
 
-/** Saves the chosen skills and shows them before the settings come back. */
-function saveVoiceSkills(skills: string[]): void {
-    if (settingsState.currentSettings) {
-        settingsState.currentSettings.voiceSkills = skills;
-    }
+/** The chosen skills as an edit; the row shows them at once. */
+function editVoiceSkills(skills: string[], from: Element): void {
+    setSetting('voiceAgent.skills', skills, from);
     renderVoiceSkills();
-    vscode.postMessage({ type: 'updateSetting', key: 'voiceAgent.skills', value: skills });
 }
 
 /** The listener on the document from the last bind: a full render builds a new page and binds again. */
@@ -473,12 +510,12 @@ export function bindVoiceSkills(): void {
         }
         const name = box.dataset.voiceSkill;
         const others = chosen().filter((n) => n !== name);
-        saveVoiceSkills(box.checked ? [...others, name] : others);
+        editVoiceSkills(box.checked ? [...others, name] : others, row);
     });
     row.addEventListener('click', (e) => {
         const remove = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-voice-skill-remove]') : null;
         if (remove) {
-            saveVoiceSkills(chosen().filter((n) => n !== remove.dataset.voiceSkillRemove));
+            editVoiceSkills(chosen().filter((n) => n !== remove.dataset.voiceSkillRemove), row);
         }
     });
     row.querySelector('.voice-skills-filter')!.addEventListener('input', () => filterVoiceSkills(row));
@@ -521,4 +558,12 @@ export function bindVoiceSkills(): void {
     );
 }
 
-
+/** Upload's picture was picked: the avatar edit; the page renders again to show it. */
+export function applyAvatarPicked(msg: Extract<SettingsServerMessage, { type: 'avatarPicked' }>): void {
+    const speaker = document.querySelector(`.voice-speaker--${msg.speaker}`);
+    if (!speaker) {
+        return;
+    }
+    settingsState.pickedAvatars[msg.speaker] = { value: msg.value, resolved: msg.resolved, error: msg.error };
+    setSetting(`voiceAgent.${msg.speaker}Avatar`, msg.value, speaker);
+}

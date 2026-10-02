@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PermissionLevel } from '../../shared/protocol';
+import { formatOutline, parseBoard, type BoardHands } from '../../shared/board';
 import { HostToolRouter, VOICE_HOST_TOOLS, type EditorHands, type ToolTurn } from '../../voiceAgent/hostTools';
 import { findViewers, type ExtensionManifest } from '../../voiceAgent/viewers';
 import { VoiceLlm } from '../../voiceAgent/voiceLlm';
@@ -174,6 +175,18 @@ function fakeHands(rec: Recorded): EditorHands {
     };
 }
 
+/** Boards that record each write in `opened` as `board <mode> <board>`, and answer with a plain outline. */
+function fakeBoards(rec: Recorded): BoardHands {
+    return {
+        write: async (request) => {
+            rec.opened.push(`board ${request.mode} ${request.board ?? 'current'}`);
+            return `Board b1 "${request.title ?? 'Board'}"\n${formatOutline(parseBoard(request.markdown))}`;
+        },
+        point: async (target) => `Pointed at ${target.block}.`,
+        view: async (request) => `Done: ${request.action}.`,
+    };
+}
+
 export interface TurnCall {
     tool: string;
     args: Record<string, unknown>;
@@ -273,6 +286,7 @@ export class VoiceEval {
             onText: (delta) => {
                 text += delta;
             },
+            onToolStart: () => {},
             onToolCall: (call) => {
                 pending.push(
                     this.router.execute(call.toolName, call.arguments, toolTurn).then((result) => {
@@ -306,6 +320,7 @@ export class VoiceEval {
             () => true,
             (_tabId, question) => ({ id: 'r1', question, startedAt: Date.now(), status: 'running' as const }),
             fakeHands(this.rec),
+            fakeBoards(this.rec),
         );
     }
 

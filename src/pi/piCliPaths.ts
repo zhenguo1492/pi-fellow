@@ -489,7 +489,7 @@ export async function verifyPiCliAvailable(outputChannel: vscode.OutputChannel):
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         outputChannel.appendLine(`Agent CLI check failed: ${msg}`);
-        vscode.window.showErrorMessage(`PI Buddy: agent CLI (omp / pi) not available. ${msg}`);
+        vscode.window.showErrorMessage(`Pi Fellow: agent CLI (omp / pi) not available. ${msg}`);
         return false;
     }
 }

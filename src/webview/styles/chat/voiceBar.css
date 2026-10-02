@@ -85,7 +85,7 @@
     --vb-state: var(--success-fg);
 }
 
-/* Avatar, status dot and label: one button that switches the tab to the Bot view and back. */
+/* Avatar, status dot and label: one button that switches the tab to the Bot view (the voice agent's avatar and name) and back (π and OMP / Pi). */
 .voice-bar-toggle {
     display: inline-flex;
     align-items: center;
@@ -106,16 +106,6 @@
 
 .voice-bar.on .voice-bar-toggle:hover {
     background: color-mix(in srgb, var(--vb-state) 10%, transparent);
-}
-
-/* The tab shows the Bot view: the avatar button (now the way back) is selected, like a pressed toggle: a neutral tint and a focus-coloured ring. */
-.voice-bar-toggle[aria-pressed='true'] {
-    background: var(--tint-strong);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-border) 60%, transparent);
-}
-
-.voice-bar-toggle[aria-pressed='true'] .voice-bar-label {
-    color: var(--fg);
 }
 
 .voice-bar-robot {
@@ -168,12 +158,42 @@
     animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
+/* In the Bot view the button is the way back to the worker: π and its name keep the neutral look; voice mode shows in the dot and the bar's tint. */
+.voice-bar-toggle[data-target='worker'] .voice-bar-robot {
+    color: var(--fg);
+    border-color: transparent;
+    background: transparent;
+    animation: none;
+}
+
+/* The worker is running a task: π's outline masks a slowly rotating rainbow, like the busy tab icon (header.css). */
+.voice-bar-toggle[data-target='worker'] .voice-bar-robot.voice-bar-pi-busy {
+    position: relative;
+    overflow: hidden;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.2 5.6C2.7 4.8 3.4 4.4 4.4 4.4h9.3'/%3E%3Cpath d='M6.3 4.4v4.3c0 2.1-.8 3.5-2.3 4.3'/%3E%3Cpath d='M10.6 4.4v6.8c0 1 .5 1.5 1.3 1.5.7 0 1.2-.4 1.6-1'/%3E%3C/svg%3E") center / 15px 15px no-repeat;
+}
+.voice-bar-robot.voice-bar-pi-busy svg {
+    visibility: hidden;
+}
+.voice-bar-toggle[data-target='worker'] .voice-bar-robot.voice-bar-pi-busy::before {
+    content: '';
+    position: absolute;
+    inset: -50%;
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list -- a rainbow, the same on every theme */
+    background: conic-gradient(#ff5a71, #ffad45, #ffe071, #55dba2, #45cfff, #a37dff, #ff5a71);
+    animation: tab-chat-rainbow 3s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+    .voice-bar-robot.voice-bar-pi-busy::before { animation: none; }
+}
+
 /*
  * The voice agent's avatar comes alive (src/webview/avatarMotion.ts): `.av-motion` is the voice bar's
  * robot, or in the Bot view the avatar of the reply being read aloud or else of the latest reply.
  * While the voice plays it talks with the sound (--talk, 0..1, how loud): it bounces and its box
- * glows. While the voice agent thinks, the robot's eyes give way to a screen of log lines that scroll
- * up and flicker; any other avatar (a picture, a pixel preset, text) is left as it is.
+ * glows, and a pixel preset that talks moves its mouth (frames swapped in avatarMotion.ts). While the
+ * voice agent thinks, the robot's eyes give way to a screen of log lines that scroll up and flicker,
+ * and a pixel preset plays its thinking frames; a picture or text is left as it is.
  */
 .av-motion > * {
     transform-origin: 50% 85%;
@@ -245,6 +265,11 @@
 .voice-bar.on .voice-bar-label {
     color: var(--vb-state);
     font-weight: 600;
+}
+
+.voice-bar-toggle[data-target='worker'] .voice-bar-label {
+    color: var(--fg);
+    font-weight: normal;
 }
 
 .voice-bar-label {

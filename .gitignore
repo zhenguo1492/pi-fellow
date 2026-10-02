@@ -12,3 +12,4 @@ TODO.md
 HandOff/
 .env.local
 .pi/
+.tmp

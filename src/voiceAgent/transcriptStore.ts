@@ -6,6 +6,7 @@ import type { VoiceSessionSummary } from '../pi/sessionCatalog';
 import type {
     VoiceEntry,
     VoiceHearing,
+    VoiceImage,
     VoiceLatency,
     VoiceObservationKind,
     VoiceSentence,
@@ -147,11 +148,12 @@ export class VoiceTranscriptStore {
         this._changed();
     }
 
-    /** Deletes voice session files in `dir` that no conversation names any more: dropped from history or never used. */
-    async pruneContexts(dir: string): Promise<void> {
+    /** Deletes voice session files in `dir` that no conversation names any more: dropped from history or never used. Resolves with the kept session files. */
+    async pruneContexts(dir: string): Promise<string[]> {
         const kept = new Set(this._sessions.flatMap((s) => (s.voiceSessionFile ? [path.basename(s.voiceSessionFile)] : [])));
         const names = await fs.readdir(dir).catch(() => []);
         await Promise.all(names.filter((name) => name.endsWith('.jsonl') && !kept.has(name)).map((name) => fs.rm(path.join(dir, name), { force: true })));
+        return [...kept].map((name) => path.join(dir, name));
     }
 
     /**
@@ -245,15 +247,24 @@ export class VoiceTranscriptStore {
         this.flush();
     }
 
-    /** `metrics`: voice mode's timestamps as the turn went out, for how long hearing it took. */
-    addUser(text: string, source: 'stt' | 'text' | 'panel', metrics?: Metrics): void {
+    /** `metrics`: voice mode's timestamps as the turn went out, for how long hearing it took; `images`: attached in the composer. */
+    addUser(text: string, source: 'stt' | 'text' | 'panel', metrics?: Metrics, images?: VoiceImage[]): void {
         const bargeIn = this._bargeIn && source !== 'panel';
         this._bargeIn = false;
         const latency =
             source === 'stt' && metrics
                 ? measured<VoiceHearing>({ endOfTurn: span(metrics.silenceAt, metrics.endDetectedAt), stt: span(metrics.endDetectedAt, metrics.sttDoneAt) })
                 : undefined;
-        this._push({ kind: 'user', id: this._id(), at: Date.now(), text, source, ...(bargeIn ? { bargeIn } : {}), ...(latency ? { latency } : {}) });
+        this._push({
+            kind: 'user',
+            id: this._id(),
+            at: Date.now(),
+            text,
+            source,
+            ...(bargeIn ? { bargeIn } : {}),
+            ...(latency ? { latency } : {}),
+            ...(images?.length ? { images } : {}),
+        });
     }
 
     addSystem(text: string): void {
@@ -282,6 +293,8 @@ export class VoiceTranscriptStore {
             }
         };
         bindTurn(options.turnId);
+        /** Host tool calls begun but not finished, by the model's tool call id. */
+        const started = new Map<string, VoiceToolEntry>();
         const listener: VoiceTurnListener = {
             onPrompt: (message) => {
                 entry.input = message;
@@ -291,15 +304,36 @@ export class VoiceTranscriptStore {
                 entry.text += delta;
                 this._changed();
             },
-            onToolCall: (name, args, result) => {
-                const tool: VoiceToolEntry = { name, args, result: result.text, isError: result.isError };
+            onToolStart: (id, name, args) => {
+                const tool = started.get(id);
+                if (tool) {
+                    if (args) {
+                        tool.args = args;
+                        this._changed();
+                    }
+                    return;
+                }
+                const begun: VoiceToolEntry = { name, args: args ?? {}, result: '', isError: false, running: true };
+                started.set(id, begun);
+                entry.tools.push(begun);
+                this._changed();
+            },
+            onToolCall: (id, name, args, result) => {
+                let tool = started.get(id);
+                started.delete(id);
+                if (tool) {
+                    delete tool.running;
+                    Object.assign(tool, { name, args, result: result.text, isError: result.isError });
+                } else {
+                    tool = { name, args, result: result.text, isError: result.isError };
+                    entry.tools.push(tool);
+                }
                 if (result.research) {
                     tool.research = researchState(result.research);
                     if (result.research.status === 'running') {
                         this._research.set(result.research, tool);
                     }
                 }
-                entry.tools.push(tool);
                 this._changed();
             },
             onLookup: ({ id, name, args }) => {
@@ -321,7 +355,12 @@ export class VoiceTranscriptStore {
                 (entry.usage ??= []).push(usage);
                 this._changed();
             },
-            onEnd: (result) => this._endReply(session, entry, result),
+            onEnd: (result) => {
+                // Calls the cut-off model never finished writing did nothing: no card for them.
+                const unfinished = new Set(started.values());
+                entry.tools = entry.tools.filter((tool) => !unfinished.has(tool));
+                this._endReply(session, entry, result);
+            },
         };
         return { listener, bindTurn };
     }
@@ -554,8 +593,9 @@ function researchState(job: ResearchJob): VoiceToolResearch {
 }
 
 /**
- * A saved reply as this run shows it: nothing of an earlier run is still running, and lookups saved
- * as descriptions only (`lookups`, before they became tool entries) join its tools.
+ * A saved reply as this run shows it: nothing of an earlier run is still running (a host tool call
+ * that never finished did nothing and goes), and lookups saved as descriptions only (`lookups`,
+ * before they became tool entries) join its tools.
  */
 function reviveTools(entry: AssistantEntry): void {
     const legacy: unknown = Reflect.get(entry, 'lookups');
@@ -565,6 +605,7 @@ function reviveTools(entry: AssistantEntry): void {
             entry.tools.push({ name: 'lookup', args: { description: String(description) }, result: '', isError: false });
         }
     }
+    entry.tools = entry.tools.filter((tool) => !(tool.running && tool.id === undefined));
     for (const tool of entry.tools) {
         delete tool.running;
         if (tool.research?.status === 'running') {

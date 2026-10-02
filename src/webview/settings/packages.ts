@@ -51,11 +51,11 @@ export function buildPackagesTab(data: SettingsData): HTMLElement {
     }
     packagesSection.push(
         buildPackageCatalogRow(),
-        buildListEditor('packages', cfg.packages, 'npm:package-name or git URL'),
-        buildAddRow('packages', 'Add package manually', 'e.g. npm:@narumitw/pi-plan-mode'),
+        buildListEditor('packages', cfg.packages, 'npm:package-name or git URL', 'Uninstall'),
+        buildAddRow('packages', 'Install a package', 'e.g. npm:@narumitw/pi-plan-mode', 'Install'),
         buildReadOnlyRow(
             'Catalog',
-            'Same packages as pi.dev/packages (via npm). Install runs npm + updates ~/.pi/agent.',
+            'Same packages as pi.dev/packages (via npm). Install and Uninstall run npm and update ~/.pi/agent at once, without Save.',
         ),
     );
     return buildTabPanel('packages', [
@@ -74,10 +74,10 @@ function buildRecommendedPackagesBanner(missing?: string[]): HTMLElement | null 
     const row = el('div', 'setting-row pi-config-error');
     row.innerHTML = `
         <p class="setting-description">
-            <strong>Recommended for PI Buddy:</strong>
+            <strong>Recommended for Pi Fellow:</strong>
             ${missing.map((s) => `<code>${escapeHtml(s)}</code>`).join(', ')} —
             not in your Pi packages yet. Use command palette
-            <strong>PI Buddy: Install Recommended Packages</strong> or add manually below.
+            <strong>Pi Fellow: Install Recommended Packages</strong> or add manually below.
         </p>
     `;
     return row;

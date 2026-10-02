@@ -1,44 +1,96 @@
 /**
  * Pixel-art avatars to pick instead of a picture (`voiceAgent.userAvatar` / `botAvatar` set to
- * `preset:<id>`). Each is a 16×16 map, one character per pixel (`.` transparent) with its palette,
- * drawn as an SVG at 64 px (the Bot view's 32 px avatar at 2x), so pixels stay square and sharp.
- * The background is left transparent: the avatar box's tint shows through, as behind the icons.
+ * `preset:<id>`; empty: the otaku for you, the gentleman for the voice agent). Each is a 16×16 map,
+ * one character per pixel (`.` transparent) with its palette, drawn as an SVG at 64 px (the Bot
+ * view's 32 px avatar at 2x), so pixels stay square and sharp. The background is left transparent:
+ * the avatar box's tint shows through, as behind the icons.
+ *
  * Each has its own thinking animation (`think`), played while the voice agent thinks
  * (src/webview/avatarMotion.ts): the boy scratches his head, the woman looks up at a thought
- * bubble filling with dots, the uncle holds a steaming mug of coffee, the otaku's glasses glare
- * white and spirals spin in them, the cat dozes off, the gentleman raises an eyebrow, his monocle
- * glints and his moustache twitches.
+ * bubble filling with dots, the uncle holds a steaming mug of coffee, the otaku's pupils circle in
+ * his lenses, the cat dozes off, the gentleman's eyebrows go up and down on their own while his
+ * eyes look left and right, his monocle glints and his moustache tips flatten for a moment.
+ * Some also talk (`talk`), played while the voice plays: the mouth closed, half or wide open with
+ * the voice's level; the gentleman's left moustache tip lies flat and now and then, for one
+ * syllable, he raises one brow (the right or the left, never both); the otaku glances left and right.
+ *
+ * An animation is made of tracks, parts that change on their own (brows, eyes, mouth): each has
+ * states, the rows that differ from the resting map, and what picks the state shown (`pick`). A
+ * frame is drawn for every combination of the tracks' states, each track changing the pixels where
+ * its rows differ from the resting map (a later track wins on a pixel both change).
  */
 import type { VoiceSpeakerId } from './voiceSpeakers';
 
 export const AVATAR_PRESET_PREFIX = 'preset:';
 
+/** The preset an empty avatar setting shows: the otaku for you, the gentleman for the voice agent. */
+export const DEFAULT_AVATAR_PRESETS: Readonly<Record<VoiceSpeakerId, string>> = { user: 'otaku', bot: 'gentleman' };
+
 /**
- * The default line icons, also offered as presets (`preset:user`, `preset:robot`), so the voice
- * agent can have the person or you the robot. Drawn in the avatar box's colour, not as pictures.
+ * The line icons, also offered as presets (`preset:user`, `preset:robot`), so either speaker can
+ * have the person or the robot. Drawn in the avatar box's colour, not as pictures.
  */
 export const ICON_PRESETS: ReadonlyArray<{ id: string; label: string; icon: VoiceSpeakerId }> = [
-    { id: 'user', label: 'Person (your default)', icon: 'user' },
-    { id: 'robot', label: "Robot (the voice agent's default)", icon: 'bot' },
+    { id: 'user', label: 'Person', icon: 'user' },
+    { id: 'robot', label: 'Robot', icon: 'bot' },
 ];
+
+/** Rows that differ from the resting map, by row index. */
+type Rows = Readonly<Record<number, string>>;
+
+/** What picks a track's state; plain data, as it goes to the webview with the frames. */
+export type AvatarTrackPick =
+    /** A fixed list of [state, ms], looping from the animation's start. */
+    | { kind: 'loop'; play: Array<[state: number, ms: number]> }
+    /** Another state at random, each held for a random time between `hold`'s two ms. */
+    | { kind: 'random'; hold: [min: number, max: number] }
+    /** Talking: how many of `steps` the voice's level (`--talk`, 0..1) reaches, closed, half or open for a mouth. */
+    | { kind: 'level'; steps: number[] }
+    /** Talking: state 0 while the `level` track is at 0; each time it leaves 0 (a syllable), state i + 1 picked with weight `weights[i]`. */
+    | { kind: 'syllable'; weights: number[] };
+
+/** An animation as defined here: rows changed all along it, and its tracks. */
+interface Animation {
+    rows?: Rows;
+    tracks: ReadonlyArray<{ states: readonly Rows[]; pick: AvatarTrackPick }>;
+}
 
 interface PixelAvatar {
     id: string;
     label: string;
     palette: Record<string, string>;
     rows: readonly string[];
-    /** Thinking: frames, each the rows that differ from `rows`, and the order they play in as [frame, ms], looping. */
-    think: {
-        frames: ReadonlyArray<Readonly<Record<number, string>>>;
-        play: ReadonlyArray<readonly [frame: number, ms: number]>;
-    };
+    think: Animation;
+    talk?: Animation;
 }
 
-/** A preset's thinking animation as the webview plays it: frames as data URIs, and the order they play in as [frame, ms], looping. */
-export interface AvatarThinking {
+/**
+ * An animation as the webview plays it: a frame (data URI) for every combination of its tracks'
+ * states, at {@link frameIndex}, and each track's number of states and what picks it.
+ */
+export interface AvatarAnimation {
     frames: string[];
-    play: Array<[frame: number, ms: number]>;
+    tracks: Array<{ states: number; pick: AvatarTrackPick }>;
 }
+
+/** A preset's animations: thinking, and talking for those that talk. */
+export interface AvatarAnimations {
+    think?: AvatarAnimation;
+    talk?: AvatarAnimation;
+}
+
+/** The frame of a combination of track states: the first track's state is the most significant digit. */
+export function frameIndex(tracks: ReadonlyArray<{ states: number }>, states: readonly number[]): number {
+    return tracks.reduce((index, track, i) => index * track.states + (states[i] ?? 0), 0);
+}
+
+/** An animation of a single track that plays `frames` in the fixed order `play`, looping. */
+function loop(frames: readonly Rows[], play: Array<[frame: number, ms: number]>): Animation {
+    return { tracks: [{ states: frames, pick: { kind: 'loop', play } }] };
+}
+
+/** The level steps of a talking mouth: closed below the first, half open below the second, open above. */
+const MOUTH_STEPS = [0.25, 0.6];
 
 /** Outline, eye whites and pupils: the same in all of them. */
 const INK = { k: '#2b1e18', w: '#ffffff', e: '#2b1e18' };
@@ -67,8 +119,8 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             '.kccccCssCcccck.',
         ],
         // A red mug of coffee in his hand, steam curling up beside his face.
-        think: {
-            frames: [
+        think: loop(
+            [
                 {
                     1: '....kkkkkkkk..z.',
                     2: '...khhhhhhhhk.z.',
@@ -112,8 +164,8 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
                     14: '..kcccCssCQQQQ..',
                 },
             ],
-            play: [[0, 280], [1, 280], [2, 280]],
-        },
+            [[0, 280], [1, 280], [2, 280]],
+        ),
     },
     {
         id: 'boy',
@@ -138,8 +190,8 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             '.kcccccccccccck.',
         ],
         // Mouth pursed, he scratches the top of his head (hand up and down, a tuft of hair flicking), then stops to think.
-        think: {
-            frames: [
+        think: loop(
+            [
                 {
                     0: '.........k.k.k..',
                     1: '.....kkkkskskk..',
@@ -177,8 +229,8 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
                     15: '.kccccccccccccck',
                 },
             ],
-            play: [[0, 130], [1, 130], [0, 130], [1, 130], [0, 130], [1, 130], [0, 130], [1, 130], [0, 700]],
-        },
+            [[0, 130], [1, 130], [0, 130], [1, 130], [0, 130], [1, 130], [0, 130], [1, 130], [0, 700]],
+        ),
     },
     {
         id: 'cat',
@@ -203,8 +255,8 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             '................',
         ],
         // Dozes off: eyes shut, a small z and then a big Z rising between the ears as the head nods down.
-        think: {
-            frames: [
+        think: loop(
+            [
                 {
                     6: '.kooooooooooook.',
                     7: '.kooooooooooook.',
@@ -256,13 +308,13 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
                     15: '...kkkkkkkkkk...',
                 },
             ],
-            play: [[0, 500], [1, 500], [2, 600], [3, 500]],
-        },
+            [[0, 500], [1, 500], [2, 600], [3, 500]],
+        ),
     },
     {
         id: 'otaku',
-        label: 'Otaku with thick glasses',
-        palette: { ...INK, h: '#26262e', s: '#f3dcc8', g: '#15151a', l: '#cfe4f5', m: '#7a4a40', c: '#7d8791', C: '#5f6870', W: '#ffffff', q: '#4f6fb0' },
+        label: 'Otaku with thick glasses (your default)',
+        palette: { ...INK, h: '#26262e', s: '#f3dcc8', g: '#15151a', l: '#cfe4f5', m: '#7a4a40', c: '#7d8791', C: '#5f6870' },
         rows: [
             '.....k..k.......',
             '...kkhkkhkkk....',
@@ -281,43 +333,24 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             '..kcckkkkkkcck..',
             '.kcccccCCccccck.',
         ],
-        // The lenses glare white, then a spiral turns in each, a quarter turn a frame.
-        think: {
-            frames: [
-                {
-                    6: '.gWWWWggggWWWWg.',
-                    7: '.gWWWWgssgWWWWg.',
-                    8: '.gWWWWgssgWWWWg.',
-                    9: '.gWWWWgssgWWWWg.',
-                },
-                {
-                    6: '.gqqqqggggqqqqg.',
-                    7: '.gWWWqgssgWWWqg.',
-                    8: '.gWqWqgssgWqWqg.',
-                    9: '.gWqqqgssgWqqqg.',
-                },
-                {
-                    6: '.gWWWqggggWWWqg.',
-                    7: '.gqqWqgssgqqWqg.',
-                    8: '.gqWWqgssgqWWqg.',
-                    9: '.gqqqqgssgqqqqg.',
-                },
-                {
-                    6: '.gqqqWggggqqqWg.',
-                    7: '.gqWqWgssgqWqWg.',
-                    8: '.gqWWWgssgqWWWg.',
-                    9: '.gqqqqgssgqqqqg.',
-                },
-                {
-                    6: '.gqqqqggggqqqqg.',
-                    7: '.gqWWqgssgqWWqg.',
-                    8: '.gqWqqgssgqWqqg.',
-                    9: '.gqWWWgssgqWWWg.',
-                },
+        // The glare leaves the lenses and the pupils circle in a small ring in the middle of each, a step every 150 ms.
+        think: loop(
+            [
+                { 6: '.gllllggggllllg.', 7: '.glellgssglellg.', 8: '.gllllgssgllllg.', 9: '.gllllgssgllllg.' },
+                { 6: '.gllllggggllllg.', 7: '.gllelgssgllelg.', 8: '.gllllgssgllllg.', 9: '.gllllgssgllllg.' },
+                { 6: '.gllllggggllllg.', 7: '.gllllgssgllllg.', 8: '.gllelgssgllelg.', 9: '.gllllgssgllllg.' },
+                { 6: '.gllllggggllllg.', 7: '.gllllgssgllllg.', 8: '.glellgssglellg.', 9: '.gllllgssgllllg.' },
             ],
-            play: [
-                [0, 200],
-                ...[1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4].map((frame) => [frame, 110] as const),
+            [[0, 150], [1, 150], [2, 150], [3, 150]],
+        ),
+        // The mouth follows the voice; the eyes glance left and back now and then.
+        talk: {
+            tracks: [
+                {
+                    states: [{}, { 12: '..ksssskkssssk..' }, { 12: '..ksssmkkmsssk..', 13: '...ksssmmsssk...' }],
+                    pick: { kind: 'level', steps: MOUTH_STEPS },
+                },
+                { states: [{}, { 8: '.glellgssglellg.' }], pick: { kind: 'random', hold: [500, 1200] } },
             ],
         },
     },
@@ -344,8 +377,8 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             'khhcccccccccchhk',
         ],
         // Eyes turned up to a thought bubble over her head, which fills with dots one by one.
-        think: {
-            frames: [
+        think: loop(
+            [
                 {
                     0: '..........WWWWW.',
                     1: '.....kkkkWWWWWWW',
@@ -383,12 +416,12 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
                     8: '.khhswwsswwshhk.',
                 },
             ],
-            play: [[0, 400], [1, 350], [2, 350], [3, 900]],
-        },
+            [[0, 400], [1, 350], [2, 350], [3, 900]],
+        ),
     },
     {
         id: 'gentleman',
-        label: 'Old English gentleman',
+        label: "Old English gentleman (the voice agent's default)",
         palette: { ...INK, t: '#23232b', T: '#7a2433', G: '#5e5852', M: '#4d4741', s: '#efc4a2', S: '#d6a582', o: '#d4a52a', m: '#9c5a4c', j: '#5c5a3e', W: '#f4f1ea', r: '#c0283f', R: '#6e1424' },
         rows: [
             '....kkkkkkkk....',
@@ -400,7 +433,7 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             '..kGsMMssMMsGk..',
             '.kSssssssoossSk.',
             '.kSsswesoweosSk.',
-            '..kMsssSsoosMk..',
+            '..ksMssSsooMsk..',
             '..ksMMMMMMMMsk..',
             '..kssssmmssssk..',
             '...kssssssssk...',
@@ -408,16 +441,34 @@ const PIXEL_AVATARS: readonly PixelAvatar[] = [
             '..kjrrrRRrrrjk..',
             '.kjjrrWWWWrrjjk.',
         ],
-        // One eyebrow raised, a glint runs round the monocle, then the moustache twitches: "hmm, indeed".
+        // "Hmm, indeed": each eyebrow goes up and down on its own, the eyes look left and right, a glint
+        // runs round the monocle, then the moustache twitches, its tips flattening for a moment.
         think: {
-            frames: [
-                { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..' },
-                { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..', 7: '.kSssssssWossSk.' },
-                { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..', 7: '.kSssssssoWssSk.' },
-                { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..', 8: '.kSsswesoweWsSk.' },
-                { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..', 9: '..kssssSsoossk..', 10: '..kMMMMMMMMMMk..' },
+            tracks: [
+                { states: [{}, { 5: '..kGsMMsssssGk..', 6: '..kGsssssMMsGk..' }], pick: { kind: 'random', hold: [400, 2000] } },
+                { states: [{}, { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..' }], pick: { kind: 'random', hold: [400, 2000] } },
+                { states: [{}, { 8: '.kSssewsoewosSk.' }], pick: { kind: 'random', hold: [650, 950] } },
+                {
+                    states: [{}, { 7: '.kSssssssWossSk.' }, { 7: '.kSssssssoWssSk.' }, { 8: '.kSsswesoweWsSk.' }, { 9: '..kssssSsoossk..' }],
+                    pick: { kind: 'loop', play: [[0, 500], [1, 90], [2, 90], [3, 90], [0, 400], [4, 160], [0, 160], [4, 160], [0, 500]] },
+                },
             ],
-            play: [[0, 500], [1, 90], [2, 90], [3, 90], [0, 400], [4, 160], [0, 160], [4, 160], [0, 500]],
+        },
+        // The left moustache tip lies flat and the mouth follows the voice; now and then one brow, the
+        // right or the left, goes up for a syllable and drops again when the mouth closes.
+        talk: {
+            rows: { 9: '..kssssSsooMsk..' },
+            tracks: [
+                {
+                    states: [{}, { 11: '..ksssskkssssk..' }, { 11: '..ksssmkkmsssk..', 12: '...ksssmmsssk...' }],
+                    pick: { kind: 'level', steps: MOUTH_STEPS },
+                },
+                {
+                    // State 1 is the brows at rest: about one syllable in five raises one brow, the right or the left, just for that syllable.
+                    states: [{}, {}, { 5: '..kGsssssMMsGk..', 6: '..kGsMMsssssGk..' }, { 5: '..kGsMMsssssGk..', 6: '..kGsssssMMsGk..' }],
+                    pick: { kind: 'syllable', weights: [8, 1, 1] },
+                },
+            ],
         },
     },
 ];
@@ -450,14 +501,46 @@ export function avatarPresetSrc(id: string): string | undefined {
     return avatar && pixelSrc(avatar.palette, avatar.rows);
 }
 
-/** A preset's thinking animation; undefined for an unknown id. */
-export function avatarPresetThinking(id: string): AvatarThinking | undefined {
+/** The resting rows with an animation's rows and each track's state (`states[i]`, 0 when left out) changed over them. */
+function frameRows(avatar: PixelAvatar, animation: Animation | undefined, states: readonly number[]): string[] {
+    const changes = animation ? [animation.rows ?? {}, ...animation.tracks.map((track, i) => track.states[states[i] ?? 0])] : [];
+    return avatar.rows.map((row, y) => {
+        const pixels = [...row];
+        for (const changed of changes) {
+            const to = changed[y];
+            for (let x = 0; to !== undefined && x < row.length; x++) {
+                if (to[x] !== row[x]) {
+                    pixels[x] = to[x];
+                }
+            }
+        }
+        return pixels.join('');
+    });
+}
+
+/**
+ * A preset's pixel rows: at rest, or the frame of its `think` or `talk` animation with each track
+ * in `states` (0 when left out); undefined for an unknown id or an animation it does not have.
+ */
+export function avatarPresetRows(id: string, animation?: 'think' | 'talk', states: readonly number[] = []): string[] | undefined {
+    const avatar = PIXEL_AVATARS.find((a) => a.id === id);
+    if (!avatar || (animation && !avatar[animation])) {
+        return undefined;
+    }
+    return frameRows(avatar, animation && avatar[animation], states);
+}
+
+/** A preset's animations, a frame drawn for every combination of each one's track states; undefined for an unknown id. */
+export function avatarPresetAnimations(id: string): AvatarAnimations | undefined {
     const avatar = PIXEL_AVATARS.find((a) => a.id === id);
     if (!avatar) {
         return undefined;
     }
-    return {
-        frames: avatar.think.frames.map((changed) => pixelSrc(avatar.palette, avatar.rows.map((row, y) => changed[y] ?? row))),
-        play: avatar.think.play.map(([frame, ms]) => [frame, ms]),
+    const draw = (animation: Animation): AvatarAnimation => {
+        const tracks = animation.tracks.map(({ states, pick }) => ({ states: states.length, pick }));
+        // In frameIndex order: the first track's state counts slowest.
+        const combinations = tracks.reduce<number[][]>((all, { states }) => all.flatMap((c) => Array.from({ length: states }, (_, s) => [...c, s])), [[]]);
+        return { frames: combinations.map((states) => pixelSrc(avatar.palette, frameRows(avatar, animation, states))), tracks };
     };
+    return { think: draw(avatar.think), talk: avatar.talk && draw(avatar.talk) };
 }

@@ -94,19 +94,21 @@ export function buildReadOnlyRow(label: string, value: string): HTMLElement {
     return row;
 }
 
-export function buildListEditor(kind: string, items: string[], hint: string): HTMLElement {
+/** A list with a Remove button per item (`removeLabel`); `hint` names what the items are. */
+export function buildListEditor(kind: string, items: string[], hint: string, removeLabel = 'Remove'): HTMLElement {
     const row = el('div', 'setting-row');
     const listId = `list-${kind}`;
+    const attrs = `id="${listId}" data-list-kind="${kind}" data-hint="${escapeHtml(hint)}"`;
     if (items.length === 0) {
-        row.innerHTML = `<div id="${listId}" class="pi-list empty"><p class="setting-description">None configured.</p></div>`;
+        row.innerHTML = `<div ${attrs} class="pi-list empty"><p class="setting-description">None configured.</p></div>`;
         return row;
     }
     row.innerHTML = `
-        <div id="${listId}" class="pi-list" data-list-kind="${kind}">
+        <div ${attrs} class="pi-list">
             ${items.map((item, i) => `
                 <div class="pi-list-item">
                     <code class="pi-list-value" title="${escapeHtml(hint)}">${escapeHtml(item)}</code>
-                    <button type="button" class="setting-btn danger small" data-remove-kind="${kind}" data-remove-index="${i}">Remove</button>
+                    <button type="button" class="setting-btn danger small" data-remove-kind="${kind}" data-remove-index="${i}">${escapeHtml(removeLabel)}</button>
                 </div>
             `).join('')}
         </div>
@@ -114,13 +116,13 @@ export function buildListEditor(kind: string, items: string[], hint: string): HT
     return row;
 }
 
-export function buildAddRow(kind: string, label: string, placeholder: string): HTMLElement {
+export function buildAddRow(kind: string, label: string, placeholder: string, addLabel = 'Add'): HTMLElement {
     const row = el('div', 'setting-row pi-add-row');
     row.innerHTML = `
         <div class="setting-label-row"><label>${escapeHtml(label)}</label></div>
         <div class="add-row">
             <input type="text" class="setting-input" data-add-kind="${kind}" placeholder="${escapeHtml(placeholder)}">
-            <button type="button" class="setting-btn primary" data-add-btn="${kind}">Add</button>
+            <button type="button" class="setting-btn primary" data-add-btn="${kind}">${escapeHtml(addLabel)}</button>
         </div>
     `;
     return row;

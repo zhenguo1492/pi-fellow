@@ -1,6 +1,6 @@
 import type { SerializedAgentState } from '../../shared/protocol';
 import { applyVoiceMicStatus, setSttCheck } from '../dictation';
-import { setPickerCurrentModel } from '../modelPicker';
+import { setPickerCurrentModel, setPickerTarget } from '../modelPicker';
 import { syncTuiView } from '../tuiView';
 import { applyVoiceBarStatus, setBotViewShown, setVoiceReadiness } from '../voiceBar';
 import { setVoicePanelReadiness } from '../voicePanel';
@@ -83,7 +83,9 @@ export function applyStateSync(s: SerializedAgentState): void {
     // The Bot view may cover a TUI tab's terminal: the TUI keeps running and the composer is back.
     const view = tabView(state.tabs.find((t) => t.isActive));
     const botView = view === 'bot';
-    setBotViewShown(botView, state.tuiMode);
+    setBotViewShown(botView, state.tuiMode, state.activeBackend);
+    // The model chip picks for what the composer talks to; each keeps its own model.
+    setPickerTarget(botView ? 'voice' : 'worker');
 
     if (tabSwitched || !isSkeletonBuilt()) {
         render();
@@ -128,4 +130,6 @@ export function applyStateSync(s: SerializedAgentState): void {
     updateTuiToggle();
     syncTuiView(state.tabs.filter((t) => t.tuiMode).map((t) => t.id), state.activeTabId, view === 'terminal');
     document.getElementById('app')?.classList.toggle('bot-mode', botView);
+    // Every tab closed: the empty state in place of the conversation and composer.
+    document.getElementById('app')?.classList.toggle('no-tabs-mode', state.tabs.length === 0);
 }

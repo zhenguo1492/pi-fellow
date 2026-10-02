@@ -40,7 +40,12 @@ describe('conversation: user turns', () => {
 
     it('keeps a typed message’s attachments until the words still transcribing join it', () => {
         const image = { type: 'image' as const, mimeType: 'image/png', data: 'AAAA' };
-        const attachments = { names: ['pasted-image-1.png'], images: [image], files: '<file name="/p/pasted-image-1.png"></file>\n' };
+        const attachments = {
+            names: [],
+            imageFiles: [{ name: 'pasted-image-1.png', path: '/p/pasted-image-1.png' }],
+            images: [image],
+            files: '<file name="/p/pasted-image-1.png"></file>\n',
+        };
         const waiting = run([
             { type: 'userSpeechStart', at },
             { type: 'userSpeechEnd', at, silenceAt: at },
@@ -295,7 +300,7 @@ describe('conversation: a sound not yet found to be the user (voiceprint check o
     });
 
     it('ends without a segment when another path takes the audio over, and what waited goes out', () => {
-        const waiting = run([{ type: 'userSoundStart', at }, { type: 'typed', text: '', attachments: { names: ['a.png'], images: [], files: '' }, at }]);
+        const waiting = run([{ type: 'userSoundStart', at }, { type: 'typed', text: '', attachments: { names: ['a.md'], imageFiles: [], images: [], files: '' }, at }]);
         expect(waiting.effects).toEqual([]);
         const ended = run([{ type: 'userSoundEnd', at }], waiting.state);
         expect(ended.effects).toMatchObject([{ type: 'prompt', turnId: 1, text: '', source: 'text' }]);

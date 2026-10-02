@@ -203,33 +203,17 @@ export function updateOmpDefaults(
     }, agentDir);
 }
 
-export async function addOmpSkillPath(skillPath: string, agentDir: string = getOmpAgentDir()): Promise<void> {
-    const trimmed = skillPath.trim();
-    if (!trimmed) {
-        throw new Error('Skill path is empty');
-    }
-    writeOmpConfig((current) => {
-        const skillsObj = { ...(current.skills || {}) };
-        const dirs: string[] = Array.isArray(skillsObj.customDirectories) ? [...skillsObj.customDirectories] : [];
-        if (!dirs.includes(trimmed)) {
-            dirs.push(trimmed);
-        }
-        skillsObj.customDirectories = dirs;
-        return { ...current, skills: skillsObj };
-    }, agentDir);
+/** `skills.customDirectories`, as given (trimmed, without blanks or repeats). */
+export async function setOmpSkillPaths(paths: readonly string[], agentDir: string = getOmpAgentDir()): Promise<void> {
+    writeOmpConfig((current) => ({
+        ...current,
+        skills: { ...(current.skills || {}), customDirectories: cleanPaths(paths) },
+    }), agentDir);
 }
 
-export async function removeOmpSkillPathAt(index: number, agentDir: string = getOmpAgentDir()): Promise<void> {
-    writeOmpConfig((current) => {
-        const skillsObj = { ...(current.skills || {}) };
-        const dirs: string[] = Array.isArray(skillsObj.customDirectories) ? [...skillsObj.customDirectories] : [];
-        if (index < 0 || index >= dirs.length) {
-            throw new Error('Invalid skill path index');
-        }
-        dirs.splice(index, 1);
-        skillsObj.customDirectories = dirs;
-        return { ...current, skills: skillsObj };
-    }, agentDir);
+/** A path list as it is written: trimmed, without blanks or repeats, in order. */
+export function cleanPaths(paths: readonly string[]): string[] {
+    return [...new Set(paths.map((p) => p.trim()).filter(Boolean))];
 }
 
 export async function setOmpEnableSkillCommands(enabled: boolean, agentDir: string = getOmpAgentDir()): Promise<void> {

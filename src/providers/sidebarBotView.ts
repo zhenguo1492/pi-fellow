@@ -3,6 +3,7 @@ import { voiceIsOn, type VoiceStatus } from '../shared/voiceViewProtocol';
 import type { VoiceInput } from '../voice/voiceInput';
 import type { SidebarHost } from './sidebarHost';
 import type { MessageHandlers } from './sidebarMessageHandlers';
+import { tabReady } from './sidebarTabState';
 import type { SidebarTabs } from './sidebarTabs';
 
 /** The Bot view a tab shows in place of its conversation, and the composer mic it shares with voice mode. */
@@ -18,6 +19,8 @@ export class SidebarBotView {
         private readonly _voiceInput: VoiceInput,
         private readonly _tabs: SidebarTabs,
         private readonly _botViewVisibility: vscode.EventEmitter<void>,
+        /** Starts voice mode, as the phone button's `start` does. */
+        private readonly _startVoice: () => void,
     ) {}
 
     get voiceStatus(): VoiceStatus | undefined {
@@ -35,8 +38,12 @@ export class SidebarBotView {
         await this._voiceInput.toggle();
     }
 
+    /**
+     * The Bot view's content is on screen: the active tab shows it, or every tab is closed and the
+     * chat's empty state shows its intro (which needs the snapshots' engines).
+     */
     isBotViewVisible(): boolean {
-        return !!this._view()?.visible && this.showsBotView();
+        return !!this._view()?.visible && (this.showsBotView() || !this._host.activeTab);
     }
 
     /** Shows the Bot view in the active tab and reveals the chat; `onlyIfWorkerUnused` leaves a tab the worker has used alone. */
@@ -104,6 +111,19 @@ export class SidebarBotView {
         this._host.post({ type: 'voiceStatus', status });
     }
 
+    /**
+     * The empty state's Call button: a call needs a tab, so a new one first, then voice mode once its
+     * worker is up. Nothing when the user closed the tab or moved to another one meanwhile; a worker
+     * that failed to start rejects, and the chat shows the error.
+     */
+    private async _callInNewTab(): Promise<void> {
+        const tab = await this._tabs.createTab();
+        await tabReady(tab);
+        if (this._host.activeTab === tab) {
+            this._startVoice();
+        }
+    }
+
     handlers(): MessageHandlers {
         return {
             toggleDictation: async () => {
@@ -115,6 +135,7 @@ export class SidebarBotView {
             showTui: (msg) => {
                 this._showTui(msg.tabId);
             },
+            callInNewTab: () => this._callInNewTab(),
         };
     }
 }

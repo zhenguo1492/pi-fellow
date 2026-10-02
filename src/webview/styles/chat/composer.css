@@ -210,6 +210,13 @@
     color: var(--fg);
 }
 
+/* The Bot view's chip picks the voice agent's model: light blue tells it from the worker's. */
+.composer-model-btn.voice-model,
+.composer-model-btn.voice-model:hover,
+.composer-model-btn.voice-model[aria-expanded='true'] {
+    color: var(--voice-model-fg);
+}
+
 .composer-model-label {
     min-width: 0;
     overflow: hidden;

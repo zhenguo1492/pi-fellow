@@ -1,0 +1,90 @@
+/*
+ * Code blocks: no soft wrap and a fixed line height in px, so line N's box follows from geometry
+ * (src/webview/board/locate.ts codeLinesRect); highlight.js token colors from theme tokens.
+ */
+
+.board-code {
+    margin: 0 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--code-bg);
+}
+
+.board-code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 6px 2px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 20px;
+    user-select: none;
+}
+
+.board-copy {
+    margin-left: auto;
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+}
+.board-copy:hover {
+    color: var(--fg);
+    background: var(--tint);
+}
+
+.board-code-pre {
+    margin: 0;
+    padding: 10px 14px;
+    overflow-x: auto;
+}
+
+.board-block .board-code-text {
+    display: block;
+    width: max-content;
+    min-width: 100%;
+    padding: 0;
+    border-radius: 0;
+    background: none;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 20px;
+    white-space: pre;
+    cursor: text;
+}
+
+.board-code-text .hljs-comment,
+.board-code-text .hljs-quote { color: var(--muted); font-style: italic; }
+.board-code-text .hljs-keyword,
+.board-code-text .hljs-selector-tag,
+.board-code-text .hljs-section,
+.board-code-text .hljs-name,
+.board-code-text .hljs-tag { color: color-mix(in srgb, var(--ansi-magenta) 75%, var(--fg)); }
+.board-code-text .hljs-string,
+.board-code-text .hljs-regexp,
+.board-code-text .hljs-addition { color: color-mix(in srgb, var(--ansi-green) 75%, var(--fg)); }
+.board-code-text .hljs-number,
+.board-code-text .hljs-literal,
+.board-code-text .hljs-symbol,
+.board-code-text .hljs-bullet,
+.board-code-text .hljs-link,
+.board-code-text .hljs-meta { color: color-mix(in srgb, var(--ansi-cyan) 75%, var(--fg)); }
+.board-code-text .hljs-title,
+.board-code-text .hljs-attr,
+.board-code-text .hljs-attribute,
+.board-code-text .hljs-selector-id,
+.board-code-text .hljs-selector-class,
+.board-code-text .hljs-function { color: color-mix(in srgb, var(--ansi-yellow) 65%, var(--fg)); }
+.board-code-text .hljs-type,
+.board-code-text .hljs-built_in,
+.board-code-text .hljs-class { color: color-mix(in srgb, var(--ansi-blue) 70%, var(--fg)); }
+.board-code-text .hljs-variable,
+.board-code-text .hljs-params { color: var(--fg); }
+.board-code-text .hljs-deletion { color: var(--error-fg); }
+.board-code-text .hljs-emphasis { font-style: italic; }
+.board-code-text .hljs-strong { font-weight: 600; }

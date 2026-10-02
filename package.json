@@ -1,6 +1,6 @@
 {
-  "name": "oh-my-pi-chater",
-  "displayName": "PI Buddy — omp & pi Agent with Voice Pair Programmer",
+  "name": "pi-fellow",
+  "displayName": "Pi Fellow — omp & pi Agent with Voice Pair Programmer",
   "description": "Unofficial VS Code GUI for the omp (Oh My Pi) and pi coding agents, plus a voice AI pair-programming partner that talks with you, points at code, edits and debugs alongside you, or hands work to the agent.",
   "version": "0.1.0",
   "publisher": "zhenguo",
@@ -42,8 +42,8 @@
       "activitybar": [
         {
           "id": "oh-my-pi-chater",
-          "title": "PI Buddy",
-          "icon": "media/oh-my-pi-chater.svg"
+          "title": "Pi Fellow",
+          "icon": "media/icons/pi.svg"
         }
       ]
     },
@@ -52,7 +52,7 @@
         {
           "type": "webview",
           "id": "oh-my-pi-chater.chat",
-          "name": "PI Buddy"
+          "name": "Pi Fellow"
         }
       ]
     },
@@ -81,108 +81,108 @@
     "commands": [
       {
         "command": "oh-my-pi-chater.newChat",
-        "title": "PI Buddy: New Chat"
+        "title": "Pi Fellow: New Chat"
       },
       {
         "command": "oh-my-pi-chater.abort",
-        "title": "PI Buddy: Stop Generation"
+        "title": "Pi Fellow: Stop Generation"
       },
       {
         "command": "oh-my-pi-chater.selectModel",
-        "title": "PI Buddy: Select Model"
+        "title": "Pi Fellow: Select Model"
       },
       {
         "command": "oh-my-pi-chater.toggleThinking",
-        "title": "PI Buddy: Toggle Thinking Level"
+        "title": "Pi Fellow: Toggle Thinking Level"
       },
       {
         "command": "oh-my-pi-chater.openSessionTree",
-        "title": "PI Buddy: Session Branch Tree (/tree)"
+        "title": "Pi Fellow: Session Branch Tree (/tree)"
       },
       {
         "command": "oh-my-pi-chater.focusChat",
-        "title": "PI Buddy: Focus Chat"
+        "title": "Pi Fellow: Focus Chat"
       },
       {
         "command": "oh-my-pi-chater.toggleDictation",
-        "title": "PI Buddy: Toggle Voice Input"
+        "title": "Pi Fellow: Toggle Voice Input"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.debugWorkerControl",
-        "title": "PI Buddy: Voice Agent — Debug Worker Control"
+        "title": "Pi Fellow: Voice Agent — Debug Worker Control"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.typeMessage",
-        "title": "PI Buddy: Voice Agent — Type a Message"
+        "title": "Pi Fellow: Voice Agent — Type a Message"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.start",
-        "title": "PI Buddy: Voice Agent — Start Voice Mode"
+        "title": "Pi Fellow: Voice Agent — Start Voice Mode"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.stop",
-        "title": "PI Buddy: Voice Agent — Stop"
+        "title": "Pi Fellow: Voice Agent — Stop"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.toggleMute",
-        "title": "PI Buddy: Voice Agent — Mute / Unmute Microphone"
+        "title": "Pi Fellow: Voice Agent — Mute / Unmute Microphone"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.hush",
-        "title": "PI Buddy: Voice Agent — Stop Speaking"
+        "title": "Pi Fellow: Voice Agent — Stop Speaking"
       },
       {
         "command": "oh-my-pi-chater.voiceAgent.clearHighlight",
-        "title": "PI Buddy: Voice Agent — Clear Pi Highlight"
+        "title": "Pi Fellow: Voice Agent — Clear Pi Highlight"
       },
       {
         "command": "oh-my-pi-chater.voiceView.show",
-        "title": "PI Buddy: Voice Agent — Show Bot View"
+        "title": "Pi Fellow: Voice Agent — Show Bot View"
       },
       {
         "command": "oh-my-pi-chater.voiceView.history",
-        "title": "PI Buddy: Voice Agent — Past Conversations",
+        "title": "Pi Fellow: Voice Agent — Past Conversations",
         "icon": "$(history)"
       },
       {
         "command": "oh-my-pi-chater.attachFilesFromExplorer",
-        "title": "PI Buddy: Add to Chat"
+        "title": "Pi Fellow: Add to Chat"
       },
       {
         "command": "oh-my-pi-chater.openSettings",
-        "title": "PI Buddy: Open Settings"
+        "title": "Pi Fellow: Open Settings"
       },
       {
         "command": "oh-my-pi-chater.openMcpSettings",
-        "title": "PI Buddy: MCP Settings (/mcp)"
+        "title": "Pi Fellow: MCP Settings (/mcp)"
       },
       {
         "command": "oh-my-pi-chater.login",
-        "title": "PI Buddy: Login (/login)"
+        "title": "Pi Fellow: Login (/login)"
       },
       {
         "command": "oh-my-pi-chater.logout",
-        "title": "PI Buddy: Logout (/logout)"
+        "title": "Pi Fellow: Logout (/logout)"
       },
       {
         "command": "oh-my-pi-chater.reloadSession",
-        "title": "PI Buddy: Reload Session (/reload)"
+        "title": "Pi Fellow: Reload Session (/reload)"
       },
       {
         "command": "oh-my-pi-chater.installRecommendedPackages",
-        "title": "PI Buddy: Install Recommended Packages"
+        "title": "Pi Fellow: Install Recommended Packages"
       },
       {
         "command": "oh-my-pi-chater.browsePackages",
-        "title": "PI Buddy: Browse Package Catalog"
+        "title": "Pi Fellow: Browse Package Catalog"
       },
       {
         "command": "oh-my-pi-chater.rebuildNativeModules",
-        "title": "PI Buddy: Rebuild Pi Native Modules"
+        "title": "Pi Fellow: Rebuild Pi Native Modules"
       }
     ],
     "configuration": {
-      "title": "PI Buddy",
+      "title": "Pi Fellow",
       "properties": {
         "oh-my-pi-chater.backend": {
           "type": "string",
@@ -363,7 +363,7 @@
         "oh-my-pi-chater.voiceAgent.model": {
           "type": "string",
           "default": "",
-          "description": "Voice agent: model (provider/id) for the voice conversation, on the active backend (omp or pi). Empty uses the current chat tab's model when the voice agent starts. Takes effect after Voice Agent — Stop."
+          "description": "Voice agent: model (provider/id) for the voice conversation, on the active backend (omp or pi), separate from the chat's model. Empty uses the current chat tab's model when the voice agent starts. A change applies to a running voice agent from its next reply. Also set by the model chip under the Bot view's text box and in Settings → Voice."
         },
         "oh-my-pi-chater.voiceAgent.thinking": {
           "type": "string",
@@ -384,7 +384,7 @@
           },
           "default": [],
           "uniqueItems": true,
-          "description": "Voice agent: names of the installed skills it loads (Settings → Voice), next to its built-in show-me and grilling skills, which are always loaded. Empty loads only the built-ins. omp loads them by name, pi by their SKILL.md files. Takes effect after Voice Agent — Stop."
+          "description": "Voice agent: names of the installed skills it loads (Settings → Voice), next to its built-in grilling skill, which is always loaded. Empty loads only the built-in. omp loads them by name, pi by their SKILL.md files. Takes effect after Voice Agent — Stop."
         },
         "oh-my-pi-chater.voiceAgent.extraPrompt": {
           "type": "string",
@@ -572,7 +572,7 @@
         "oh-my-pi-chater.voiceAgent.userAvatar": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Voice view: your avatar in the Bot view. A preset (the default icons `preset:user` and `preset:robot`, or pixel art: `preset:uncle`, `preset:boy`, `preset:cat`, `preset:otaku`, `preset:woman`, `preset:gentleman`; also clickable in Settings → Voice), an emoji or up to two characters (e.g. `🦊`, `ZG`), or the path of a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB; `~` is your home folder, a relative path starts at the workspace folder). Empty: the default icon."
+          "markdownDescription": "Voice view: your avatar in the Bot view. A preset (the line icons `preset:user` and `preset:robot`, or pixel art: `preset:uncle`, `preset:boy`, `preset:cat`, `preset:otaku`, `preset:woman`, `preset:gentleman`; also clickable in Settings → Voice), an emoji or up to two characters (e.g. `🦊`, `ZG`), or the path of a picture (PNG, JPEG, GIF, WebP or SVG, under 2 MB; `~` is your home folder, a relative path starts at the workspace folder). Empty: the otaku (`preset:otaku`)."
         },
         "oh-my-pi-chater.voiceAgent.botName": {
           "type": "string",
@@ -583,7 +583,7 @@
         "oh-my-pi-chater.voiceAgent.botAvatar": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Voice view: the voice agent's avatar in the Bot view, like `#oh-my-pi-chater.voiceAgent.userAvatar#`. Empty: the robot."
+          "markdownDescription": "Voice view: the voice agent's avatar in the Bot view, like `#oh-my-pi-chater.voiceAgent.userAvatar#`. Empty: the gentleman (`preset:gentleman`)."
         }
       }
     }
@@ -594,13 +594,14 @@
     "typecheck": "tsc --noEmit -p . && tsc -p src/webview",
     "lint:css": "stylelint \"src/webview/styles/**/*.css\"",
     "vscode:prepublish": "npm run compile",
-    "package": "npm run compile && npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository",
-    "publish": "npx @vscode/vsce publish --no-dependencies --allow-missing-repository",
-    "package:verify": "unzip -l oh-my-pi-chater-*.vsix | grep -E 'out/webview/styles|media/icons' && ! unzip -l oh-my-pi-chater-*.vsix | grep -E 'sherpa-onnx|\\.(node|so|dylib|dll)$'",
+    "package": "npm run compile && node esbuild.js --readme && npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository --readme-path .tmp/README.vsix.md --out .tmp/",
+    "package:install": "npm run package && code --install-extension \"$(ls -t .tmp/pi-fellow-*.vsix | head -n 1)\" --force",
+    "publish": "node esbuild.js --readme && npx @vscode/vsce publish --no-dependencies --no-rewrite-relative-links --allow-missing-repository --readme-path .tmp/README.vsix.md",
+    "package:verify": "unzip -l .tmp/pi-fellow-*.vsix | grep -E 'out/webview/styles|media/icons' && ! unzip -l .tmp/pi-fellow-*.vsix | grep -E 'sherpa-onnx|\\.(node|so|dylib|dll)$'",
     "test": "vitest",
     "test:unit": "vitest run",
     "eval:voice": "vitest run -c vitest.eval.config.ts",
-    "test:integration": "node out/test/integration/runTest.js",
+    "test:integration": "node esbuild.js --integration && node out/test/integration/runTest.js",
     "test:all": "npm run test:unit && npm run test:integration"
   },
   "dependencies": {
@@ -620,7 +621,9 @@
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.25.0",
+    "highlight.js": "^11.12.0",
     "jsdom": "^26.1.0",
+    "mermaid": "^12.0.0",
     "mocha": "^11.0.0",
     "onnxruntime-web": "^1.30.0",
     "stylelint": "^17.15.0",

@@ -60,6 +60,11 @@ export type VoiceAgentAction =
     | { type: 'hush' }
     /** The follow button in the status line: whether the editor follows Pi's focus; remembered in the `followPi` setting. */
     | { type: 'follow'; following: boolean }
+    /**
+     * The model chip in the Bot view's composer: the voice agent's model (`voiceAgent.model`,
+     * `provider/id`; empty takes the chat tab's). Never the worker's: the chat's chip sets that one.
+     */
+    | { type: 'model'; model: string }
     /** Typed in the composer for the voice agent: goes in like speech. */
     | { type: 'send'; text: string; attachments?: VoiceAttachments };
 
@@ -68,18 +73,40 @@ export type VoiceAgentAction =
  * them from the chat tab's pending attachments; the webview never sends them.
  */
 export interface VoiceAttachments {
-    /** Shown with the message in the Bot view. */
+    /** The attachments that are not images (or images without a file): their names follow the message text in the Bot view. */
     names: string[];
+    /** The attached image files: shown on an image card under the message in the Bot view. */
+    imageFiles: VoiceImage[];
     /** Image parts of the user message to the voice model. */
     images: ImageContent[];
     /** `<file>` blocks for the voice model: text files' contents, images' paths. */
     files: string;
 }
 
-/** The user's message as the Bot view shows it: the text, then the attachments' names. */
-export function voiceUserText(text: string, attachments?: VoiceAttachments): string {
+/** An image the user attached to a message, as the Bot view shows it. */
+export interface VoiceImage {
+    name: string;
+    /** The image file: its full-size view opens it in the editor. */
+    path: string;
+    /**
+     * A webview URI of `path`, set only in the view's snapshots, when the file is in a folder the
+     * webview may load from; without it, the view reads the file through `readImageFile`.
+     */
+    src?: string;
+}
+
+/** A user's message as the Bot view shows it. */
+export interface VoiceUserMessage {
+    /** The text, then the names of the attachments that are not images. */
+    text: string;
+    /** Attached images, on the message's image card. */
+    images?: VoiceImage[];
+}
+
+export function voiceUserMessage(text: string, attachments?: VoiceAttachments): VoiceUserMessage {
     const names = attachments?.names.map((name) => `[${name}]`) ?? [];
-    return [text, ...names].filter(Boolean).join(' ');
+    const shown = [text, ...names].filter(Boolean).join(' ');
+    return attachments?.imageFiles.length ? { text: shown, images: attachments.imageFiles } : { text: shown };
 }
 
 /**
@@ -176,6 +203,8 @@ export type VoiceEntry =
           bargeIn?: boolean;
           /** Voice mode, spoken turns: how long hearing it took. */
           latency?: VoiceHearing;
+          /** Images attached in the composer, shown on an image card under the message. */
+          images?: VoiceImage[];
       }
     | {
           kind: 'assistant';
@@ -241,7 +270,11 @@ export interface VoiceRequestCard {
 export interface VoiceEngines {
     /** Voice mode is running: the values are in use, not just configured. */
     running: boolean;
-    llm: { model?: string; thinking: string };
+    /**
+     * `model`: what the voice agent runs (`provider/id`), or will at start; `setting`: `voiceAgent.model`
+     * as chosen, empty when it takes the chat tab's model.
+     */
+    llm: { model?: string; setting: string; thinking: string };
     stt: { url: string; model: string; language: string };
     tts: { engine: 'built-in' | 'custom'; url: string; model: string; voice: string; speed: number; language: string };
 }
@@ -362,4 +395,6 @@ export type VoiceViewClientMessage =
      * A double-click in the read aloud now: read on from `fraction` (0..1, by characters) into its
      * `part`, playing even when it was paused.
      */
-    | { type: 'replaySeek'; part: number; fraction: number };
+    | { type: 'replaySeek'; part: number; fraction: number }
+    /** A Board card's "Open board": board `board` of the voice session the view shows. */
+    | { type: 'openBoard'; board: string };

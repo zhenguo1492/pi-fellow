@@ -94,7 +94,7 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
             return true;
         }
         await openSettingsSection(gui);
-        vscode.window.setStatusBarMessage(`PI Buddy: /${command} → settings`, 3000);
+        vscode.window.setStatusBarMessage(`Pi Fellow: /${command} → settings`, 3000);
         return true;
     }
 

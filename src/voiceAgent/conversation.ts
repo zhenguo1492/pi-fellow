@@ -265,7 +265,12 @@ function tryPrompt(s: ConvState, at: number): Step {
     const source = s.userBuffer.every((part) => part.source === 'text') ? 'text' : 'stt';
     const attached = s.userBuffer.flatMap((part) => (part.attachments ? [part.attachments] : []));
     const attachments: VoiceAttachments | undefined = attached.length
-        ? { names: attached.flatMap((a) => a.names), images: attached.flatMap((a) => a.images), files: attached.map((a) => a.files).join('') }
+        ? {
+              names: attached.flatMap((a) => a.names),
+              imageFiles: attached.flatMap((a) => a.imageFiles),
+              images: attached.flatMap((a) => a.images),
+              files: attached.map((a) => a.files).join(''),
+          }
         : undefined;
     const interrupted = s.interruptedNote;
     const { state, turnId } = newBot({ ...s, userBuffer: [], interruptedNote: undefined, metrics: { ...s.metrics, promptAt: at } });

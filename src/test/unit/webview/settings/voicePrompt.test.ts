@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SettingsData } from '../../../../shared/protocol';
+import { applySavedSettings } from '../../../../webview/settings/edits';
 import { settingsState } from '../../../../webview/settings/state';
 import { bindVoicePrompt } from '../../../../webview/settings/voicePrompt';
 import { buildVoiceTab } from '../../../../webview/settings/voiceSetup';
 
-const posted = vi.hoisted((): unknown[] => []);
+const posted = vi.hoisted((): Array<{ type: string }> => []);
 vi.mock('../../../../webview/settings/api', () => ({
-    vscode: { postMessage: (message: unknown) => posted.push(message), getState: () => undefined, setState: () => {} },
+    vscode: { postMessage: (message: { type: string }) => posted.push(message), getState: () => undefined, setState: () => {} },
 }));
 
 const data = {
@@ -16,17 +17,19 @@ const data = {
     voiceReadiness: { stt: { ok: true }, tts: { ok: true } },
     voiceApiKeys: { openai: false, groq: false },
     voiceSkills: [],
+    voiceModel: '',
+    voiceModels: [],
     voiceExtraPrompt: '',
     voiceDefaultPrompt: 'The editor arrives in <editor> on every message.\n\n```ts\nconst a = 1 < 2;\n```',
     voiceSpeakers: { user: { name: 'User', avatar: '' }, bot: { name: 'Bot', avatar: '' } },
     voiceprint: { enabled: false, threshold: 0.5, shortSpeech: 'stricter', denoise: false },
 } as unknown as SettingsData;
 
-/** A full page render, as a settings message from the host makes. */
+/** A full page render, as a settings message from the host makes: `extraPrompt` is the saved text. */
 function render(extraPrompt: string) {
     document.body.innerHTML = '';
-    settingsState.currentSettings = { ...structuredClone(data), voiceExtraPrompt: extraPrompt };
-    document.body.append(buildVoiceTab(settingsState.currentSettings), Object.assign(document.createElement('button'), { id: 'outside' }));
+    applySavedSettings({ ...structuredClone(data), voiceExtraPrompt: extraPrompt });
+    document.body.append(buildVoiceTab(settingsState.currentSettings!), Object.assign(document.createElement('button'), { id: 'outside' }));
     bindVoicePrompt();
 }
 
@@ -37,11 +40,12 @@ const view = () => document.querySelector<HTMLElement>('.voice-extra-prompt .voi
 describe('voice agent extra prompt', () => {
     beforeEach(() => {
         posted.length = 0;
-        settingsState.voiceExtraPromptDraft = undefined;
+        settingsState.edits.clear();
+        settingsState.voiceExtraPromptEditing = false;
         settingsState.voiceDefaultPromptOpen = false;
     });
 
-    it('shows a hint when empty, and saves what is typed once, on leaving the field', () => {
+    it('shows a hint when empty; what is typed is an unsaved edit, shown as Markdown on View', () => {
         render('');
         expect(document.querySelector('.voice-extra-prompt-empty')?.textContent).toContain('No extra instructions');
         toggle().click();
@@ -49,15 +53,15 @@ describe('voice agent extra prompt', () => {
         expect([input.value, document.activeElement]).toEqual(['', input]);
         input.value = 'Call me **Captain**.';
         input.dispatchEvent(new Event('input'));
-        input.dispatchEvent(new Event('blur'));
         toggle().click();
 
-        expect(posted).toEqual([{ type: 'updateSetting', key: 'voiceAgent.extraPrompt', value: 'Call me **Captain**.' }]);
+        expect(posted.filter((m) => m.type === 'saveSettings')).toEqual([]);
+        expect(settingsState.edits.get('voiceAgent.extraPrompt')?.edit).toEqual({ kind: 'setting', key: 'voiceAgent.extraPrompt', value: 'Call me **Captain**.' });
         expect(textarea()).toBeNull();
         expect(view()?.innerHTML).toContain('<strong>Captain</strong>');
     });
 
-    it('keeps the text being edited across a page render, and saves it on View', () => {
+    it('keeps the text being edited across a page render, and drops the edit once typed back to the saved text', () => {
         render('Be brief.');
         toggle().click();
         textarea()!.value = 'Be brief. <b>Really</b>.';
@@ -66,10 +70,14 @@ describe('voice agent extra prompt', () => {
         expect(textarea()?.value).toBe('Be brief. <b>Really</b>.');
 
         toggle().click();
-        expect(posted).toEqual([{ type: 'updateSetting', key: 'voiceAgent.extraPrompt', value: 'Be brief. <b>Really</b>.' }]);
         // Written for the model: tags show as text.
         expect(view()?.querySelector('b')).toBeNull();
         expect(view()?.textContent).toContain('<b>Really</b>');
+
+        toggle().click();
+        textarea()!.value = 'Be brief.';
+        textarea()!.dispatchEvent(new Event('input'));
+        expect(settingsState.edits.size).toBe(0);
     });
 });
 

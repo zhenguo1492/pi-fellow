@@ -457,7 +457,7 @@ export class PiRpcBridge {
 
     /**
      * Replaces the host-owned tool set; resolves with the registered names. Each call of one arrives
-     * as a `host_tool_call` event ({ id, toolName, arguments }), a `host_tool_cancel` ({ targetId })
+     * as a `host_tool_call` event ({ id, toolCallId, toolName, arguments }), a `host_tool_cancel` ({ targetId })
      * withdraws it, and sendHostToolResult answers it. omp: native. pi: needs `hostTools` at start.
      */
     async setHostTools(tools: RpcHostToolDefinition[]): Promise<string[]> {

@@ -85,7 +85,7 @@ export class VoiceInput implements vscode.Disposable {
             const stt = sttCheck();
             if (!stt.ok) {
                 this.post({ type: 'toast', variant: 'error', message: stt.reason ?? 'Speech-to-text is unavailable.' });
-                SettingsPanel.showWithSection('voice');
+                SettingsPanel.showWithSection('stt');
                 return;
             }
             const settings = readVoiceSettings();

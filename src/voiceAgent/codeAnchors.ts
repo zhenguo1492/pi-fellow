@@ -6,6 +6,8 @@
  * Pure; no I/O.
  */
 
+import type { BoardTarget } from '../shared/board';
+
 /**
  * Lines are 1-based and inclusive; neither lines nor symbol means the whole file. Lines with a
  * symbol: that name as written on those lines, not a declared symbol.
@@ -46,6 +48,22 @@ export function parseAnchor(body: string): CodeAnchor | undefined {
         return undefined;
     }
     return symbol ? { path: where, symbol } : { path: where };
+}
+
+const BOARD_PATH = /^board:(?:([^/\s]+)\/)?([^/\s]+)$/;
+
+/** A board marker, `⟦board:<block>…⟧` or `⟦board:<board>/<block>…⟧`; undefined for a code anchor. */
+export function boardTarget(anchor: CodeAnchor): BoardTarget | undefined {
+    const match = BOARD_PATH.exec(anchor.path);
+    if (!match) {
+        return undefined;
+    }
+    return {
+        ...(match[1] ? { board: match[1] } : {}),
+        block: match[2],
+        ...(anchor.startLine !== undefined ? { startLine: anchor.startLine, endLine: anchor.endLine ?? anchor.startLine } : {}),
+        ...(anchor.symbol ? { text: anchor.symbol } : {}),
+    };
 }
 
 /** The anchor as the model writes it, without the brackets: for logs. */

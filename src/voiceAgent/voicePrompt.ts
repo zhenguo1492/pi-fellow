@@ -1,3 +1,4 @@
+import type { BoardEditNotice, BoardListing, BoardUserMarkInfo } from '../shared/board';
 import type { ExtensionUiQuestion } from '../shared/extensionUi';
 import type { DigestEntry } from './workerDigest';
 import { clip, formatDigest } from './workerDigest';
@@ -23,7 +24,7 @@ How you speak
 - Your replies are read aloud: one to three short spoken sentences, the outcome first. Longer only when asked.
 - No Markdown, lists, code blocks, emoji or URLs. Say paths and symbols the way a person would, "stt dot ts" or "the enqueue method of Speaker"; with a marker (see Pointing at code) say "here" or "this function" instead.
 - Summarize code and output in a sentence or two and point at it; never recite it.
-- When the user should see or copy something, such as a code example, a SQL query, a command line or a config snippet, call show_text with it: it appears as a card under your reply in the chat and is never read aloud. Say in a sentence what it shows.
+- When the user should see something rather than hear it, such as a code example, a command line, a diagram, a table, a short document, a UI prototype or an animated demo, call show_me with it: a line or two becomes a card under your reply in the chat, anything more is written on a board, a document in its own editor tab. It is never read aloud: say in a sentence what it shows, then explain it pointing with board markers. Same topic: add to the current board or rewrite one of its blocks; new topic: board "new" with a title.
 - Speak the language of the user's latest <user> message and keep it until they clearly switch. Worker updates, tool results, research and attachments never change it, nor does a lone word that speech recognition may have turned into another language.
 - source="stt" is speech recognition: take the most plausible meaning, and ask only when it matters, such as what to delete or which command to run. Spoken file and symbol names are often off: find the real one with glob or grep before you point at it or open it.
 - Before your first tool call in a turn, say a short sentence about what you are doing, "I'll add the check here" or 我先看看这个函数, in whichever language the user speaks: the first words of a turn with tool calls take seconds to arrive, and this way the user hears you right away. Between further calls say what you found or where you are going next; do not narrate every read, and do not work in silence for long.
@@ -41,6 +42,9 @@ Each message starts with context blocks, then what started the turn:
 - <approval-pending>: your own change or command waiting on its card in the chat. <approval-settled>: one the user answered; done ran and the result is the tool's, rejected did nothing, failed was approved but did not work.
 - <research status="running"> and <research-result>: a background lookup you started, and its findings.
 - <interrupted>: your previous reply was cut off; it says what the user actually heard.
+- <board>: what the user marked on a board, with board, title, block, kind, lines, node, or message (an arrow's label: a sequence message, with its step, or a flowchart edge), and the selected text as its body; in a web page (kind="web"), the element they Alt+clicked: its selector in the page, tag, id, class and text, with its HTML (cut short) as the body. It comes once, in the turn after they mark it, and stays marked until they clear it. latest="true": made after their last selection in the editor, so "this" and "here" mean it; otherwise the editor selection is newer.
+- <board-edited>: the user saved the board's source: what changed and the new outline. Your point on it was cleared; take block ids from this outline.
+- <boards>: this conversation's boards, when you join or come back.
 Then <user>, the user's words, possibly followed by <attached>, files and images from the chat (never read their contents or paths aloud); or <worker-update>, when nobody spoke; or <voice-on>, when voice just came on.
 You cannot see other tabs, the worker's full conversation, or files you have not read: say so rather than guess. worker_status gives more of the worker's log.
 
@@ -51,7 +55,8 @@ Dividing the work
 Pointing at code
 - A sentence about specific code starts with a marker, never shown or spoken: ⟦path:start-end⟧ for lines, ⟦path:line⟧ for one line, ⟦path#name⟧ for a function, class or method, ⟦path:line#name⟧ for a variable, parameter or field on that line, ⟦path⟧ for a whole file. Paths are workspace-relative, lines 1-based. The code is highlighted as the sentence is spoken, and a user following you sees their editor go there.
 - One marker per sentence at most. A question about what some code does gets the gist in a sentence or two at one marker; walk through a flow one place at a time, a sentence or two each, only when they ask for the walk-through. Use line numbers only from <editor>, a file you read or a tool result; otherwise point at the name.
-- When the user asks to open, show or go to somewhere, call open_file: a marker alone opens nothing when they are not following you. For a diagram or rendered file, list_viewers, then open_with. Keep Mermaid in a mermaid block of a .md file and open that with the Markdown side preview, so they edit on one side and watch it redraw on the other.
+- A sentence about a board starts with a board marker: ⟦board:<block>⟧ for a block, ⟦board:<block>:3-5⟧ for code lines in it, ⟦board:<block>#<text>⟧ for a passage, or in a diagram a node by id or label, else an arrow by its label (a sequence message, a flowchart edge label); ⟦board:<block>:2⟧ in a sequence diagram is its second message (steps count the messages in the order written, notes not counted); ⟦board:<board>/<block>…⟧ for a board other than the latest one written or shown. Block ids come from show_me results, <boards> and <board-edited>. One marker per sentence; your mark stays until the next.
+- When the user asks to open, show or go to somewhere, call open_file: a marker alone opens nothing when they are not following you. Diagrams and documents you draw go on a board with show_me; list_viewers and open_with are for existing files the user asks to see rendered.
 
 Looking things up
 - Quick questions answerable from a file or two: read, grep and glob, and answer yourself. Never send reading to the worker.
@@ -146,6 +151,12 @@ export interface TurnInput {
     /** How to sound this turn (`ToneDial`); absent with humor off. */
     tone?: Tone;
     interrupted?: string;
+    /** The user's mark on a board. */
+    board?: BoardUserMarkInfo;
+    /** Saves of a board's source since the last message. */
+    boardEdits?: BoardEditNotice[];
+    /** The conversation's boards: first message in a voice context only. */
+    boards?: BoardListing[];
 }
 
 const MAX_UPDATES = 20;
@@ -210,6 +221,26 @@ export function buildTurnMessage(input: TurnInput): string {
     }
     if (input.names && (input.names.bot !== DEFAULT_SPEAKER_NAMES.bot || input.names.user !== DEFAULT_SPEAKER_NAMES.user)) {
         blocks.push(`<names you="${attr(input.names.bot)}" user="${attr(input.names.user)}"/>`);
+    }
+    if (input.board) {
+        const { board, title, mark, latest } = input.board;
+        const lines = mark.startLine !== undefined ? ` lines="${mark.startLine}-${mark.endLine ?? mark.startLine}"` : '';
+        const node = mark.node ? ` node="${attr(mark.node)}"` : '';
+        const message = mark.message !== undefined ? `${mark.step !== undefined ? ` step="${mark.step}"` : ''} message="${attr(mark.message)}"` : '';
+        const el = mark.element;
+        const element = el
+            ? ` selector="${attr(el.selector)}" tag="${attr(el.tag)}"${el.id ? ` id="${attr(el.id)}"` : ''}${el.classes ? ` class="${attr(el.classes.join(' '))}"` : ''}${el.text ? ` text="${attr(el.text)}"` : ''}`
+            : '';
+        blocks.push(
+            `<board board="${attr(board)}" title="${attr(title)}" block="${attr(mark.block)}" kind="${mark.kind}"${lines}${node}${message}${element}${latest ? ' latest="true"' : ''}>${el ? el.html : (mark.text ?? '')}</board>`,
+        );
+    }
+    for (const edit of input.boardEdits ?? []) {
+        blocks.push(`<board-edited board="${attr(edit.board)}" title="${attr(edit.title)}" changes="${attr(edit.summary)}">\n${edit.outline}\n</board-edited>`);
+    }
+    if (input.boards?.length) {
+        const rows = input.boards.map((b) => `${b.id} "${attr(b.title)}"${b.open ? ' open' : ''}${b.current ? ' current' : ''}`);
+        blocks.push(`<boards>\n${rows.join('\n')}\n</boards>`);
     }
     if (input.editor) {
         blocks.push(editorBlock(input.editor));

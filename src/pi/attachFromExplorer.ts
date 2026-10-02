@@ -11,7 +11,7 @@ export function registerAttachFromExplorer(
             async (uri: vscode.Uri, uris?: vscode.Uri[]) => {
                 const sidebar = getSidebar();
                 if (!sidebar) {
-                    vscode.window.showWarningMessage('PI Buddy: chat is not ready yet.');
+                    vscode.window.showWarningMessage('Pi Fellow: chat is not ready yet.');
                     return;
                 }
 

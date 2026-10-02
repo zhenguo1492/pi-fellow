@@ -1,7 +1,7 @@
 /**
- * Settings → Voice, "Only my voice": record a voiceprint, test it, and how it is used. Unlike the
- * speech services above, these save at once (the toggles and the select by the page's generic
- * `[data-key]` handlers, the threshold here); the voiceprint itself is recorded by the host.
+ * Settings → Voice, "Only my voice": record a voiceprint, test it, and how it is used. Its settings
+ * are edits until the page's Save, like every setting (the toggles and the select by the page's
+ * generic `[data-key]` handlers, the threshold here); the voiceprint itself is recorded by the host.
  */
 import { escapeHtml } from '../../shared/html';
 import type { SettingsClientMessage, SettingsData } from '../../shared/protocol';
@@ -9,6 +9,7 @@ import type { VoiceprintStatus } from '../../shared/voiceprint';
 import { openVoiceprintDialog } from '../voiceprintDialog';
 import { vscode } from './api';
 import { buildSection, buildSelect, el } from './dom';
+import { setSetting } from './edits';
 import { settingsState } from './state';
 
 function toggle(key: string, label: string, checked: boolean): string {
@@ -131,9 +132,7 @@ export function bindVoiceprint(): void {
     if (threshold instanceof HTMLInputElement) {
         threshold.addEventListener('input', () => {
             document.getElementById('voiceprint-threshold-value')!.textContent = Number(threshold.value).toFixed(2);
-        });
-        threshold.addEventListener('change', () => {
-            post({ type: 'updateSetting', key: 'voice.voiceprint.threshold', value: Number(threshold.value) });
+            setSetting('voice.voiceprint.threshold', Number(threshold.value), threshold);
         });
     }
     renderVoiceprint();

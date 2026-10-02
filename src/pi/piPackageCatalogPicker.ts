@@ -119,7 +119,7 @@ export async function showPiPackageCatalogPicker(
                         piSession,
                         outputChannel,
                         (msg) => {
-                            void vscode.window.setStatusBarMessage(`PI Buddy: ${msg}`, 2000);
+                            void vscode.window.setStatusBarMessage(`Pi Fellow: ${msg}`, 2000);
                         },
                     );
                 },

@@ -48,8 +48,9 @@ export class SidebarBackends {
         this._currentWorkspace.activeTabId = id;
     }
 
-    get activeTab(): TabState {
-        return this.tabs.get(this.activeTabId)!;
+    /** Undefined when the user closed every tab. */
+    get activeTab(): TabState | undefined {
+        return this.tabs.get(this.activeTabId);
     }
 
     schedulePrewarmSession(delayMs = 500): void {

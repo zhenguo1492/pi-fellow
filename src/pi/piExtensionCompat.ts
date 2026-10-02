@@ -139,7 +139,7 @@ export async function rebuildAgentNativeModules(
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: 'PI Buddy: rebuilding Pi native modules...',
+            title: 'Pi Fellow: rebuilding Pi native modules...',
             cancellable: false,
         },
         async () => {
@@ -181,7 +181,7 @@ export async function rebuildAgentNativeModules(
                 const msg = err instanceof Error ? err.message : String(err);
                 outputChannel.appendLine(`Native rebuild failed: ${msg}`);
                 vscode.window.showErrorMessage(
-                    `Native rebuild failed. See Output → PI Buddy. ${msg.slice(0, 240)}`,
+                    `Native rebuild failed. See Output → Pi Fellow. ${msg.slice(0, 240)}`,
                 );
                 throw err;
             }

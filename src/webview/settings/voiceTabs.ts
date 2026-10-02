@@ -1,21 +1,19 @@
 /**
- * The Voice tab's sub-tabs (Voice engine, Listening and speaking, Voice agent). Panels only hide, so
+ * The Voice tab's sub-tabs (Speech-to-text, Text-to-speech, Voice agent). Panels only hide, so
  * their fields and listeners live on; the chosen one is kept in `settingsState` and the webview state.
  */
 import { vscode } from './api';
 import { el } from './dom';
+import { buildUnsavedDot, renderSaveBar } from './saveBar';
 import { settingsState } from './state';
 
-export type VoiceSubtab = 'engine' | 'listening' | 'agent';
+export type VoiceSubtab = 'stt' | 'tts' | 'agent';
 
 const VOICE_SUBTABS: ReadonlyArray<{ id: VoiceSubtab; label: string }> = [
-    { id: 'engine', label: 'Voice engine' },
-    { id: 'listening', label: 'Listening and speaking' },
+    { id: 'stt', label: 'Speech-to-text' },
+    { id: 'tts', label: 'Text-to-speech' },
     { id: 'agent', label: 'Voice agent' },
 ];
-
-/** Sub-tabs with draft fields: the Save bar shows under them. */
-const HAS_DRAFTS: Record<VoiceSubtab, boolean> = { engine: true, listening: true, agent: false };
 
 /** The sub-tab that holds `element`, if it is on the Voice tab. */
 export function voiceSubtabOf(element: Element | null): VoiceSubtab | undefined {
@@ -37,20 +35,7 @@ export function switchVoiceSubtab(subtab: VoiceSubtab, persist = true): void {
     document.querySelectorAll<HTMLElement>('[data-voice-subpanel]').forEach((panel) => {
         panel.hidden = panel.dataset.voiceSubpanel !== subtab;
     });
-    document.querySelectorAll<HTMLElement>('.voice-save-bar').forEach((bar) => {
-        bar.hidden = !HAS_DRAFTS[subtab];
-    });
-}
-
-/** The dot on a sub-tab whose fields have unsaved changes. */
-export function markVoiceSubtabUnsaved(subtab: VoiceSubtab, unsaved: boolean): void {
-    const btn = document.querySelector<HTMLButtonElement>(`[data-voice-subtab="${subtab}"]`);
-    const dot = btn?.querySelector<HTMLElement>('.voice-subtab-dot');
-    if (!btn || !dot) {
-        return;
-    }
-    dot.hidden = !unsaved;
-    btn.classList.toggle('unsaved', unsaved);
+    renderSaveBar();
 }
 
 function buildVoiceSubtabNav(): HTMLElement {
@@ -69,12 +54,7 @@ function buildVoiceSubtabNav(): HTMLElement {
         btn.tabIndex = selected ? 0 : -1;
         const label = el('span');
         label.textContent = tab.label;
-        const dot = el('span', 'voice-subtab-dot');
-        dot.hidden = true;
-        dot.title = 'Unsaved changes';
-        dot.setAttribute('role', 'img');
-        dot.setAttribute('aria-label', 'unsaved changes');
-        btn.append(label, dot);
+        btn.append(label, buildUnsavedDot());
         btn.addEventListener('click', () => switchVoiceSubtab(tab.id));
         nav.appendChild(btn);
     }
@@ -97,8 +77,8 @@ function buildVoiceSubtabNav(): HTMLElement {
     return nav;
 }
 
-/** The sub-tab bar, a panel per sub-tab, and the Save bar (shown under the sub-tabs with drafts). */
-export function buildVoiceSubtabs(panels: Record<VoiceSubtab, HTMLElement[]>, saveBar: HTMLElement): HTMLElement[] {
+/** The sub-tab bar, and a panel per sub-tab. */
+export function buildVoiceSubtabs(panels: Record<VoiceSubtab, HTMLElement[]>): HTMLElement[] {
     const built = VOICE_SUBTABS.map(({ id }) => {
         const panel = el('div', 'voice-subpanel');
         panel.id = `voice-subpanel-${id}`;
@@ -109,6 +89,5 @@ export function buildVoiceSubtabs(panels: Record<VoiceSubtab, HTMLElement[]>, sa
         panel.append(...panels[id]);
         return panel;
     });
-    saveBar.hidden = !HAS_DRAFTS[settingsState.voiceSubtab];
-    return [buildVoiceSubtabNav(), ...built, saveBar];
+    return [buildVoiceSubtabNav(), ...built];
 }

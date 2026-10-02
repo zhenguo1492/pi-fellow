@@ -7,6 +7,7 @@ import { modelStatusEl } from '../modelStatus';
 import { onAppShellRebuilt, requestSessionPanelToggle } from '../sessionPanel';
 import { focusTui, getTuiHost } from '../tuiView';
 import { bindVoiceBar, voiceBarHtml } from '../voiceBar';
+import { voiceIntro } from '../voicePanel';
 import { vscode } from '../vscodeApi';
 import { el } from './helpers';
 import { iconsBaseUri } from './icons';
@@ -51,11 +52,9 @@ export function render(): void {
 
     const tabOverflow = el('div', 'tab-overflow');
     tabOverflow.id = 'tab-overflow';
-    tabOverflow.hidden = true;
     tabOverflow.innerHTML = `
         <button type="button" class="tab-overflow-btn" id="btn-tab-overflow" title="All conversations" aria-label="Choose conversation" aria-haspopup="menu" aria-expanded="false">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 5.5l5 5 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span class="tab-overflow-count" aria-hidden="true"></span>
         </button>
         <div class="tab-overflow-menu" id="tab-overflow-menu" role="menu" hidden></div>
     `;
@@ -77,6 +76,22 @@ export function render(): void {
     // Over the conversation (and the TUI), as the Bot view's header is over its transcript.
     app.appendChild(modelStatusEl);
     app.appendChild(getTuiHost());
+
+    // Every tab closed (#app.no-tabs-mode, stateSync.ts): this in place of the conversation and composer,
+    // the Bot view's intro and Call button (voicePanel.ts, which handles both) over what can be opened.
+    // Like botHost, the intro is re-inserted, not rebuilt.
+    const noTabs = el('div', 'no-tabs');
+    const noTabsWelcome = el('div', 'vp-welcome');
+    noTabsWelcome.appendChild(voiceIntro);
+    noTabsWelcome.insertAdjacentHTML(
+        'beforeend',
+        `<div class="no-tabs-actions">
+            <button type="button" class="no-tabs-btn" id="btn-no-tabs-new">Open worker</button>
+            <button type="button" class="no-tabs-btn" id="btn-no-tabs-resume">Resume a session</button>
+        </div>`,
+    );
+    noTabs.appendChild(noTabsWelcome);
+    app.appendChild(noTabs);
 
     // Messages container (persistent, children managed by updateMessages)
     const messagesContainer = el('div', 'messages');
@@ -253,6 +268,13 @@ function bindStableEvents(): void {
     newTabBtn?.addEventListener('click', () =>
         vscode.postMessage({ type: 'createTab', backend: state.activeBackend }),
     );
+    document.getElementById('btn-no-tabs-new')?.addEventListener('click', () =>
+        vscode.postMessage({ type: 'createTab', backend: state.activeBackend }),
+    );
+    document.getElementById('btn-no-tabs-resume')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        requestSessionPanelToggle();
+    });
 
     bindTabOverflow();
     tuiBtn?.addEventListener('click', (e) => {

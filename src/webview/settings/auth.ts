@@ -1,6 +1,7 @@
 import { escapeHtml } from '../../shared/html';
 import type { AgentBackend, PiAgentConfigData, SettingsData } from '../../shared/protocol';
 import { buildReadOnlyRow, buildSection, el } from './dom';
+import { shownThinkingLevel } from './edits';
 import { emptyPiConfig } from './piConfig';
 import { buildTabPanel } from './tabs';
 
@@ -18,7 +19,7 @@ export function buildAuthTab(data: SettingsData): HTMLElement {
         ], 'auth'),
         buildSection(defaultsTitle, [
             buildPiModelDefaults(data, cfg),
-            buildPiThinkingSelect(data.piDefaultThinkingLevel ?? (isOmp ? 'high' : 'off')),
+            buildPiThinkingSelect(shownThinkingLevel(data)),
             buildPiModeSelect('steering', 'Steering mode', cfg.steeringMode),
             buildPiModeSelect('followup', 'Follow-up mode', cfg.followUpMode),
         ], 'defaults'),
@@ -106,8 +107,7 @@ function buildPiModelDefaults(data: SettingsData, cfg: PiAgentConfigData): HTMLE
                 ${modelOptionsHtml(cfg.availableModels, currentProvider, data.piDefaultModel ?? '')}
             </select>
         </div>
-        <button type="button" class="setting-btn primary" id="btn-save-pi-defaults">Save defaults</button>
-        <p class="setting-description">Saved to ${configFile} for new sessions; the chat tab shown now switches to it too.</p>
+        <p class="setting-description">Saved to ${configFile} for new sessions; on Save, the chat tab shown now switches to it too.</p>
     `;
     return row;
 }

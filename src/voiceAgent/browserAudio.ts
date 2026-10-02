@@ -61,9 +61,9 @@ export interface BrowserAudioEvents {
 
 const PAGE = `<!doctype html>
 <meta charset="utf-8">
-<title>PI Buddy · voice audio</title>
+<title>Pi Fellow · voice audio</title>
 <style>body { font: 14px system-ui, sans-serif; margin: 2em; background: #111; color: #ddd; }</style>
-<p>Microphone and speaker of PI Buddy's voice mode (Chrome echo cancellation). Keep this tab open while voice mode is on.</p>
+<p>Microphone and speaker of Pi Fellow's voice mode (Chrome echo cancellation). Keep this tab open while voice mode is on.</p>
 <button id="start" hidden>Start</button>
 <div id="status">Connecting…</div>
 <script>

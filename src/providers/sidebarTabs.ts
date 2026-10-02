@@ -427,15 +427,16 @@ export class SidebarTabs {
         }));
     }
 
-    async createTab(preferredBackend?: AgentBackend): Promise<void> {
+    /** A new tab, shown; returned before its worker is ready (`tabReady`). */
+    async createTab(preferredBackend?: AgentBackend): Promise<TabState> {
         const tab = await this.createEmptyTabState(preferredBackend ?? this._host.currentBackend);
         this._host.activeTabId = tab.id;
         this._host.sendStateSync();
+        return tab;
     }
 
+    /** Closes `tabId`; the last tab too: the chat then shows its empty state until a new tab or a resumed session. */
     private async _closeTab(tabId: string): Promise<void> {
-        if (this._host.tabs.size <= 1) return;
-
         const tab = this._host.tabs.get(tabId);
         if (!tab) return;
 
@@ -446,7 +447,7 @@ export class SidebarTabs {
         await this._discardTab(tab);
 
         if (wasActive) {
-            this._host.activeTabId = this._host.tabs.keys().next().value!;
+            this._host.activeTabId = this._host.tabs.keys().next().value ?? '';
         }
 
         this._host.sendStateSync();
@@ -459,11 +460,10 @@ export class SidebarTabs {
 
     /** Make `tabId` (one of the current backend's tabs) the shown tab, even when it already is the active one. */
     showTab(tabId: string): void {
+        const tab = this._host.tabs.get(tabId);
+        if (!tab) return;
         this._host.activeTabId = tabId;
-
-        const tab = this._host.activeTab;
         tab.hasNotification = false;
-
         this._host.sendStateSync();
         this._host.postModelFooter(tab);
         this._modelStatus?.setSession(tab.session);

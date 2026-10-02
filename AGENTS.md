@@ -1,6 +1,6 @@
-# AGENTS.md — PI Buddy architecture and development guide
+# AGENTS.md — Pi Fellow architecture and development guide
 
-PI Buddy (extension ID `zhenguo.oh-my-pi-chater`, derived from the MIT-licensed [vscode-pi-agent](https://github.com/FChatin/vs-pi-agent)) puts the Pi coding agent (pi or omp) in the VS Code sidebar. This file is the entry point; details live in `docs/` (see [Topic docs](#topic-docs)).
+Pi Fellow (extension ID `zhenguo.pi-fellow`, derived from the MIT-licensed [vscode-pi-agent](https://github.com/FChatin/vs-pi-agent)) puts the Pi coding agent (pi or omp) in the VS Code sidebar. This file is the entry point; details live in `docs/` (see [Topic docs](#topic-docs)).
 
 ## 1. What it is and how it works
 
@@ -44,12 +44,13 @@ src/
 │   └── settings-panel.ts   # Settings WebviewPanel (models, providers, API keys, voice, …)
 ├── shared/                 # Code shared by host and webviews
 │   ├── protocol.ts         # ClientMessage / ServerMessage: webview <-> host protocol
+│   ├── board.ts            # Blackboards: blocks and ids, outline, board page protocol, show_me card rule
 │   ├── planMessageFilter.ts# Plan-mode message filtering/parsing
 │   ├── html.ts             # escapeHtml: the only HTML escaper (& < > " ')
 │   └── voice*.ts, avatarPresets.ts, translationLanguages.ts  # Voice presets, view protocol, speakers
 ├── utils/                  # fileEditor.ts (FileEditorTracker), diff.ts
 ├── voice/                  # Dictation, STT client, VAD, voice settings, voiceprint gate; builtinEngine/ (local STT/TTS/speaker/denoise server)
-├── voiceAgent/             # Voice agent: VoiceMode, VoiceLlm, HostToolRouter, FloorArbiter, replay, …
+├── voiceAgent/             # Voice agent: VoiceMode, VoiceLlm, HostToolRouter, FloorArbiter, replay, blackboard.ts (board tabs), …
 └── webview/
     ├── main.ts             # Chat entry: mounts Bot view, message listener, message actions, render()
     ├── chat/               # Chat UI modules (one-way deps, no import cycles; tests in src/test/unit/webview/chat/)
@@ -62,16 +63,17 @@ src/
     │   ├── composer.ts / composerInput.ts / composerChips.ts / slashMenu.ts / queuedBanner.ts  # Composer, keys, chips, slash menu, queued messages
     │   ├── permission.ts   # Modes menu (Manual / Edit automatically / Plan / Auto)
     │   └── helpers.ts / markdown.ts / messageContent.ts / scroll.ts / …  # Pure helpers
-    ├── settings.ts + settings/  # Settings webview: state.ts (only mutable settingsState), api, tabs, render, per-tab modules
+    ├── settings.ts + settings/  # Settings webview: state.ts (only mutable settingsState), api, tabs, render, edits.ts (unsaved edits) + saveBar.ts (one Save / Discard), per-tab modules
     ├── toolView.ts         # Tool card shell (status dot, name, summary, collapsible body, partial output)
+    ├── board/              # Board page (blackboard): Markdown, Mermaid, highlight.js, web pages (web.ts: ```html in sandboxed frames; webElement.ts: the element an Alt + click in one picks), Pi's and the user's marks
     ├── toolCards/          # Per-tool renderers; registry.ts; parts.ts DOM blocks; util.ts pure helpers
     ├── modelPicker.ts / modelStatus.ts  # Favorite-model chip; model status bar
     ├── fileMentionMenu.ts / fileDropReaders.ts  # @ mentions; drag-and-drop files/images
-    ├── voiceBar.ts / voicePanel.ts / dictation.ts / sentence*.ts / selectionToolbar.ts / readAlong.ts / translatePopup.ts  # Voice UI
+    ├── voiceBar.ts / voicePanel.ts / voiceImages.ts / dictation.ts / sentence*.ts / selectionToolbar.ts / readAlong.ts / translatePopup.ts  # Voice UI (voiceImages.ts: Bot view image cards and viewer)
     ├── avatar.ts / avatarMotion.ts  # Avatar markup; the voice bar avatar talking (bot level) and thinking
     ├── vscodeApi.ts        # acquireVsCodeApi singleton
     ├── tsconfig.json       # Webview typecheck (DOM lib)
-    └── styles/             # main.css / settings.css: entries esbuild bundles; tokens.css (shared theme tokens); chat/*.css modules (toolCards.css, voice.css = Bot view, …)
+    └── styles/             # main.css / settings.css / board.css: entries esbuild bundles; tokens.css (shared theme tokens); chat/*.css modules (toolCards.css, voice.css = Bot view, …); board/*.css
 ```
 
 ## 3. Architecture and data flow
@@ -118,6 +120,7 @@ src/
 - **Model/skill lists load in the background.** `get_available_models` waits for provider discovery; never block initialization on it (`_refreshModelsAndSkills`, `onDidChangeCatalog`).
 - **TUI tabs own their session file.** The idle RPC worker behind a TUI tab is never used: `SidebarWorker` drives the TUI itself (prompts typed in, Escape to stop, the screen read through `ScreenReader` in `src/pi/terminalScreen.ts`). See [docs/tabs-and-tui.md](docs/tabs-and-tui.md#tui-tabs-and-the-voice-agent).
 - **API keys never reach settings.json or the webview.** Voice keys live in SecretStorage; the user's own server never receives a key.
+- **Settings are drafts until Save.** Every setting on the settings page is an edit (`src/webview/settings/edits.ts`; the voice services' forms are `voiceSetup.ts` drafts) shown over the saved settings (`currentSettings` = `savedSettings` + edits) until the page's one Save bar (`saveBar.ts`) sends them (`saveSettings`, `saveVoice`); an edit the host's settings already hold drops. Actions (log in, install a package, Test, Try, record a voiceprint) still act at once. A new setting control goes through `setSetting` / `setEdit`, never a direct write.
 
 ## 5. Key file index
 
@@ -143,13 +146,14 @@ src/
 | `src/voice/voiceprint.ts` + `speakerGate.ts` | `speechGate`, `SpeakerGate` | Only your voice reaches voice input: enrollment storage (globalState), cosine check, noise reduction ([docs/voice.md](docs/voice.md#voiceprint-only-your-voice-srcvoicevoiceprintts-speakergatets)) |
 | `src/voiceAgent/` | `VoiceAgent`, `VoiceMode`, `VoiceLlm`, `HostToolRouter`, `FloorArbiter` | Voice agent ([docs/voice-agent.md](docs/voice-agent.md)) |
 | `src/voiceAgent/speakers.ts` | `resolveSpeakers` | Names and avatars in the Bot view |
+| `src/voiceAgent/blackboard.ts` + `src/shared/board.ts` | `Blackboards`, `parseBoard`, `showMeIsCard` | Blackboards: `show_me` boards, markers, the user's mark, source edits ([docs/blackboard.md](docs/blackboard.md)) |
 
 ## 6. Build, typecheck, and dev
 
 - **Build:** `npm run compile` (`node esbuild.js`, bundles `src/extension.ts`, the webviews and their stylesheets, the CLI extensions in `src/piExtension/`, and the voice engine into `out/`). Watch: `npm run watch` (CSS included).
 - **CSS lint:** `npm run lint:css` (stylelint, `.stylelintrc.json`).
 - **Typecheck:** esbuild does not typecheck. Run `npm run typecheck` (host `tsconfig.json` + `src/webview/tsconfig.json`) after changes.
-- **Tests:** `npm run test:unit` (vitest, `src/test/unit/`); `npm run test:integration` runs in VS Code from `out/test/integration/`.
+- **Tests:** `npm run test:unit` (vitest, `src/test/unit/`); `npm run test:integration` builds `src/test/integration/` with `node esbuild.js --integration` (the voice model swapped for the scripted `fakes/voiceLlm.ts`) and runs it in a downloaded VS Code; run `npm run compile` first, the suites load `out/`.
 - **Package:** `npm run package` builds one universal VSIX with `--no-dependencies`; esbuild copies the VAD WASM into `out/`. No native binaries ship: the built-in voice engine's sherpa-onnx runtime downloads on first use (`src/voice/builtinEngine/runtime.ts`); `npm run package:verify` fails if a VSIX contains any.
 - **Runtime requirement:** an `omp` or `pi` CLI on PATH, or set `oh-my-pi-chater.cliPath`. `oh-my-pi-chater.backend` (`auto` / `omp` / `pi`) picks the family; `auto` prefers omp. State lives in `~/.omp/agent` or `~/.pi/agent`.
 - **Thinking level:** `oh-my-pi-chater.thinkingLevel` (`off`, `minimal`, `low`, `medium`, `high`) is passed to the CLI; only reasoning models emit thinking.
@@ -167,3 +171,4 @@ src/
 | [docs/sentence-replay.md](docs/sentence-replay.md) | Alt+click read-aloud and Alt+right-click translation of sentences (Alt+Shift: paragraphs) and of mouse selections (selection bar) in chat and Bot view; the picked text stays the region (click: pause/resume or read again, double-click: read from a word, right-click: translate); read-along sentence highlight |
 | [docs/voice-agent-design.md](docs/voice-agent-design.md) | Voice agent design and rationale (§5.12 multi-session rules, §5.13 text fallback, §14.1 progress) |
 | [docs/voice-pair-agent-cursor.md](docs/voice-pair-agent-cursor.md) | Pair design: agent cursor, Follow Pi, editing by hand (§11 worker file lock) |
+| [docs/blackboard.md](docs/blackboard.md) | Blackboards: `show_me` writes Markdown, Mermaid and live ```html web pages (sandboxed srcdoc frames, frame nonce, laid out at a design size from a viewport meta tag or the column and scaled like a picture) on board tabs, the agent points with `⟦board:…⟧` markers (blocks, code lines, nodes, sequence messages and edges), the user marks back (`<board>`), placement and maximize, zoom (page, and per diagram and web page) and a diagram or web page expanded to fill the board (Escape, pan drags and zoom keys inside a frame forwarded through its port), links, source edits (`<board-edited>`), resume |

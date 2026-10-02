@@ -1,16 +1,18 @@
 /**
  * The voice agent's place in the composer (docs/voice-agent-design.md §11): a status line over the
  * input box, and where typed text goes. The avatar and its label are one button that switches the
- * tab between the worker's conversation (or its TUI) and the Bot view; while voice mode is on the
- * label says what it is doing (listening, thinking, …). The phone button at the right end starts
- * voice mode (microphone and speaker) and, while it is on, hangs up.
+ * tab between the worker's conversation (or its TUI) and the Bot view, and shows where it leads:
+ * the voice agent's avatar and name from the worker's side, π and the backend (OMP / Pi) from the
+ * Bot view. While voice mode is on the label on the worker's side says what it is doing (listening,
+ * thinking, …). The phone button at the right end starts voice mode (microphone and speaker) and,
+ * while it is on, hangs up.
  * The follow button next to the avatar sets whether the editor follows Pi's focus (docs/voice-pair-agent-cursor.md).
  * A speech service that does not work does not keep it offline: it runs without it (design §5.13),
  * and a grey tag says so ("Can't hear", "No voice"; a click opens Settings → Voice).
  * The composer talks to what the tab shows: its conversation → the omp worker, the Bot view → the
  * voice agent, by voice mode while it is on and as a text chat otherwise.
  */
-import type { VoiceReadiness } from '../shared/protocol';
+import type { AgentBackend, VoiceReadiness } from '../shared/protocol';
 import { voiceIsOn, type VoiceAgentAction, type VoicePhase, type VoiceStatus } from '../shared/voiceViewProtocol';
 import { DEFAULT_SPEAKER_NAMES } from '../shared/voiceSpeakers';
 import { ICON_ROBOT } from './avatar';
@@ -34,6 +36,9 @@ const ICON_FOLLOW_ON =
     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/></svg>';
 const ICON_FOLLOW_OFF =
     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/><path d="M2.5 13.5l11-11"/></svg>';
+/** π: the Bot view's way back to the worker (pi or omp). */
+const ICON_PI =
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.2 5.6C2.7 4.8 3.4 4.4 4.4 4.4h9.3"/><path d="M6.3 4.4v4.3c0 2.1-.8 3.5-2.3 4.3"/><path d="M10.6 4.4v6.8c0 1 .5 1.5 1.3 1.5.7 0 1.2-.4 1.6-1"/></svg>';
 
 /** Muted is shown as a tag next to the phase, not as a phase of its own. */
 type ShownPhase = Exclude<VoicePhase, 'muted'>;
@@ -74,6 +79,8 @@ let readiness: VoiceReadiness | undefined;
 let botViewShown = false;
 /** The active tab is in TUI mode: leaving the Bot view goes back to its terminal. */
 let botViewOverTui = false;
+/** The worker's name on the button in the Bot view: the active tab's backend. */
+let workerName = 'Pi';
 /** The voice agent's name and avatar (`voiceAgent.botName`, `voiceAgent.botAvatar`, as the Bot view draws it); the robot by default. */
 let botName = DEFAULT_SPEAKER_NAMES.bot;
 let robotHtml = ICON_ROBOT;
@@ -131,7 +138,8 @@ export function bindVoiceBar(): void {
                 }
                 return;
             case 'settings':
-                vscode.postMessage({ type: 'openSettings', section: 'voice' });
+                // Its service's sub-tab: "Can't hear" opens Speech-to-text, "No voice" Text-to-speech.
+                vscode.postMessage({ type: 'openSettings', section: (e.target as HTMLElement).closest<HTMLElement>('[data-service]')?.dataset.service ?? 'voice' });
                 return;
             case 'follow':
                 if (status) {
@@ -158,11 +166,20 @@ export function setVoiceReadiness(next: VoiceReadiness): void {
 
 /**
  * The avatar button switches the active tab between the worker's conversation, or its TUI (`tuiTab`),
- * and the Bot view; it says which one a click brings.
+ * and the Bot view; it shows and says which one a click brings: π and `backend` from the Bot view.
  */
-export function setBotViewShown(shown: boolean, tuiTab = false): void {
+export function setBotViewShown(shown: boolean, tuiTab = false, backend: AgentBackend = 'pi'): void {
     botViewShown = shown;
     botViewOverTui = tuiTab;
+    workerName = backend === 'omp' ? 'OMP' : 'Pi';
+    render();
+}
+
+/** The active tab's worker is running a task: π in the Bot view turns into a rotating rainbow, like the tab icon. */
+let workerBusy = false;
+export function setWorkerBusy(busy: boolean): void {
+    if (workerBusy === busy) return;
+    workerBusy = busy;
     render();
 }
 
@@ -209,12 +226,14 @@ function render(): void {
     bar.querySelector<HTMLElement>('.voice-bar-muted')!.hidden = !muted;
     // Set only when it changed (also on a rebuilt bar): re-parsing it would restart the starting pulse.
     const robot = bar.querySelector<HTMLElement>('.voice-bar-robot')!;
-    if (robot.dataset.version !== String(robotVersion)) {
-        robot.dataset.version = String(robotVersion);
-        robot.innerHTML = robotHtml;
+    const robotKey = botViewShown ? 'worker' : String(robotVersion);
+    if (robot.dataset.version !== robotKey) {
+        robot.dataset.version = robotKey;
+        robot.innerHTML = botViewShown ? ICON_PI : robotHtml;
     }
     // The Bot view animates its latest reply's avatar instead: one talking avatar on screen, not two.
     robot.classList.toggle('av-motion', !botViewShown);
+    robot.classList.toggle('voice-bar-pi-busy', botViewShown && workerBusy);
     const problems = { stt: serviceProblem('stt'), tts: serviceProblem('tts') };
     for (const service of ['stt', 'tts'] as const) {
         const tag = bar.querySelector<HTMLElement>(`[data-service="${service}"]`)!;
@@ -228,7 +247,15 @@ function render(): void {
     const voiceless = on && !status?.starting && problems.tts !== undefined;
     const idle = phase === 'listening';
     const label = bar.querySelector<HTMLElement>('.voice-bar-label')!;
-    label.textContent = status?.starting ? 'Starting…' : idle && (muted || deaf) ? 'Online' : phase === 'off' ? botName : PHASE_LABEL[phase];
+    label.textContent = botViewShown
+        ? workerName
+        : status?.starting
+          ? 'Starting…'
+          : idle && (muted || deaf)
+            ? 'Online'
+            : phase === 'off'
+              ? botName
+              : PHASE_LABEL[phase];
     const viewTitle = !botViewShown
         ? `Show the conversation with ${botName} in this tab (Bot view: conversation, engines, token use)`
         : botViewOverTui
@@ -244,13 +271,13 @@ function render(): void {
               ? undefined
               : PHASE_TITLE[phase];
     const toggle = bar.querySelector<HTMLButtonElement>('[data-act="view"]')!;
+    toggle.dataset.target = botViewShown ? 'worker' : 'bot';
     toggle.title = status?.starting
         ? `Starting voice mode: microphone, speech services and voice model.\n${viewTitle}`
         : on && phaseTitle
           ? `${phaseTitle}\n${viewTitle}`
           : viewTitle;
     toggle.setAttribute('aria-label', viewTitle);
-    toggle.setAttribute('aria-pressed', String(botViewShown));
     const call = bar.querySelector<HTMLButtonElement>('[data-act="call"]')!;
     const callState = status?.starting ? 'starting' : on ? 'on' : 'off';
     if (call.dataset.call !== callState) {

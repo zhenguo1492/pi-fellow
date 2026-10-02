@@ -9,8 +9,10 @@ export interface SidebarHost {
     readonly workspaceState: vscode.Memento;
     /** The current backend workspace's tabs. */
     readonly tabs: Map<string, TabState>;
+    /** '' when the user closed every tab. */
     activeTabId: string;
-    readonly activeTab: TabState;
+    /** Undefined when the user closed every tab. */
+    readonly activeTab: TabState | undefined;
     currentBackend: AgentBackend;
     post(message: ServerMessage): void;
     sendStateSync(): void;

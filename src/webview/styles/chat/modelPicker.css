@@ -22,6 +22,12 @@
     display: none;
 }
 
+.model-picker.voice-model-picker .model-item,
+.model-picker.voice-model-picker .model-item.highlighted,
+.model-picker.voice-model-picker .model-picker-hint {
+    color: var(--voice-model-fg);
+}
+
 .model-list {
     overflow-y: auto;
     max-height: 280px;

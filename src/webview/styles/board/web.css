@@ -1,0 +1,157 @@
+/*
+ * Web pages (src/webview/board/web.ts): a ```html block in a sandboxed frame, shown like a picture of
+ * itself, sized as a diagram is (diagram.css). The frame is always laid out at the page's natural size
+ * (`--natural` wide, `--natural-height` tall, `--ratio` their ratio, set by web.ts) and scaled
+ * (`--ws`, web.ts, from its stage's width) to its stage, which is `--fit` × its zoom (`--dz`, zoom.ts)
+ * wide: at 100% the page shows whole, as wide as its natural width, at most the block's (100cqw of
+ * its .board-web-body), and as tall as that makes it. Zoomed out it shrinks, centered in the block;
+ * zoomed in, its view stays as wide as the block, grows up to the window's height below the header
+ * (`--board-height`), and scrolls (pans) beyond that. Expanded (⤢), the header stays on top and the
+ * page shows whole in the rest of the board at 100%. Source shows the HTML (a code block) in place
+ * of the page.
+ */
+
+.board-web {
+    margin: 0 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--code-bg);
+}
+
+.board-web-header {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 6px 2px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 20px;
+    user-select: none;
+}
+
+.board-web-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.board-web-header > button {
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+}
+.board-web-header > button:hover {
+    color: var(--fg);
+    background: var(--tint);
+}
+.board-web-header > button[aria-pressed='true'] {
+    color: var(--fg);
+    background: var(--tint-strong);
+}
+
+/* Its zoom and expand sit in the header, after Source, not over the page: shown as a diagram's are. */
+.board-web-header > .board-block-tools {
+    position: static;
+    margin-left: 6px;
+}
+.board-block:hover .board-web-header > .board-block-tools,
+.board-block.is-selected .board-web-header > .board-block-tools,
+.board-block.is-expanded .board-web-header > .board-block-tools {
+    opacity: 1;
+}
+
+.board-web-body {
+    container-type: inline-size;
+    display: flex;
+    justify-content: center;
+}
+
+.board-web-view {
+    --fit: min(var(--natural, 100cqw), 100cqw);
+    flex-shrink: 0;
+    width: min(calc(var(--fit) * var(--dz, 1)), 100cqw);
+    height: min(calc(var(--fit) * var(--ratio, 0.5625) * var(--dz, 1)), max(calc(var(--fit) * var(--ratio, 0.5625)), var(--board-height, 80vh)));
+    overflow: hidden;
+}
+/* Zoomed in: it pans with its scrollbars, a middle-button drag or Space + drag (forwarded by the page), and the page's plain wheel when the page does not scroll. */
+.board-web-view.is-zoomed {
+    overflow: auto;
+    scrollbar-width: thin;
+}
+
+.board-web-stage {
+    position: relative;
+    width: calc(var(--fit) * var(--dz, 1));
+    height: calc(var(--fit) * var(--ratio, 0.5625) * var(--dz, 1));
+    overflow: hidden;
+}
+
+.board-web-frame {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: block;
+    width: var(--natural, 100%);
+    height: var(--natural-height, 100%);
+    border: 0;
+    transform: scale(var(--ws, 1));
+    transform-origin: 0 0;
+}
+
+/* While Alt is held over the page, the element an Alt + click would mark: its box in the page's px (web.ts), scaled as the frame is. */
+.board-web-hover {
+    position: absolute;
+    left: calc(var(--hover-left, 0) * var(--ws, 1) * 1px);
+    top: calc(var(--hover-top, 0) * var(--ws, 1) * 1px);
+    width: calc(var(--hover-width, 0) * var(--ws, 1) * 1px);
+    height: calc(var(--hover-height, 0) * var(--ws, 1) * 1px);
+    outline: 2px solid var(--user-accent);
+    background: color-mix(in srgb, var(--user-accent) 12%, transparent);
+    pointer-events: none;
+}
+
+.board-web-body[hidden],
+.board-web-source[hidden] {
+    display: none;
+}
+
+.board-web-source .board-code {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+}
+
+/*
+ * Expanded: the header, then the page in the rest of the board (a size container), whole and centered
+ * at 100%, as large as fits; zoomed in, its view fills that area and pans.
+ */
+.board-block.is-expanded > .board-web {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    min-height: 0;
+    margin: 0;
+}
+.board-block.is-expanded .board-web-body {
+    container-type: size;
+    flex: 1 1 0;
+    align-items: center;
+    min-height: 0;
+}
+.board-block.is-expanded .board-web-view {
+    --fit: min(100cqw, calc(100cqh / var(--ratio, 0.5625)));
+    height: min(calc(var(--fit) * var(--ratio, 0.5625) * var(--dz, 1)), 100cqh);
+}
+.board-block.is-expanded .board-web-source {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: auto;
+}

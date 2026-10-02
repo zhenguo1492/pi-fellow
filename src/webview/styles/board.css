@@ -1,0 +1,8 @@
+/* The board webview's stylesheet (src/voiceAgent/blackboard.ts, src/webview/board/), bundled by esbuild. */
+@import './tokens.css';
+@import './board/layout.css';
+@import './board/content.css';
+@import './board/code.css';
+@import './board/diagram.css';
+@import './board/web.css';
+@import './board/marks.css';

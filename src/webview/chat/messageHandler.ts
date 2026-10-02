@@ -3,7 +3,7 @@ import { pushTalkLevel } from '../avatarMotion';
 import { applyDictationStatus, applyVoiceMicStatus, insertDictatedText } from '../dictation';
 import { dismissExtensionUi, showExtensionUiRequest } from '../extensionUi';
 import { applyContextBreakdown, applyModelStatus } from '../modelStatus';
-import { setPickerCurrentModel, setPickerModels } from '../modelPicker';
+import { setPickerCurrentModel, setPickerModels, setVoicePickerModel } from '../modelPicker';
 import { applySessionList, setSessionPanelOpen } from '../sessionPanel';
 import { applyTreePayload, setTreePanelOpen } from '../treePanel';
 import { markTuiExited, restoreTuiSnapshot, writeTuiData } from '../tuiView';
@@ -56,6 +56,9 @@ export function handleMessage(msg: ServerMessage): void {
             }
             break;
         case 'voice':
+            if (msg.message.type === 'state') {
+                setVoicePickerModel(msg.message.state.engines.llm);
+            }
             handleVoiceMessage(msg.message);
             break;
         case 'agentEvent':

@@ -146,9 +146,10 @@ export class SidebarSessionPanel {
     /**
      * Folder + backend whose sessions the panel lists for `tab`. A TUI owns its tab's folder and
      * backend (resume can move it to another project/CLI without touching the idle RPC session).
+     * No tab (the user closed every one): the workspace folder and the current backend.
      */
-    private _sessionListTarget(tab: TabState): SessionListTarget {
-        const tui = this._tui.tuis.get(tab.id);
+    private _sessionListTarget(tab: TabState | undefined): SessionListTarget {
+        const tui = tab && this._tui.tuis.get(tab.id);
         if (tui) {
             return {
                 cwd: resolvePiWorkspaceCwd(tui.cwd),
@@ -157,19 +158,15 @@ export class SidebarSessionPanel {
             };
         }
         return {
-            cwd: resolvePiWorkspaceCwd(tab.session.session?.cwd),
-            layout: getAgentLayout(tab.session.backend),
-            currentSessionPath: tab.session.session?.sessionFile,
+            cwd: resolvePiWorkspaceCwd(tab?.session.session?.cwd),
+            layout: getAgentLayout(tab?.session.backend ?? this._host.currentBackend),
+            currentSessionPath: tab?.session.session?.sessionFile,
         };
     }
 
     /** Preload current-folder session list so the resume panel opens instantly. */
     warmSessionListCache(): Promise<void> {
-        const tab = this._host.activeTab;
-        if (!tab) {
-            return Promise.resolve();
-        }
-        const target = this._sessionListTarget(tab);
+        const target = this._sessionListTarget(this._host.activeTab);
         if (this._sessionLists.cached(target)) {
             return Promise.resolve();
         }
@@ -209,15 +206,14 @@ export class SidebarSessionPanel {
 
     /** Lists only the active tab's folder (the CLI's own `/resume` current-folder scope). */
     async loadSessionListForPanel(query: string): Promise<void> {
-        const tab = this._host.activeTab;
-        if (!tab || !this._sessionPanelOpen) {
+        if (!this._sessionPanelOpen) {
             return;
         }
 
         this._sessionPanelQuery = query;
         const generation = ++this._sessionListGeneration;
         const isStale = (): boolean => generation !== this._sessionListGeneration || !this._sessionPanelOpen;
-        const target = this._sessionListTarget(tab);
+        const target = this._sessionListTarget(this._host.activeTab);
 
         // Stale-while-revalidate: sessions are created/extended outside this panel (TUI, other windows).
         const cached = this._sessionLists.cached(target);
@@ -249,7 +245,7 @@ export class SidebarSessionPanel {
     /** Open `sessionPath` in its own tab: the tab that has it already, else a new one (a blank active tab is reused). */
     private async _resumeSessionFromPanel(sessionPath: string): Promise<void> {
         const current = this._host.activeTab;
-        if (!current || !sessionPath) {
+        if (!sessionPath) {
             return;
         }
         this._closeSessionPanel();
@@ -279,7 +275,7 @@ export class SidebarSessionPanel {
         this._host.currentBackend = targetBackend;
 
         // Resumed from a tab showing its TUI: the session opens in a new tab's TUI.
-        if (current.tuiMode) {
+        if (current?.tuiMode) {
             const tab = await this._tabs.createEmptyTabState(targetBackend, targetCwd);
             tab.name = title;
             tab.tuiMode = true;
@@ -292,6 +288,7 @@ export class SidebarSessionPanel {
 
         // A blank conversation has nothing to keep: it takes the session instead of staying behind as an empty tab.
         const reuseCurrent =
+            !!current &&
             sameBackend &&
             !current.restoring &&
             current.session.messages.length === 0 &&
@@ -328,10 +325,10 @@ export class SidebarSessionPanel {
         this._onResumed(tab.id);
     }
 
-    /** After a resume into a new tab failed (and closed it): show the tab, and its backend, the user resumed from. */
-    private _backToTab(tab: TabState, backend: AgentBackend): void {
+    /** After a resume into a new tab failed (and closed it): show the tab, and its backend, the user resumed from (none: every tab was closed). */
+    private _backToTab(tab: TabState | undefined, backend: AgentBackend): void {
         this._host.currentBackend = backend;
-        if (this._host.tabs.has(tab.id)) {
+        if (tab && this._host.tabs.has(tab.id)) {
             this._tabs.showTab(tab.id);
         } else {
             this._host.sendStateSync();

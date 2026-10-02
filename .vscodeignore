@@ -3,9 +3,13 @@
 .pi/**
 # Styles ship as out/webview/styles/ after npm run compile (see esbuild.js stylesConfig).
 src/**
+# Integration tests, built by `node esbuild.js --integration`.
+out/test/**
 .github/**
 docs/**
 docker/**
+# Shipped as .tmp/README.vsix.md instead (repo-only images left out: node esbuild.js --readme).
+README.md
 AGENT.md
 AGENTS.md
 .gitignore

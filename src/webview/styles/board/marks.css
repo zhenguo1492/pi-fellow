@@ -1,0 +1,48 @@
+/*
+ * Marks over the board (src/webview/board/marks.ts): Pi's point in the voice agent's color, the user's
+ * mark in the user's color; each piece is positioned from script in overlay coordinates.
+ */
+
+.board-mark--pi { --mark: var(--voice-accent); }
+.board-mark--user { --mark: var(--user-accent); }
+
+.board-mark-fill,
+.board-mark-underline,
+.board-mark-box {
+    position: absolute;
+}
+
+.board-mark-fill {
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--mark) 24%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mark) 45%, transparent);
+}
+
+.board-mark-underline {
+    border-radius: 1px;
+    background: var(--mark);
+}
+
+.board-mark-box {
+    border: 2px solid var(--mark);
+    border-radius: 8px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mark) 18%, transparent);
+}
+
+.board-mark-tag {
+    position: absolute;
+    padding: 0 5px;
+    border-radius: 4px 4px 4px 0;
+    background: var(--mark);
+    color: var(--bg);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 15px;
+    white-space: nowrap;
+    transform: translate(0, -100%);
+}
+/* Pi's tag ends at the mark's right edge. */
+.board-mark--pi .board-mark-tag {
+    border-radius: 4px 4px 0 4px;
+    transform: translate(-100%, -100%);
+}

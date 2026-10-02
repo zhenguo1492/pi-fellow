@@ -29,7 +29,7 @@ describe('resolveVoiceSkills', () => {
     it('loads the built-ins alone when nothing else is chosen, without asking for the installed skills', async () => {
         const list = vi.fn(async () => installed('tdd'));
         expect(await resolveVoiceSkills(builtins, [], list, () => {})).toEqual(builtins);
-        expect(await resolveVoiceSkills(builtins, ['show-me'], list, () => {})).toEqual(builtins);
+        expect(await resolveVoiceSkills(builtins, ['grilling'], list, () => {})).toEqual(builtins);
         expect(list).not.toHaveBeenCalled();
     });
 

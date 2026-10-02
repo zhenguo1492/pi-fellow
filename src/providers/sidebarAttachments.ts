@@ -36,7 +36,8 @@ export class SidebarAttachments {
     async attachPaths(paths: string[]): Promise<void> {
         const tab = this._host.activeTab;
         const unique = [...new Set(paths.filter((p) => p.trim().length > 0))];
-        if (unique.length === 0) {
+        // Every tab closed: nothing to attach to (the chat shows no composer).
+        if (!tab || unique.length === 0) {
             return;
         }
 
@@ -55,7 +56,7 @@ export class SidebarAttachments {
         const processed = await processFilePaths(unique, cwd);
         if (processed.length === 0) {
             vscode.window.showWarningMessage(
-                'PI Buddy: dropped files could not be read or are unsupported.',
+                'Pi Fellow: dropped files could not be read or are unsupported.',
             );
             return;
         }
@@ -126,6 +127,9 @@ export class SidebarAttachments {
             return;
         }
         const tab = this._host.activeTab;
+        if (!tab) {
+            return;
+        }
         const processed = await processPastedImages(items, this._pastedStorageDir);
         for (const item of processed) {
             tab.pendingAttachments.push(toPendingAttachment(item));
@@ -135,6 +139,9 @@ export class SidebarAttachments {
 
     private async _attachDroppedTextFiles(files: { name: string; text: string }[]): Promise<void> {
         const tab = this._host.activeTab;
+        if (!tab) {
+            return;
+        }
         let added = false;
         for (const file of files) {
             if (!file.text?.trim()) {
@@ -169,7 +176,7 @@ export class SidebarAttachments {
                     types.includes('application/vnd.code.uri-list');
                 if (fromExplorer) {
                     void vscode.window.showInformationMessage(
-                        'PI Buddy: From Explorer, hold Shift while dropping on the message box. Or right-click the file → Add to Chat.',
+                        'Pi Fellow: From Explorer, hold Shift while dropping on the message box. Or right-click the file → Add to Chat.',
                     );
                 }
             },

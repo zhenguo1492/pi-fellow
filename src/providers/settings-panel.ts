@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type {
+    SettingEdit,
     SettingsClientMessage,
     SettingsServerMessage,
     SettingsData,
@@ -9,17 +10,15 @@ import type {
 import type { PiChatSession } from '../pi/slashCommands';
 import { readDefaultPermissionLevel } from '../pi/permissionGate';
 import {
-    addPiExtensionPath,
     addPiPackage,
-    addPiSkillPath,
     loadPiAgentConfigForSettings,
     openPiAgentFile,
-    removePiExtensionPathAt,
     removePiPackageAt,
-    removePiSkillPathAt,
     schedulePiSessionReload,
     setPiEnableSkillCommands,
+    setPiExtensionPaths,
     setPiFollowUpMode,
+    setPiSkillPaths,
     setPiSteeringMode,
     updatePiDefaults,
 } from '../pi/piAgentConfig';
@@ -78,8 +77,10 @@ export class SettingsPanel {
     private _disposables: vscode.Disposable[] = [];
     private _mcpProbeResults = new Map<string, { ok: boolean; message: string }>();
     private _voiceDryRun: VoiceDryRun;
-    /** The Voice tab has unsaved changes (the webview says so): closing the panel then warns. */
-    private _voiceDirty = false;
+    /** The settings page has unsaved changes (the webview says so): closing the panel then warns. */
+    private _dirty = false;
+    /** Services whose built-in models "Download now" is fetching. */
+    private readonly _builtinPreparing = new Set<VoiceServiceId>();
 
     private constructor(
         panel: vscode.WebviewPanel,
@@ -185,7 +186,7 @@ export class SettingsPanel {
 
         const panel = vscode.window.createWebviewPanel(
             'oh-my-pi-chater.settings',
-            'PI Buddy Settings',
+            'Pi Fellow Settings',
             vscode.ViewColumn.One,
             {
                 enableScripts: true,
@@ -209,8 +210,8 @@ export class SettingsPanel {
                 case 'getSettings':
                     await this._sendSettings();
                     break;
-                case 'updateSetting':
-                    await this._updateSetting(msg.key, msg.value);
+                case 'saveSettings':
+                    await this._saveSettings(msg.edits);
                     break;
                 case 'getSkills':
                     await this._sendSkills();
@@ -221,22 +222,6 @@ export class SettingsPanel {
                         this._currentBackend = msg.backend;
                         await this._afterPiConfigChange(`Switched to ${msg.backend} backend`);
                     }
-                    break;
-                case 'updatePiDefaults':
-                    await updatePiDefaults(
-                        {
-                            provider: msg.provider,
-                            model: msg.model,
-                            thinkingLevel: msg.thinkingLevel,
-                        },
-                        this._piSession,
-                        this._currentBackend,
-                    );
-                    await this._afterPiConfigChange(
-                        this._currentBackend === 'omp'
-                            ? 'Defaults saved to ~/.omp/agent/config.yml'
-                            : 'Defaults saved to ~/.pi/agent/settings.json',
-                    );
                     break;
                 case 'addPiPackage':
                     await vscode.window.withProgress(
@@ -259,43 +244,15 @@ export class SettingsPanel {
                     await showPiPackageCatalogPicker(this._piSession, this._outputChannel);
                     await this._sendSettings();
                     break;
-                case 'pickAvatar':
-                    await pickAvatar(msg.speaker);
+                case 'pickAvatar': {
+                    const picked = await pickAvatar(msg.speaker);
+                    if (picked) {
+                        this._post({ type: 'avatarPicked', speaker: msg.speaker, ...picked });
+                    }
                     break;
+                }
                 case 'openExternalUrl':
                     await vscode.env.openExternal(vscode.Uri.parse(msg.url));
-                    break;
-                case 'addPiExtensionPath':
-                    await addPiExtensionPath(msg.path, this._currentBackend);
-                    schedulePiSessionReload(this._piSession, this._outputChannel);
-                    await this._afterPiConfigChange('Extension path added');
-                    break;
-                case 'removePiExtensionPath':
-                    await removePiExtensionPathAt(msg.index, this._currentBackend);
-                    schedulePiSessionReload(this._piSession, this._outputChannel);
-                    await this._afterPiConfigChange('Extension path removed');
-                    break;
-                case 'addPiSkillPath':
-                    await addPiSkillPath(msg.path, this._piSession, this._currentBackend);
-                    schedulePiSessionReload(this._piSession, this._outputChannel);
-                    await this._afterPiConfigChange('Skill path added');
-                    break;
-                case 'removePiSkillPath':
-                    await removePiSkillPathAt(msg.index, this._piSession, this._currentBackend);
-                    schedulePiSessionReload(this._piSession, this._outputChannel);
-                    await this._afterPiConfigChange('Skill path removed');
-                    break;
-                case 'setPiEnableSkillCommands':
-                    await setPiEnableSkillCommands(msg.enabled, this._piSession, this._currentBackend);
-                    await this._afterPiConfigChange('Skill commands setting updated');
-                    break;
-                case 'setPiSteeringMode':
-                    await setPiSteeringMode(msg.mode, this._piSession, this._currentBackend);
-                    await this._afterPiConfigChange('Steering mode updated');
-                    break;
-                case 'setPiFollowUpMode':
-                    await setPiFollowUpMode(msg.mode, this._piSession, this._currentBackend);
-                    await this._afterPiConfigChange('Follow-up mode updated');
                     break;
                 case 'openPiAgentFile':
                     await openPiAgentFile(msg.file, this._currentBackend);
@@ -312,13 +269,6 @@ export class SettingsPanel {
                     break;
                 case 'getMcpSnapshot':
                     await this._sendMcpSnapshot();
-                    break;
-                case 'setMcpServerEnabled':
-                    await setMcpServerEnabled(msg.scope, msg.serverName, msg.enabled, this._currentBackend);
-                    this._mcpProbeResults.delete(msg.serverName);
-                    await this._afterPiConfigChange(
-                        msg.enabled ? `MCP server "${msg.serverName}" enabled` : `MCP server "${msg.serverName}" disabled`,
-                    );
                     break;
                 case 'testMcpServer':
                     await this._testMcpServer(msg.serverName);
@@ -376,13 +326,13 @@ export class SettingsPanel {
                     break;
                 }
                 case 'getBuiltinVoiceStatus':
-                    await this._sendBuiltinVoiceStatus(false);
+                    await this._sendBuiltinVoiceStatus(msg.service);
                     break;
                 case 'prepareBuiltinVoice':
-                    await this._prepareBuiltinVoice();
+                    await this._prepareBuiltinVoice(msg.service);
                     break;
-                case 'voiceDirty':
-                    this._voiceDirty = msg.dirty;
+                case 'settingsDirty':
+                    this._dirty = msg.dirty;
                     break;
             }
         } catch (err: any) {
@@ -452,6 +402,61 @@ export class SettingsPanel {
         );
         await this._sendMcpSnapshot();
         this._post({ type: 'success', message: 'MCP reachability checks finished' });
+    }
+
+    /**
+     * Save: writes each edit in order (one that fails does not stop the others), then sends the
+     * settings, skills and MCP servers again; a changed path list reloads the chat tab's session.
+     */
+    private async _saveSettings(edits: SettingEdit[]): Promise<void> {
+        const failures: string[] = [];
+        for (const edit of edits) {
+            try {
+                await this._writeSettingEdit(edit);
+            } catch (err: unknown) {
+                failures.push(describeError(err));
+            }
+        }
+        if (edits.some((edit) => edit.kind === 'extensionPaths' || edit.kind === 'skillPaths')) {
+            schedulePiSessionReload(this._piSession, this._outputChannel);
+        }
+        await this._sendSettings();
+        await this._sendSkills();
+        await this._sendMcpSnapshot();
+        this._post(failures.length === 0
+            ? { type: 'settingsSaved', ok: true, message: 'Settings saved.' }
+            : { type: 'settingsSaved', ok: false, message: `Some settings were not saved: ${failures.join('; ')}` });
+    }
+
+    private async _writeSettingEdit(edit: SettingEdit): Promise<void> {
+        const backend = this._currentBackend;
+        switch (edit.kind) {
+            case 'setting':
+                await this._updateSetting(edit.key, edit.value);
+                return;
+            case 'piDefaults':
+                await updatePiDefaults({ provider: edit.provider, model: edit.model, thinkingLevel: edit.thinkingLevel }, this._piSession, backend);
+                return;
+            case 'steeringMode':
+                await setPiSteeringMode(edit.mode, this._piSession, backend);
+                return;
+            case 'followUpMode':
+                await setPiFollowUpMode(edit.mode, this._piSession, backend);
+                return;
+            case 'skillCommands':
+                await setPiEnableSkillCommands(edit.enabled, this._piSession, backend);
+                return;
+            case 'mcpServer':
+                await setMcpServerEnabled(edit.scope, edit.serverName, edit.enabled, backend);
+                this._mcpProbeResults.delete(edit.serverName);
+                return;
+            case 'extensionPaths':
+                await setPiExtensionPaths(edit.paths, backend);
+                return;
+            case 'skillPaths':
+                await setPiSkillPaths(edit.paths, backend);
+                return;
+        }
     }
 
     private async _updateSetting(key: string, value: unknown): Promise<void> {
@@ -535,7 +540,7 @@ export class SettingsPanel {
     }
 
     /**
-     * Save (and "Save & test"): writes both sections and the typed keys, then with `test` checks each
+     * Save: writes both sections and the typed keys, then with `test` (a service on its Cloud card) checks each
      * custom service as saved. Built-in ones are not checked: that would download their models.
      */
     private async _saveVoice(stt: VoiceSettings, tts: TtsConfig, apiKeys: Record<string, string>, test: boolean): Promise<void> {
@@ -576,20 +581,25 @@ export class SettingsPanel {
         this._post({ type: 'voiceSaved', saved: true, ok: !failed, message, tests });
     }
 
-    private async _sendBuiltinVoiceStatus(busy: boolean, error?: string): Promise<void> {
-        const status = await builtinVoiceStatus(['stt', 'tts']).catch(() => undefined);
-        this._post({ type: 'builtinVoiceStatus', status, busy, error });
+    private async _sendBuiltinVoiceStatus(service: VoiceServiceId, error?: string): Promise<void> {
+        const status = await builtinVoiceStatus([service]).catch(() => undefined);
+        this._post({ type: 'builtinVoiceStatus', service, status, busy: this._builtinPreparing.has(service), error });
     }
 
-    /** "Download now": downloads the built-in models (with the usual progress notification) and starts the engine. */
-    private async _prepareBuiltinVoice(): Promise<void> {
-        await this._sendBuiltinVoiceStatus(true);
+    /** "Download now": downloads one service's built-in models (with the usual progress notification) and starts the engine. */
+    private async _prepareBuiltinVoice(service: VoiceServiceId): Promise<void> {
+        this._builtinPreparing.add(service);
+        await this._sendBuiltinVoiceStatus(service);
+        let error: string | undefined;
         try {
-            await builtinVoiceEngineUrl(['stt', 'tts']);
-            await this._sendBuiltinVoiceStatus(false);
+            await builtinVoiceEngineUrl([service]);
         } catch (err: unknown) {
-            await this._sendBuiltinVoiceStatus(false, explainVoiceError(err).message);
+            error = explainVoiceError(err).message;
         }
+        this._builtinPreparing.delete(service);
+        await this._sendBuiltinVoiceStatus(service, error);
+        // The engine's runtime is shared: the other service's download is smaller now.
+        await this._sendBuiltinVoiceStatus(service === 'stt' ? 'tts' : 'stt');
     }
 
     private async _sendSettings(): Promise<void> {
@@ -626,6 +636,8 @@ export class SettingsPanel {
             voiceApiKeys: voiceApiKeysSet(),
             voiceOwnServers: ownVoiceServers(),
             voiceSkills: config.get<string[]>('voiceAgent.skills', []),
+            voiceModel: config.get<string>('voiceAgent.model', '').trim(),
+            voiceModels: this._piSession?.getModels() ?? [],
             voiceMessageButtons: config.get<boolean>('voiceAgent.messageButtons', false),
             voiceTranslateTo: config.get<string>('voiceAgent.translateTo', DEFAULT_TRANSLATION_LANGUAGE),
             voiceExtraPrompt: config.get<string>('voiceAgent.extraPrompt', ''),
@@ -683,10 +695,10 @@ export class SettingsPanel {
             d.dispose();
         }
         this._disposables = [];
-        if (this._voiceDirty) {
+        if (this._dirty) {
             void vscode.window
-                .showWarningMessage('Voice settings: your unsaved changes were discarded when Settings closed.', 'Open Voice Settings')
-                .then((pick) => pick && SettingsPanel.showWithSection('voice'));
+                .showWarningMessage('Settings: your unsaved changes were discarded when Settings closed.', 'Open Settings')
+                .then((pick) => pick && vscode.commands.executeCommand('oh-my-pi-chater.openSettings'));
         }
     }
 
@@ -707,7 +719,7 @@ export class SettingsPanel {
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}'; media-src data:;">
     <link rel="stylesheet" href="${styleUri}">
-    <title>PI Buddy Settings</title>
+    <title>Pi Fellow Settings</title>
 </head>
 <body>
     <div id="settings-app"></div>
