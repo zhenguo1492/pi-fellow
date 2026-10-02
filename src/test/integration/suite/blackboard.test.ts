@@ -250,7 +250,7 @@ suite('Blackboard', function () {
     let codeFile: vscode.Uri;
 
     suiteSetup(async () => {
-        const extension = vscode.extensions.getExtension('zhenguo.pi-fellow');
+        const extension = vscode.extensions.getExtension('GuoZheng.pi-fellow');
         assert.ok(extension, 'the extension is installed');
         extensionUri = extension.extensionUri;
         assert.ok(fs.existsSync(path.join(extensionUri.fsPath, 'out', 'webview', 'board.js')), 'out/webview/board.js is built (npm run compile)');
@@ -677,7 +677,7 @@ suite('Blackboard: diagram zoom and expand', function () {
     const zoomTo = (zoom: BoardZoom) => win.toWebview('b1', { type: 'zoom', zoom });
 
     suiteSetup(async () => {
-        const extension = vscode.extensions.getExtension('zhenguo.pi-fellow');
+        const extension = vscode.extensions.getExtension('GuoZheng.pi-fellow');
         assert.ok(extension);
         sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-board-zoom-e2e-'));
         fakeLlm.reset();
@@ -833,7 +833,7 @@ suite('Blackboard: marks sit on their targets in the real webview', function () 
     ];
 
     suiteSetup(async () => {
-        const extension = vscode.extensions.getExtension('zhenguo.pi-fellow');
+        const extension = vscode.extensions.getExtension('GuoZheng.pi-fellow');
         assert.ok(extension);
         sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-board-marks-e2e-'));
         fakeLlm.reset();

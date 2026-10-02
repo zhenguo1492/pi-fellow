@@ -1,6 +1,6 @@
 # AGENTS.md — Pi Fellow architecture and development guide
 
-Pi Fellow (extension ID `zhenguo.pi-fellow`, derived from the MIT-licensed [vscode-pi-agent](https://github.com/FChatin/vs-pi-agent)) puts the Pi coding agent (pi or omp) in the VS Code sidebar. This file is the entry point; details live in `docs/` (see [Topic docs](#topic-docs)).
+Pi Fellow (extension ID `GuoZheng.pi-fellow`, derived from the MIT-licensed [vscode-pi-agent](https://github.com/FChatin/vs-pi-agent)) puts the Pi coding agent (pi or omp) in the VS Code sidebar. This file is the entry point; details live in `docs/` (see [Topic docs](#topic-docs)).
 
 ## 1. What it is and how it works
 
