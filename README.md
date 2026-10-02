@@ -40,7 +40,8 @@ A second omp/pi session you talk to, like a pair-programming partner. Start it w
 - **Talk it through:** discuss design and trade-offs out loud; interrupt any time; mixed Chinese and English.
 - **Code together:** it highlights the code it means, types edits in your editor (one Ctrl+Z each), runs commands in a visible terminal, debugs with breakpoints.
 - **Delegate to the worker:** agree on a plan, it hands the task to the chat tab's omp/pi agent, steers or answers it while it runs, and tells you when it needs you or finishes. It stays off files the worker is changing.
-- **Blackboards:** it draws Markdown, Mermaid diagrams and live web pages on a board and points at parts while explaining; you can mark them back.
+- **A shared blackboard:** what is easier to see than to hear goes on a board tab beside your code, in real time: short design docs, Mermaid diagrams (architecture, sequence, flow), tables, code snippets and diffs, and live HTML pages such as clickable UI prototypes and animated algorithm demos. As it talks, it points at the exact block, line, diagram node or arrow it is talking about. You can mark any part back (select text, or Alt+click an element in a demo) and ask "what about this?".
+- **Explains as it goes:** ask how a flow works and it reads the code (or researches it in the background), then walks you through it one place at a time, highlighting each spot in your editor.
 - **Only your voice:** optional voiceprint and noise reduction.
 
 Details: [docs/voice-agent.md](docs/voice-agent.md), [docs/blackboard.md](docs/blackboard.md).
@@ -57,20 +58,15 @@ Details: [docs/voice-agent.md](docs/voice-agent.md), [docs/blackboard.md](docs/b
 
 ## 🔊 Voice setup
 
-Open Settings → **Voice**. Speech-to-text and text-to-speech each have two engines:
+Open Settings → **Voice**. Speech-to-text and text-to-speech each offer three choices:
 
 - **Built-in** (default): zero-install, runs locally; downloaded on first use. English only (Moonshine STT, Piper TTS).
-- **Custom**: any OpenAI-compatible server, e.g. a self-hosted one or OpenAI / Groq (API keys are kept in VS Code SecretStorage).
+- **Cloud**: a hosted service with your API key; for now OpenAI and Groq. Keys are kept in VS Code SecretStorage.
+- **Self-hosted**: your own OpenAI-compatible server; no key is sent to it.
 
-For Chinese or mixed-language speech, run the self-hosted services in [`docker/`](docker/README.md) (`docker/up.sh`) and point Pi Fellow at them:
+For Chinese or mixed-language speech, use Cloud or Self-hosted. Ready-made self-hosted services (Whisper STT, Kokoro and chatterbox TTS) are in [`docker/`](docker/README.md).
 
-| Service | URL | Settings |
-|---|---|---|
-| Whisper STT (speaches) | `http://127.0.0.1:8010/v1` | `voice.sttUrl` |
-| Kokoro TTS | `http://127.0.0.1:8880/v1` | `voiceAgent.tts.url`, `tts.model` `kokoro`, `tts.voice` e.g. `af_heart`, `tts.languageField` `chineseLangCode` |
-| chatterbox TTS (GPU, voice cloning) | `http://127.0.0.1:8881/v1` | `voiceAgent.tts.url`, `tts.model` `chatterbox-multilingual`, `tts.voice` e.g. `Justin.mp3`, `tts.languageField` `perSentence` |
-
-All settings are prefixed `oh-my-pi-chater.`. **Test** checks each endpoint; **Dry run…** records or speaks one sentence. Hardware needs, voices, language restriction and curl tests: [docker/README.md](docker/README.md). Engine and settings details: [docs/voice.md](docs/voice.md).
+In the Voice tab, **Test** checks that a service answers, and **Dry run…** records or speaks one sentence so you can hear the result. Engine and settings details: [docs/voice.md](docs/voice.md).
 
 Voice mode captures audio through a hidden headless Chrome/Edge/Chromium/Brave (echo cancellation); dictation uses `arecord` / `parecord` on Linux or SoX `rec` on macOS.
 
