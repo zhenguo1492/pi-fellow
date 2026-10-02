@@ -13,7 +13,7 @@ Pi Fellow (extension ID `GuoZheng.pi-fellow`, derived from the MIT-licensed [vsc
 
 ```
 esbuild.js                  # Bundles extension + webviews into out/
-package.json                # Manifest: commands, views, settings, keybindings
+package.json                # Manifest: commands, views, view containers, menus, settings
 media/                      # Icons, VAD model (media/vad/silero_vad.onnx)
 docs/                       # Topic docs (see below)
 src/
