@@ -68,7 +68,9 @@ For Chinese or mixed-language speech, use Cloud or Self-hosted. Ready-made self-
 
 In the Voice tab, **Test** checks that a service answers, and **Dry run…** records or speaks one sentence so you can hear the result. Engine and settings details: [docs/voice.md](docs/voice.md).
 
-Voice mode captures audio through a hidden headless Chrome/Edge/Chromium/Brave (echo cancellation); dictation uses `arecord` / `parecord` on Linux or SoX `rec` on macOS.
+Voice mode captures audio through a hidden headless Chrome/Edge/Chromium/Brave (echo cancellation); dictation records with a
+command-line tool the extension does not ship: `arecord` / `parecord` on Linux (`sudo apt install alsa-utils`), SoX `rec` on
+macOS (`brew install sox`). Homebrew's directories are searched even when macOS launches VS Code without them on `PATH`.
 
 ## 🔒 Privacy
 

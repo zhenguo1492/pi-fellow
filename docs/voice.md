@@ -8,6 +8,9 @@ Classes: `VoiceInput`, `DictationSession`, `SileroVad`, `SpeechSegmenter`, `SttC
 
 - `DictationSession<T>` runs each utterance through a `SegmentHandler<T>`: dictation's is `transcribeUtterance(stt, gate)` (text, gated by the voiceprint); the settings' voiceprint recordings use the same capture with embedding handlers. Results are delivered in speaking order, `undefined` delivers nothing.
 - The webview cannot access the microphone, so the extension host records 16 kHz mono PCM with `arecord` / `parecord` / sox `rec`.
+  None of them ship with the extension: on macOS install SoX (`brew install sox`), on Linux alsa-utils or pulseaudio-utils.
+  `recorderSearchDirs` (`src/voice/dictation.ts`) looks in `PATH` and then in `/opt/homebrew/bin` and `/usr/local/bin`, which a
+  macOS app launched from the Dock does not inherit.
 - Silero VAD (`media/vad/silero_vad.onnx`, taken from pipecat; onnxruntime-web WASM, single-threaded; runtime files are copied by esbuild to `out/vad/`) splits speech at pauses (state machine same as pipecat's `VADAnalyzer`).
 - Each utterance is POSTed immediately to the OpenAI-compatible `/audio/transcriptions` at `oh-my-pi-chater.voice.sttUrl`; the text is inserted at the composer cursor in speaking order.
 - `src/webview/dictation.ts` is the mic button; command `oh-my-pi-chater.toggleDictation`.

@@ -56,8 +56,38 @@ const RECORDERS: { bin: string; args: string[] }[] = [
     { bin: 'rec', args: ['-q', '--buffer', '1024', '-t', 'raw', '-r', '16000', '-e', 'signed', '-b', '16', '-c', '1', '-'] },
 ];
 
+/**
+ * Where a recorder sits when `PATH` does not say so: a macOS app launched from the Dock inherits a
+ * minimal `PATH` without Homebrew, so the `rec` that `brew install sox` just put in
+ * `/opt/homebrew/bin` would be invisible. Same fallback the CLI search uses (`piCliPaths.ts`).
+ */
+const EXTRA_RECORDER_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
+
+/** The directories {@link findRecorder} looks in, `PATH` first. */
+export function recorderSearchDirs(
+    pathEnv: string = process.env.PATH ?? '',
+    platform: NodeJS.Platform = process.platform,
+): string[] {
+    const dirs = pathEnv.split(platform === 'win32' ? ';' : ':').filter(Boolean);
+    if (platform === 'win32') {
+        return dirs;
+    }
+    return [...dirs, ...EXTRA_RECORDER_DIRS.filter((dir) => !dirs.includes(dir))];
+}
+
+/** What to install, in the words of the platform the user is on. */
+export function noRecorderMessage(platform: NodeJS.Platform = process.platform): string {
+    const install =
+        platform === 'darwin'
+            ? 'Install SoX: `brew install sox`.'
+            : platform === 'linux'
+              ? 'Install alsa-utils (`sudo apt install alsa-utils`), pulseaudio-utils, or SoX (`rec`).'
+              : 'Install SoX and make sure `rec` is on PATH.';
+    return `No audio recorder found. ${install}`;
+}
+
 function findRecorder(): { command: string; args: string[] } | undefined {
-    const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+    const dirs = recorderSearchDirs();
     const exts = process.platform === 'win32' ? ['.exe', '.cmd', ''] : [''];
     for (const { bin, args } of RECORDERS) {
         for (const dir of dirs) {
@@ -133,9 +163,7 @@ export class DictationSession<T = string> {
     start(): void {
         const recorder = findRecorder();
         if (!recorder) {
-            throw new Error(
-                'No audio recorder found. Install SoX (`rec`) or, on Linux, alsa-utils (`arecord`) / pulseaudio-utils (`parecord`).',
-            );
+            throw new Error(noRecorderMessage());
         }
         this.vad.reset();
         const proc = spawn(recorder.command, recorder.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
