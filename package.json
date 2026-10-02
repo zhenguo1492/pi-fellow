@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "zhenguo",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhenguo1492/pi-fellow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zhenguo1492/pi-fellow/issues"
+  },
+  "homepage": "https://github.com/zhenguo1492/pi-fellow#readme",
   "icon": "media/oh-my-pi-chater-icon.png",
   "engines": {
     "vscode": "^1.100.0"
@@ -594,9 +602,9 @@
     "typecheck": "tsc --noEmit -p . && tsc -p src/webview",
     "lint:css": "stylelint \"src/webview/styles/**/*.css\"",
     "vscode:prepublish": "npm run compile",
-    "package": "npm run compile && node esbuild.js --readme && npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository --readme-path .tmp/README.vsix.md --out .tmp/",
+    "package": "npm run compile && node esbuild.js --readme && npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links --readme-path .tmp/README.vsix.md --out .tmp/",
     "package:install": "npm run package && code --install-extension \"$(ls -t .tmp/pi-fellow-*.vsix | head -n 1)\" --force",
-    "publish": "node esbuild.js --readme && npx @vscode/vsce publish --no-dependencies --no-rewrite-relative-links --allow-missing-repository --readme-path .tmp/README.vsix.md",
+    "publish": "node esbuild.js --readme && npx @vscode/vsce publish --no-dependencies --no-rewrite-relative-links --readme-path .tmp/README.vsix.md",
     "package:verify": "unzip -l .tmp/pi-fellow-*.vsix | grep -E 'out/webview/styles|media/icons' && ! unzip -l .tmp/pi-fellow-*.vsix | grep -E 'sherpa-onnx|\\.(node|so|dylib|dll)$'",
     "test": "vitest",
     "test:unit": "vitest run",
