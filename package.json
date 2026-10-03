@@ -2,7 +2,7 @@
   "name": "pi-fellow",
   "displayName": "Pi Fellow — omp & pi Agent with Voice Pair Programmer",
   "description": "Unofficial VS Code GUI for the omp (Oh My Pi) and pi coding agents, plus a voice AI pair-programming partner that talks with you, points at code, edits and debugs alongside you, or hands work to the agent.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "GuoZheng",
   "license": "MIT",
   "repository": {
@@ -540,7 +540,28 @@
         "oh-my-pi-chater.voiceAgent.translateTo": {
           "type": "string",
           "default": "zh-CN",
-          "enum": ["zh-CN", "zh-TW", "en", "es", "hi", "ar", "bn", "pt", "ru", "ja", "de", "fr", "ko", "it", "tr", "vi", "id", "ur", "th", "pl"],
+          "enum": [
+            "zh-CN",
+            "zh-TW",
+            "en",
+            "es",
+            "hi",
+            "ar",
+            "bn",
+            "pt",
+            "ru",
+            "ja",
+            "de",
+            "fr",
+            "ko",
+            "it",
+            "tr",
+            "vi",
+            "id",
+            "ur",
+            "th",
+            "pl"
+          ],
           "enumDescriptions": [
             "Chinese (Simplified) · 简体中文",
             "Chinese (Traditional) · 繁體中文",
