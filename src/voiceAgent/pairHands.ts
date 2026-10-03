@@ -7,15 +7,15 @@ import type { AgentCursor } from './agentCursor';
 import type { CodeAnchor } from './codeAnchors';
 import type { DebugDriver } from './debugDriver';
 import { FileHands } from './fileHands';
-import type { DebugAction, EditorHands } from './hostTools';
-import { cleanTerminalOutput, insideFolder, locateEdit, pickName } from './pairText';
+import type { DebugAction, EditPreview, EditorHands } from './hostTools';
+import { cleanTerminalOutput, insideFolder, locateEdit, pickName, shiftOffset } from './pairText';
 import { findViewers, languageOf, runPreviewCommand, settleWithin, type FileViewers, type Viewer } from './viewers';
 import type { OutputReader } from './vscodeOutput';
 
 /**
  * Typing speed while the user follows Pi: one character per CHAR_MS, like a fast typist; a long edit
  * types several characters per step so the whole edit takes at most MAX_TYPING_MS. Not followed, an
- * edit goes in at once.
+ * edit goes in at once. Either way edit_file returns before the typing, which goes on in the background.
  */
 const CHAR_MS = 40;
 const MAX_TYPING_MS = 8000;
@@ -47,6 +47,70 @@ const SCREEN_SCROLLBACK = 1000;
 /** Enough of the previous chunk to catch an escape sequence split between two chunks. */
 const SEQUENCE_TAIL = 16;
 
+/** One accepted edit_file; `hurry`: the rest goes in at once (the reply cut off, voice stopped, not followed any more, the user typing). */
+interface TypingJob {
+    hurry: boolean;
+}
+
+/**
+ * The replacement text of an edit being typed: all of it, or for a preview (EditorHands.previewEdit)
+ * as much as the model has written so far, until its call arrives (`done`) or will not run (`dropped`).
+ */
+class TypingSource {
+    private _wake: (() => void) | undefined;
+
+    constructor(
+        public text = '',
+        public done = false,
+        public dropped = false,
+    ) {}
+
+    set(text: string, done: boolean): void {
+        this.text = text;
+        this.done = done;
+        this._wake?.();
+    }
+
+    drop(): void {
+        this.dropped = true;
+        this._wake?.();
+    }
+
+    /** Resolves at the next `set` or `drop`. */
+    next(): Promise<void> {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        this._wake = () => {
+            this._wake = undefined;
+            resolve();
+        };
+        return promise;
+    }
+}
+
+/** The edits accepted on one file and not yet typed and saved: each waits for the one before it. */
+interface FileTyping {
+    /** The file's text once they are all in, as known when the last was accepted: where the next edit is placed. Undefined while the last is a preview still being written. */
+    expected: string | undefined;
+    /** Resolves once `expected` is known: at once for an edit, when its call arrives or is dropped for a preview. */
+    known: Promise<void>;
+    /** Settles, never rejecting, once the last is typed and saved. */
+    done: Promise<void>;
+    /** Shared by the edits in a row: they save the file, unless it had the user's unsaved changes before them or the user typed in it meanwhile. */
+    chain: { save: boolean };
+}
+
+/** A preview's edit, once placed and queued: what edit_file's result and the expected text are made of. */
+interface PlacedPreview {
+    relative: string;
+    /** The file as the edits before it leave it, and where the edit goes in it. */
+    text: string;
+    place: { start: number; end: number };
+    crlf: boolean;
+    chain: { save: boolean };
+    queued: boolean;
+    know(expected: string): void;
+}
+
 /**
  * The voice agent's hands in the user's VS Code (docs/voice-pair-agent-cursor.md §11-§13): it opens
  * code and reads VS Code's output, types edits into the editor character by character (at once when not followed) at Pi's
@@ -60,9 +124,15 @@ export class PairHands implements EditorHands, vscode.Disposable {
     private _leftRunning: TerminalRun[] = [];
     /** The last send queued per running command, so the next one waits for it. */
     private readonly _sending = new WeakMap<TerminalRun, Promise<unknown>>();
-    private readonly _subscription: vscode.Disposable;
+    private readonly _subscriptions: vscode.Disposable[];
     /** Every path the pair tools touch goes through its workspace check. */
     private readonly _files: FileHands;
+    /** Edits edit_file accepted and not yet typed and saved, by file path. */
+    private readonly _typing = new Map<string, FileTyping>();
+    /** Accepted edits not yet in, for finishTyping. */
+    private readonly _jobs = new Set<TypingJob>();
+    /** What went wrong with an edit after edit_file returned, for the model's next tool result or turn. */
+    private _late: string[] = [];
 
     constructor(
         /** Relative paths and Pi terminals start here. */
@@ -72,18 +142,41 @@ export class PairHands implements EditorHands, vscode.Disposable {
         private readonly _output: OutputReader,
     ) {
         this._files = new FileHands(_root, _cursor);
-        this._subscription = vscode.window.onDidCloseTerminal((terminal) => {
-            const i = this._terminals.indexOf(terminal);
-            if (i >= 0) {
-                this._terminals.splice(i, 1);
-            }
-            this._busy.delete(terminal);
-            this._leftRunning = this._leftRunning.filter((run) => run.terminal !== terminal);
-        });
+        this._subscriptions = [
+            vscode.window.onDidCloseTerminal((terminal) => {
+                const i = this._terminals.indexOf(terminal);
+                if (i >= 0) {
+                    this._terminals.splice(i, 1);
+                }
+                this._busy.delete(terminal);
+                this._leftRunning = this._leftRunning.filter((run) => run.terminal !== terminal);
+            }),
+            // Not followed, an edit goes in at once: so does the rest of one being typed.
+            _cursor.onDidChangeFollowing((following) => {
+                if (!following) {
+                    this.finishTyping();
+                }
+            }),
+        ];
     }
 
     dispose(): void {
-        this._subscription.dispose();
+        this.finishTyping();
+        for (const subscription of this._subscriptions) {
+            subscription.dispose();
+        }
+    }
+
+    finishTyping(): void {
+        for (const job of this._jobs) {
+            job.hurry = true;
+        }
+    }
+
+    takeLateResults(): string[] {
+        const late = this._late;
+        this._late = [];
+        return late;
     }
 
     openFile(target: CodeAnchor): Promise<string> {
@@ -178,7 +271,9 @@ export class PairHands implements EditorHands, vscode.Disposable {
         return source ? this._output.read(source, lines) : this._output.list();
     }
 
-    startDebugging(configuration: string | undefined, noDebug: boolean, timeoutMs: number): Promise<string> {
+    async startDebugging(configuration: string | undefined, noDebug: boolean, timeoutMs: number): Promise<string> {
+        // The program runs what is saved: the edits being typed first.
+        await this._typed(undefined);
         return this._debug.start(configuration, noDebug, timeoutMs);
     }
 
@@ -202,7 +297,8 @@ export class PairHands implements EditorHands, vscode.Disposable {
         return this._files.createFolder(target);
     }
 
-    renamePath(from: string, to: string): Promise<string> {
+    async renamePath(from: string, to: string): Promise<string> {
+        await this._typed([from, to]);
         return this._files.rename(from, to);
     }
 
@@ -210,18 +306,26 @@ export class PairHands implements EditorHands, vscode.Disposable {
         return this._files.describeDeletion(target, recursive);
     }
 
-    deletePath(target: string, recursive: boolean): Promise<string> {
+    async deletePath(target: string, recursive: boolean): Promise<string> {
+        await this._typed([target]);
         return this._files.delete(target, recursive);
     }
 
-    saveFiles(target: string | undefined): Promise<string> {
+    async saveFiles(target: string | undefined): Promise<string> {
+        await this._typed(target === undefined ? undefined : [target]);
         return this._files.save(target);
     }
 
-    closeEditor(target: string): Promise<string> {
+    async closeEditor(target: string): Promise<string> {
+        await this._typed([target]);
         return this._files.close(target);
     }
 
+    /**
+     * Places the edit and returns at once, so the model can go on talking; it is typed into the editor
+     * and saved in the background, after the edits already accepted on the file. What goes wrong after
+     * this returns comes back through takeLateResults.
+     */
     async editFile(edit: { path: string; oldText: string; newText: string; nearLine?: number }): Promise<string> {
         const { uri, relative } = await this._files.resolve(edit.path);
         try {
@@ -230,50 +334,319 @@ export class PairHands implements EditorHands, vscode.Disposable {
             throw new Error(`${relative} does not exist: create it with create_file.`);
         }
         const document = await vscode.workspace.openTextDocument(uri);
-        const place = locateEdit(document.getText(), edit.oldText, edit.nearLine);
+        const key = uri.fsPath;
+        let before = this._typing.get(key);
+        // Behind a preview still being written, it waits for that call to say what it leaves.
+        while (before && before.expected === undefined) {
+            await before.known;
+            before = this._typing.get(key);
+        }
+        // Behind edits still being typed, it is placed in the text they leave.
+        const text = before?.expected ?? document.getText();
+        const place = locateEdit(text, edit.oldText, edit.nearLine);
         if ('error' in place) {
             throw new Error(place.error);
         }
-        const hadUnsavedChanges = document.isDirty;
-        const startLine = document.positionAt(place.start).line;
-        const editor = await this._cursor.write(uri, new vscode.Range(startLine, 0, document.positionAt(place.end).line, 0));
+        // As the editor will store it.
+        const newText = document.eol === vscode.EndOfLine.CRLF ? edit.newText.replace(/\r?\n/g, '\r\n') : edit.newText;
+        const chain = before?.chain ?? { save: !document.isDirty };
+        this._queue(uri, relative, before, edit, new TypingSource(edit.newText, true), chain)(text.slice(0, place.start) + newText + text.slice(place.end));
+        return this._acceptedText(relative, text, place, newText, chain, before !== undefined);
+    }
 
-        // The removal and every typed line form one undo step: only the first edit opens it, only the last closes it.
-        const chunks = typingChunks(edit.newText, this._cursor.following);
-        const removal = new vscode.Range(document.positionAt(place.start), document.positionAt(place.end));
-        if (!(await this._cursor.selfEdit(editor.edit((b) => b.delete(removal), { undoStopBefore: true, undoStopAfter: chunks.length === 0 })))) {
-            throw new Error(`Could not edit ${relative}: its editor was closed.`);
+    /**
+     * Types an edit_file call's replacement while the model still writes it, when Pi is followed and
+     * its place is found; otherwise it does nothing and the call runs as any other when it arrives.
+     */
+    previewEdit(edit: { path: string; oldText: string; nearLine?: number }): EditPreview {
+        const source = new TypingSource();
+        /** The call arrived or was dropped: a start still on its way does not queue anything. */
+        let settled = false;
+        const started: Promise<PlacedPreview | undefined> = this._cursor.following
+            ? this._startPreview(edit, source, () => settled).catch(() => undefined)
+            : Promise.resolve(undefined);
+        return {
+            update: (newText) => {
+                if (!settled) {
+                    source.set(newText, false);
+                }
+            },
+            commit: async (final) => {
+                settled = true;
+                const placed = await started;
+                if (!placed) {
+                    return undefined;
+                }
+                const same =
+                    final.path === edit.path &&
+                    final.oldText === edit.oldText &&
+                    (final.nearLine === undefined || edit.nearLine === undefined || final.nearLine === edit.nearLine) &&
+                    final.newText.startsWith(source.text);
+                if (!same) {
+                    // The final arguments win: what was typed of other ones is undone first, in the file's queue.
+                    source.drop();
+                    placed.know(placed.text);
+                    return undefined;
+                }
+                source.set(final.newText, true);
+                const newText = placed.crlf ? final.newText.replace(/\r?\n/g, '\r\n') : final.newText;
+                placed.know(placed.text.slice(0, placed.place.start) + newText + placed.text.slice(placed.place.end));
+                return this._acceptedText(placed.relative, placed.text, placed.place, newText, placed.chain, placed.queued);
+            },
+            drop: () => {
+                settled = true;
+                source.drop();
+                void started.then((placed) => placed?.know(placed.text));
+            },
+        };
+    }
+
+    /** Places a preview's edit and queues its typing; undefined when it cannot be placed now (the call then runs as usual). */
+    private async _startPreview(edit: { path: string; oldText: string; nearLine?: number }, source: TypingSource, settled: () => boolean): Promise<PlacedPreview | undefined> {
+        const { uri, relative } = await this._files.resolve(edit.path);
+        await vscode.workspace.fs.stat(uri);
+        const document = await vscode.workspace.openTextDocument(uri);
+        const before = this._typing.get(uri.fsPath);
+        // Another preview of this file is still being written: its text is not known yet.
+        if (settled() || (before && before.expected === undefined)) {
+            return undefined;
         }
-        const pause = CHAR_MS;
-        let offset = place.start;
-        for (let i = 0; i < chunks.length; i++) {
-            const version = document.version;
-            const at = document.positionAt(offset);
-            const last = i === chunks.length - 1;
-            const typed = await this._cursor.selfEdit(editor.edit((b) => b.insert(at, chunks[i]), { undoStopBefore: false, undoStopAfter: last }));
-            // Someone else changed the file meanwhile (the user typing): offsets no longer hold, so stop here.
-            if (!typed || document.version !== version + 1) {
-                const written = offset - place.start + (typed ? chunks[i].length : 0);
-                throw new Error(
-                    `Stopped after ${written} of ${edit.newText.length} characters of ${relative}: ${typed ? 'the file changed while I was typing' : 'its editor was closed'}. Read it again before going on.`,
-                );
+        const text = before?.expected ?? document.getText();
+        const place = locateEdit(text, edit.oldText, edit.nearLine);
+        if ('error' in place) {
+            return undefined;
+        }
+        const chain = before?.chain ?? { save: !document.isDirty };
+        const know = this._queue(uri, relative, before, edit, source, chain);
+        return { relative, text, place, crlf: document.eol === vscode.EndOfLine.CRLF, chain, queued: before !== undefined, know };
+    }
+
+    /**
+     * Queues typing `source` into the file behind the edits accepted on it before; returns how to
+     * say the text the file has once it is in, which the next edit is placed in.
+     */
+    private _queue(
+        uri: vscode.Uri,
+        relative: string,
+        before: FileTyping | undefined,
+        edit: { oldText: string; nearLine?: number },
+        source: TypingSource,
+        chain: { save: boolean },
+    ): (expected: string) => void {
+        const key = uri.fsPath;
+        const job: TypingJob = { hurry: false };
+        this._jobs.add(job);
+        const known = Promise.withResolvers<void>();
+        const typing: FileTyping = {
+            expected: undefined,
+            known: known.promise,
+            chain,
+            done: (before?.done ?? Promise.resolve())
+                .then(() => this._type(uri, edit, source, chain, job))
+                .catch((err: unknown) => {
+                    this._late.push(`edit_file on ${relative}: ${err instanceof Error ? err.message : String(err)}`);
+                })
+                .finally(() => {
+                    this._jobs.delete(job);
+                    if (this._typing.get(key) === typing) {
+                        this._typing.delete(key);
+                    }
+                }),
+        };
+        this._typing.set(key, typing);
+        return (expected) => {
+            typing.expected = expected;
+            known.resolve();
+        };
+    }
+
+    /** edit_file's result for `newText` placed at `place` in `text`, the file as the edits before it leave it. */
+    private _acceptedText(relative: string, text: string, place: { start: number; end: number }, newText: string, chain: { save: boolean }, queued: boolean): string {
+        const startLine = text.slice(0, place.start).split('\n').length;
+        const endLine = (text.slice(0, place.start) + newText).slice(0, Math.max(place.start, place.start + newText.length - 1)).split('\n').length;
+        const where = newText === '' ? `removes the text at line ${startLine}` : `becomes lines ${startLine}-${endLine}`;
+        const how = queued
+            ? "is typed into the user's editor after your earlier edits to this file"
+            : this._cursor.following
+              ? "is being typed into the user's editor now"
+              : 'goes into the editor at once';
+        const save = chain.save ? 'and saved when done' : "and left unsaved, because the file already had the user's unsaved changes";
+        return (
+            `Edit of ${relative} accepted: it ${where} and ${how}, ${save}. One Ctrl+Z in the editor undoes it. ` +
+            'Go on without waiting for it; a problem with it comes later as <late-result>.'
+        );
+    }
+
+    /**
+     * Types an accepted edit into the user's editor and saves the file; throws what the model should
+     * hear later. A preview's text streams in through `source`; dropped, what was typed is undone.
+     */
+    private async _type(uri: vscode.Uri, edit: { oldText: string; nearLine?: number }, source: TypingSource, chain: { save: boolean }, job: TypingJob): Promise<void> {
+        if (source.dropped) {
+            return;
+        }
+        const document = await vscode.workspace.openTextDocument(uri);
+        const place = locateEdit(document.getText(), edit.oldText, edit.nearLine);
+        if ('error' in place) {
+            if (source.dropped) {
+                return;
             }
-            offset += chunks[i].length;
-            this._cursor.writing(editor, new vscode.Range(startLine, 0, document.positionAt(offset).line, 0));
-            if (!last) {
-                await sleep(pause);
+            throw new Error(`Not applied, because the file changed before it could be typed: ${place.error} Read the file again before going on.`);
+        }
+        const original = document.getText().slice(place.start, place.end);
+        // Offsets in the document as it changes: the replaced text until removed, the typed text, and where the next piece goes.
+        let start = place.start;
+        let end = place.end;
+        let at = place.start;
+        let typed = 0;
+        let userChanged = false;
+        /** Pi's own change in flight, as its change event shows it (the editor may store line breaks as CRLF). */
+        let own: { offset: number; length: number; text: string } | undefined;
+        const subscription = vscode.workspace.onDidChangeTextDocument((e) => {
+            if (e.document.uri.toString() !== uri.toString()) {
+                return;
+            }
+            for (const change of e.contentChanges) {
+                if (own && change.rangeOffset === own.offset && change.rangeLength === own.length && change.text.replace(/\r\n/g, '\n') === own.text.replace(/\r\n/g, '\n')) {
+                    at = change.rangeOffset + change.text.length;
+                    own = undefined;
+                    continue;
+                }
+                // The user typing: the rest goes in at once, where it belongs now.
+                userChanged = true;
+                job.hurry = true;
+                start = shiftOffset(start, change);
+                end = shiftOffset(end, change);
+                at = shiftOffset(at, change);
+            }
+        });
+        /** Puts `text` over [from, to) with a workspace edit, which needs no open editor and no unchanged document. */
+        const atOnce = async (from: number, to: number, text: string): Promise<boolean> => {
+            const replace = new vscode.WorkspaceEdit();
+            replace.replace(uri, new vscode.Range(document.positionAt(from), document.positionAt(to)), text);
+            own = { offset: from, length: to - from, text };
+            const done = await this._cursor.selfEdit(vscode.workspace.applyEdit(replace));
+            own = undefined;
+            return done;
+        };
+        let dropped = false;
+        try {
+            const editor = await this._cursor.write(uri, new vscode.Range(document.positionAt(start).line, 0, document.positionAt(end).line, 0));
+            // A whole replacement is cut into its pieces at once; one still streaming is typed as it comes.
+            let pieces = source.done ? typingChunks(source.text, this._cursor.following && !job.hurry) : undefined;
+            let next = 0;
+            // The removal and every typed piece form one undo step: only the first edit opens it, only the last closes it.
+            const removal = new vscode.Range(document.positionAt(start), document.positionAt(end));
+            own = { offset: start, length: end - start, text: '' };
+            const removed = await this._cursor.selfEdit(editor.edit((b) => b.delete(removal), { undoStopBefore: true, undoStopAfter: source.done && source.text === '' }));
+            own = undefined;
+            if (!removed) {
+                // Its editor was closed, or the user changed the file just then: the whole edit at once, placed again.
+                while (!source.done && !source.dropped) {
+                    await source.next();
+                }
+                if (source.dropped) {
+                    return;
+                }
+                const again = locateEdit(document.getText(), edit.oldText, edit.nearLine);
+                if ('error' in again) {
+                    throw new Error(`Not applied, because the file changed before it could be typed: ${again.error} Read the file again before going on.`);
+                }
+                start = again.start;
+                if (!(await atOnce(again.start, again.end, source.text))) {
+                    throw new Error('Not applied: VS Code would not change the file. Read it again before going on.');
+                }
+                typed = source.text.length;
+            }
+            for (;;) {
+                if (source.dropped) {
+                    // The call will not run: what was typed of it goes, the replaced text comes back.
+                    dropped = true;
+                    const span = new vscode.Range(document.positionAt(start), document.positionAt(at));
+                    own = { offset: start, length: at - start, text: original };
+                    const undone = (await this._cursor.selfEdit(editor.edit((b) => b.replace(span, original), { undoStopBefore: false, undoStopAfter: true }))) || (await atOnce(start, at, original));
+                    own = undefined;
+                    if (!undone) {
+                        throw new Error('That call did not run, but VS Code would not take back what was typed of it. Read the file again before going on.');
+                    }
+                    break;
+                }
+                const rest = source.text.slice(typed);
+                if (!rest) {
+                    if (source.done) {
+                        break;
+                    }
+                    await source.next();
+                    continue;
+                }
+                if (source.done && !pieces) {
+                    pieces = typingChunks(rest, this._cursor.following && !job.hurry);
+                    next = 0;
+                }
+                let piece: string;
+                if (job.hurry) {
+                    piece = rest;
+                } else if (pieces) {
+                    piece = pieces[next++];
+                } else {
+                    // Streaming: an eighth of what waits per step, so typing keeps up with the model.
+                    const chars = Array.from(rest);
+                    piece = chars.slice(0, Math.ceil(chars.length / 8)).join('');
+                }
+                const last = source.done && typed + piece.length === source.text.length;
+                const position = document.positionAt(at);
+                own = { offset: at, length: 0, text: piece };
+                let inserted = await this._cursor.selfEdit(editor.edit((b) => b.insert(position, piece), { undoStopBefore: false, undoStopAfter: last }));
+                own = undefined;
+                if (!inserted) {
+                    // Its editor was closed, or the user changed the file just then: the rest at once.
+                    job.hurry = true;
+                    inserted = await atOnce(at, at, piece);
+                }
+                if (!inserted) {
+                    throw new Error(`Stopped after ${typed} of ${source.text.length} characters: VS Code would not take the rest. Read the file again before going on.`);
+                }
+                typed += piece.length;
+                this._cursor.writing(editor, new vscode.Range(document.positionAt(start).line, 0, document.positionAt(at).line, 0));
+                if (!last && !job.hurry) {
+                    await sleep(CHAR_MS);
+                }
+            }
+            if (!dropped) {
+                this._cursor.writing(editor, new vscode.Range(document.positionAt(start).line, 0, document.positionAt(Math.max(start, at - 1)).line, 0));
+            }
+        } finally {
+            subscription.dispose();
+        }
+        if (userChanged && chain.save) {
+            // Saving would also save the user's own changes in this file: leave that to them, for this edit and the ones after it.
+            chain.save = false;
+            if (!dropped) {
+                throw new Error('Typed in, but not saved: the user changed the file while it was being typed, so saving it is left to them.');
             }
         }
-        const endLine = document.positionAt(Math.max(place.start, offset - 1)).line;
-        this._cursor.writing(editor, new vscode.Range(startLine, 0, endLine, 0));
-        // Saving would also save the user's own unsaved changes in this file: leave that to them.
-        const saved = !hadUnsavedChanges && (await document.save());
-        const where = chunks.length === 0 ? `removed text at line ${startLine + 1}` : `wrote lines ${startLine + 1}-${endLine + 1}`;
-        const state = saved ? 'saved' : 'not saved, because the file already had the user\'s unsaved changes';
-        return `Edited ${relative}: ${where} (${state}). One Ctrl+Z in the editor undoes it.`;
+        // Dropped, the file is back as it was on disk: saving clears its unsaved mark.
+        if (chain.save && !(await document.save())) {
+            throw new Error(dropped ? 'That call did not run; what was typed of it is undone, but VS Code could not save the file.' : 'Typed in, but VS Code could not save the file; it is left unsaved.');
+        }
+    }
+
+    /**
+     * Settles once the edits accepted on `targets` are typed and saved: files, or folders with every file
+     * in them; undefined: every file. A path that does not resolve waits for nothing (the call then fails on it).
+     */
+    private async _typed(targets: readonly string[] | undefined): Promise<void> {
+        if (this._typing.size === 0) {
+            return;
+        }
+        const paths = targets && (await Promise.all(targets.map((target) => this._files.resolve(target).then((r) => r.uri.fsPath, () => undefined))));
+        const pending = [...this._typing].filter(([file]) => !paths || paths.some((p) => p !== undefined && insideFolder(p, file)));
+        await Promise.all(pending.map(([, typing]) => typing.done));
     }
 
     async runInTerminal(command: string, timeoutMs: number): Promise<string> {
+        // The command sees what is saved: the edits being typed first.
+        await this._typed(undefined);
         const terminal = this._terminal();
         terminal.show(true);
         const shell = terminal.shellIntegration ?? (await shellIntegration(terminal));

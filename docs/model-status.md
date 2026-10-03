@@ -24,4 +24,6 @@ Files: `src/providers/model-status.ts` (`ModelStatusTracker`), `src/pi/providerU
 - pi: top-level keys of `~/.pi/agent/auth.json`.
 - omp: reads enabled `auth_credentials` rows from `~/.omp/agent/agent.db` via `node:sqlite`; without `node:sqlite`, falls back to RPC `get_login_providers`.
 
+Custom providers are listed too (`readCustomProviders`): entries in `~/.pi/agent/models.json` / `~/.omp/agent/models.yml` `providers` with their own non-empty `models` list. They have no `/login`, so the login store never names them. Entries without `models` only re-point a built-in provider (baseUrl, placeholder key) and stay hidden, as do providers whose key only comes from an env var.
+
 `oh-my-pi-chater.showAllModels` disables the filter.

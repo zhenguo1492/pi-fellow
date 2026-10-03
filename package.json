@@ -270,7 +270,7 @@
         "oh-my-pi-chater.showAllModels": {
           "type": "boolean",
           "default": false,
-          "description": "List every model the agent reports, including providers configured only via env vars or models.json/models.yml. Off: only providers you signed in to with /login (pi auth.json / omp credential store)."
+          "description": "List every model the agent reports, including providers configured only via env vars or built-in provider overrides in models.json/models.yml. Off: only providers you signed in to with /login (pi auth.json / omp credential store) and custom providers that declare their own models in models.json/models.yml."
         },
         "oh-my-pi-chater.favoriteModels": {
           "type": "array",

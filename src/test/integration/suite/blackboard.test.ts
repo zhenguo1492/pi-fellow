@@ -284,7 +284,7 @@ suite('Blackboard', function () {
         );
     });
 
-    test('show_me with long or Mermaid content opens "Board · <title>" in the code\'s editor group, and returns the outline and Mermaid errors', async () => {
+    test('show_me with long or Mermaid content opens "Board · <title>" in the code\'s editor group, returns the outline at once, and the Mermaid errors in the next message', async () => {
         await vscode.window.showTextDocument(codeFile, { viewColumn: vscode.ViewColumn.One });
         const written = await win.call('How does login work?', 'show_me', { markdown: LOGIN, title: 'Login flow' });
         assert.strictEqual(written.isError, false, written.text);
@@ -292,8 +292,12 @@ suite('Blackboard', function () {
         for (const line of ['h1 heading "Login flow"', 'p1 paragraph "The client sends a token to the server."', 'l1 list, 2 items', 't1 table, 1 rows', 'q1 quote "Tokens expire after an hour."', 'c1 code ts, 4 lines', 'd1 diagram flowchart, 3 lines', 'd2 diagram this, 1 lines']) {
             assert.ok(written.text.includes(line), `outline has ${line}:\n${written.text}`);
         }
-        assert.match(written.text, /d2 did not render: /);
-        assert.doesNotMatch(written.text, /d1 did not render/);
+        assert.doesNotMatch(written.text, /did not render/);
+        // The page answers in order: once it says what it shows, it has drawn the board and sent its errors.
+        await win.boards.shown('b1');
+        const next = await win.say('Is it all there?');
+        assert.match(next, /<late-result tool="show_me">Board b1 "Login flow": d2 did not render: /);
+        assert.doesNotMatch(next, /d1 did not render/);
 
         assert.deepStrictEqual(
             boardTabs().map((t) => t.label),
@@ -579,8 +583,12 @@ suite('Blackboard', function () {
         const written = await win.call('Show me a stack.', 'show_me', { board: 'new', title: 'Stack', markdown: page });
         assert.strictEqual(written.isError, false, written.text);
         assert.ok(written.text.includes('w1 web page "Stack", 7 lines'), written.text);
-        // The page's script ran (with the frame nonce, under the inherited CSP) and its error came back through its port.
-        assert.match(written.text, /w1 reported: inline event handlers do not run on a board \(onclick on <button>\)[^\n]*; Uncaught Error: stack boom\. Fix the HTML/);
+        await win.boards.shown('b4');
+
+        // The page's script ran (with the frame nonce, under the inherited CSP) and its error came back
+        // through its port, to the next message.
+        const next = await win.say('Does it work?');
+        assert.match(next, /<late-result tool="show_me">Board b4 "Stack": w1 reported: inline event handlers do not run on a board \(onclick on <button>\)[^\n]*; Uncaught Error: stack boom\. Fix the HTML/);
 
         const pointed = await win.call('Which one?', 'board_point', { block: 'w1', text: 'Pop' });
         assert.strictEqual(pointed.isError, true);

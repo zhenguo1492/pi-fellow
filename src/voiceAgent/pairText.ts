@@ -74,3 +74,16 @@ export function insideFolder(folder: string, target: string): boolean {
     const relative = path.relative(folder, target);
     return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
+
+/**
+ * Where character `offset` of a document is after a change replaced `rangeLength` characters at
+ * `rangeOffset` with `text` (a TextDocumentContentChangeEvent): before the change it stays, after it
+ * it moves by the change's growth, and inside the replaced text it goes to the end of the new text.
+ */
+export function shiftOffset(offset: number, change: { rangeOffset: number; rangeLength: number; text: string }): number {
+    if (offset <= change.rangeOffset) {
+        return offset;
+    }
+    const end = change.rangeOffset + change.rangeLength;
+    return offset >= end ? offset + change.text.length - change.rangeLength : change.rangeOffset + change.text.length;
+}

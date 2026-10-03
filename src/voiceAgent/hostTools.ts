@@ -1,11 +1,13 @@
 import * as path from 'node:path';
-import { showMeIsCard, type BoardHands, type BoardMarkStyle, type BoardMoveTo, type BoardViewAction } from '../shared/board';
+import { showMeIsCard, type BoardHands, type BoardMarkStyle, type BoardMoveTo, type BoardPreview, type BoardViewAction, type BoardWriteRequest } from '../shared/board';
 import type { RpcHostToolDefinition } from '../pi/rpcTypes';
 import type { CodeAnchor } from './codeAnchors';
 import type { WorkerAnswer, WorkerController, WorkerSendOutcome } from './workerController';
 import type { ResearchJob } from './research';
 import { formatViewers, type FileViewers, type Viewer } from './viewers';
+import { partialFields, type PartialField } from './partialArgs';
 import { clip, formatDigest, type WorkerDigest } from './workerDigest';
+import { lateResultBlocks } from './voicePrompt';
 
 /** Keys terminal_send can press by name: what a terminal gets for each. */
 const TERMINAL_KEYS: Record<string, string> = {
@@ -137,6 +139,27 @@ export interface ToolResult {
     research?: ResearchJob;
 }
 
+/** What an edit_file or show_me found out after it returned: an edit that could not be typed or saved, a drawing's errors. */
+export interface LateResult {
+    tool: 'edit_file' | 'show_me';
+    text: string;
+}
+
+/** An edit_file typed while its call streams (EditorHands.previewEdit). */
+export interface EditPreview {
+    /** The replacement as written so far. */
+    update(newText: string): void;
+    /**
+     * The call arrived. With arguments that match what was typed, the preview becomes that edit and
+     * resolves with edit_file's result; otherwise it is undone and resolves undefined, so the edit runs anew.
+     */
+    commit(edit: { path: string; oldText: string; newText: string; nearLine?: number }): Promise<string | undefined>;
+    /** The call will not run: what was typed is undone. */
+    drop(): void;
+}
+
+type Preview = { toolName: 'edit_file'; edit: EditPreview } | { toolName: 'show_me'; board: BoardPreview };
+
 const OBJECT = { type: 'object', additionalProperties: false } as const;
 
 export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
@@ -252,18 +275,21 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
             'Short content (no Mermaid or web page, at most 5 lines, e.g. one command) is a card under your reply in the chat. Everything else goes on a board: one Markdown document in its own editor tab, like a teacher\'s blackboard, with text, tables, lists, highlighted code, ```mermaid diagrams and ```html web pages. ' +
             'A ```html block is a live web page in a sandboxed frame: a UI prototype the user can click, or an interactive or animated demo such as an algorithm visualization (a stack with Push and Pop buttons animating each step). Write one self-contained page: inline <style> and <script> elements, handlers attached with addEventListener (inline onclick=… attributes do not run), no external scripts, stylesheets, images or fonts (data: URLs work), no network. The page is laid out once at its design width and shown whole, scaled down to fit the board like a picture, never reflowed; the user zooms and pans it or fills the board with it. Declare a design size with <meta name="viewport" content="width=1920, height=1080"> when the page is made for a large screen or a fixed frame (height is optional: without it the page is as tall as its content, and 100vh is that height); without the tag it is laid out at the board\'s column width. The user can show its source. To show HTML as code to read, fence it ```xml. ' +
             'Same topic: add to the current board (mode append) or rewrite one of its blocks (mode block). New topic: board "new" with a title. ' +
-            'The result is the board\'s outline, block ids per kind (h heading, p paragraph, l list, t table, q quote, c code, d diagram, w web page), plus any Mermaid errors and web page script errors to fix. ' +
+            'The result comes at once, before the board has drawn it: the board\'s outline, block ids per kind (h heading, p paragraph, l list, t table, q quote, c code, d diagram, w web page); point at its blocks right away. Mermaid errors and web page script errors come later, as <late-result tool="show_me"> in your next tool result or message: fix them with mode block. ' +
             'Write the whole view first, then explain it, starting each sentence with a board marker; you point at a web page only as a whole block, while the user can mark an element in it (Alt+click), which comes in <board> with its selector and HTML. A new board opens as a tab in the editor group of the user\'s code, in front of it, without the focus; board_view moves it (beside, right, a new window) or maximizes it when the user asks. ' +
             'Links work when the user clicks them: [text](src/file.ts) opens a workspace file (src/file.ts#L12 or src/file.ts:12 at a line), https links open in their browser; link to code you talk about. ' +
             'Draw the smallest view that makes the point: logic as pseudocode, runtime flow as an indented call tree, UI as a component tree (a web page when the user should see or try it), layout as a shallow file tree, interaction and data flow as Mermaid, how an algorithm or data structure changes step by step as an animated web page, a change as a ```diff block in the same shape, and whole code only when most of it is new or the user needs to copy it. Keep only what the current question needs. Works in Plan mode; changes no workspace file.',
         parameters: {
             ...OBJECT,
             properties: {
-                markdown: { type: 'string', description: 'Markdown: text, tables, lists, fenced code with its language, ```mermaid diagrams, ```html web pages.' },
                 title: { type: 'string', description: 'A few words on what it is: the card title or a new board\'s title. Given for an existing board, it renames it: leave it out when adding to one.' },
                 board: { type: 'string', description: 'A board id, or "new" for a new board; leave out for the current board.' },
                 mode: { type: 'string', enum: ['append', 'replace', 'block'], description: 'append (default): at the end; replace: the whole board; block: replace block `block` (empty markdown removes it).' },
                 block: { type: 'string', description: 'mode block: the block id to replace, e.g. d1.' },
+                markdown: {
+                    type: 'string',
+                    description: 'Markdown: text, tables, lists, fenced code with its language, ```mermaid diagrams, ```html web pages. Write it after the other arguments: the board draws its finished blocks while you write it.',
+                },
             },
             required: ['markdown'],
         },
@@ -362,14 +388,17 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
         name: 'edit_file',
         label: 'Edit file',
         description:
-            "Replace oldText with newText in an existing file, typed out character by character in the user's editor while they follow you, so they watch you write (at once when they do not); one Ctrl+Z undoes it. oldText must match the file exactly (read it first). An empty oldText fills an empty file. New files are made with create_file. Keep each edit small: one function or block.",
+            "Replace oldText with newText in an existing file, typed out character by character in the user's editor while they follow you, so they watch you write (at once when they do not); one Ctrl+Z undoes it. " +
+            'It returns as soon as the edit is placed, before the typing: talk while it types. It is saved once typed (not when the file already had the user\'s unsaved changes); your later edits, saves, renames, deletions and closes of the file, terminal commands and debug runs wait for it, and your next edit to the file goes into the text this one leaves. ' +
+            'A problem found while typing comes later as <late-result tool="edit_file">. Do not read the file just to check your edit: read shows the file on disk, which has it only once saved. ' +
+            'oldText must match the file exactly (read it first). An empty oldText fills an empty file. New files are made with create_file. Keep each edit small: one function or block.',
         parameters: {
             ...OBJECT,
             properties: {
                 path: { type: 'string', description: 'Workspace-relative path.' },
-                oldText: { type: 'string', description: 'Exact text to replace, whitespace included; empty for an empty file.' },
-                newText: { type: 'string', description: 'The replacement.' },
                 nearLine: { type: 'integer', minimum: 1, description: 'When oldText occurs more than once: the line of the one you mean.' },
+                oldText: { type: 'string', description: 'Exact text to replace, whitespace included; empty for an empty file.' },
+                newText: { type: 'string', description: 'The replacement. Write it last: typing starts while you write it.' },
             },
             required: ['path', 'oldText', 'newText'],
         },
@@ -575,13 +604,23 @@ export const VOICE_HOST_TOOLS: RpcHostToolDefinition[] = [
 
 /** What the voice agent can do in the user's VS Code; each resolves with a report for the model. */
 export interface EditorHands {
+    /** Every edit editFile accepted and has not typed yet goes in at once. */
+    finishTyping(): void;
+    /** What went wrong with edits after editFile returned; each is handed out once. */
+    takeLateResults(): string[];
     /** Opens and highlights code in the user's editor. */
     openFile(target: CodeAnchor): Promise<string>;
     /** The editors and preview commands that can show a file; throws when it is outside the workspace or not a file. */
     listViewers(path: string): Promise<FileViewers>;
     /** Shows a file with one of the viewers listViewers gave for it. */
     openWith(path: string, viewer: Viewer, toSide: boolean): Promise<string>;
+    /** Resolves once the edit is placed; it is typed and saved in the background, after the edits accepted on the file before it. */
     editFile(edit: { path: string; oldText: string; newText: string; nearLine?: number }): Promise<string>;
+    /**
+     * The model is still writing an edit_file call whose place is known: starts typing its replacement
+     * as it streams. Its `commit` or `drop` says what came of the call.
+     */
+    previewEdit(edit: { path: string; oldText: string; nearLine?: number }): EditPreview;
     createFile(path: string, content: string): Promise<string>;
     createFolder(path: string): Promise<string>;
     renamePath(from: string, to: string): Promise<string>;
@@ -674,6 +713,8 @@ export class HostToolRouter {
     private _pendingDelete: { path: string; recursive: boolean; turn: number } | undefined;
     /** Own changes waiting on their approval card, by id. */
     private readonly _held = new Map<string, HeldApproval>();
+    /** edit_file and show_me calls drawn or typed while the model still writes them, by the model's tool call id. */
+    private readonly _previews = new Map<string, Preview>();
     /** Approval cards the user answered, not yet told to the model, per tab. */
     private readonly _unseenApprovals = new Map<string, SettledApproval[]>();
     private _nextApproval = 1;
@@ -744,16 +785,148 @@ export class HostToolRouter {
         return settled;
     }
 
-    async execute(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<ToolResult> {
+    /**
+     * What earlier edit_file and show_me calls found out after they returned; each is handed out once,
+     * with the next tool result or in the next turn's message.
+     */
+    takeLateResults(): LateResult[] {
+        return [
+            ...(this._hands?.takeLateResults() ?? []).map((text): LateResult => ({ tool: 'edit_file', text })),
+            ...(this._boards?.takeLateResults() ?? []).map((text): LateResult => ({ tool: 'show_me', text })),
+        ];
+    }
+
+    /** The reply was cut off, or voice stopped: edits still being typed go in at once. */
+    finishTyping(): void {
+        this._hands?.finishTyping();
+    }
+
+    /**
+     * Runs a finished call. `callId`, the model's tool call id: the call adopts what its preview typed
+     * or drew; a preview it does not adopt (a held approval, a refusal) is undone.
+     */
+    async execute(toolName: string, args: Record<string, unknown>, turn: ToolTurn, callId?: string): Promise<ToolResult> {
+        let result: ToolResult;
         try {
-            const out = await this._run(toolName, args, turn);
-            return typeof out === 'string' ? { text: out, isError: false } : out;
+            const out = await this._run(toolName, args, turn, callId);
+            result = typeof out === 'string' ? { text: out, isError: false } : out;
         } catch (err: unknown) {
-            return { text: err instanceof Error ? err.message : String(err), isError: true };
+            result = { text: err instanceof Error ? err.message : String(err), isError: true };
+        }
+        if (callId !== undefined) {
+            this.dropPreview(callId);
+        }
+        // What an earlier edit or drawing reported since it returned rides along with whatever result comes next.
+        const late = this.takeLateResults();
+        return late.length ? { ...result, text: `${result.text}\n\n${lateResultBlocks(late)}` } : result;
+    }
+
+    /**
+     * The model is writing a host tool call; `json` is its arguments so far. An edit_file whose place
+     * is written starts typing its replacement, a show_me that goes on a board starts drawing its whole
+     * blocks, when the finished call could run without asking (the same checks as `execute`). Other
+     * calls, and calls not written that far, wait for `execute`. Never throws.
+     */
+    preview(callId: string, toolName: string, json: string, turn: ToolTurn): void {
+        if (toolName !== 'edit_file' && toolName !== 'show_me') {
+            return;
+        }
+        try {
+            const fields = partialFields(json);
+            const existing = this._previews.get(callId);
+            if (toolName === 'edit_file') {
+                this._previewEdit(callId, existing, fields, turn);
+            } else {
+                this._previewBoard(callId, existing, fields, turn);
+            }
+        } catch {
+            // A preview is an optimization: the call still runs when it arrives.
         }
     }
 
-    private async _run(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<string | ToolResult> {
+    /** The call will not run (its message was cut off, or the turn ended without it): what its preview did is undone. */
+    dropPreview(callId: string): void {
+        const preview = this._previews.get(callId);
+        this._previews.delete(callId);
+        if (preview?.toolName === 'edit_file') {
+            preview.edit.drop();
+        } else if (preview) {
+            preview.board.end();
+        }
+    }
+
+    private _previewEdit(callId: string, existing: Preview | undefined, fields: Map<string, PartialField>, turn: ToolTurn): void {
+        const newText = fields.get('newText');
+        if (typeof newText?.value !== 'string') {
+            return;
+        }
+        if (existing) {
+            if (existing.toolName === 'edit_file') {
+                existing.edit.update(newText.value);
+            }
+            return;
+        }
+        const filePath = completeValue(fields, 'path');
+        const oldText = completeValue(fields, 'oldText');
+        const nearLine = fields.get('nearLine');
+        if (typeof filePath !== 'string' || !filePath.trim() || typeof oldText !== 'string' || (nearLine !== undefined && typeof nearLine.value !== 'number')) {
+            return;
+        }
+        const { tabId } = turn;
+        const args = { path: filePath };
+        if (
+            !this._hands ||
+            turn.proactive ||
+            this._workerLock(tabId, 'edit_file', args) ||
+            this._worker.permissionLevel(tabId) === 'plan' ||
+            this._needsApproval(tabId, 'edit_file')
+        ) {
+            return;
+        }
+        const edit = this._hands.previewEdit({ path: filePath, oldText, ...(typeof nearLine?.value === 'number' ? { nearLine: nearLine.value } : {}) });
+        this._previews.set(callId, { toolName: 'edit_file', edit });
+        edit.update(newText.value);
+    }
+
+    private _previewBoard(callId: string, existing: Preview | undefined, fields: Map<string, PartialField>, turn: ToolTurn): void {
+        const markdown = fields.get('markdown');
+        if (typeof markdown?.value !== 'string') {
+            return;
+        }
+        // Only what is written whole: a board id or mode still being written is not one yet.
+        const settled: Record<string, unknown> = {};
+        for (const key of ['title', 'board', 'mode', 'block']) {
+            const value = completeValue(fields, key);
+            if (value !== undefined) {
+                settled[key] = value;
+            }
+        }
+        const request = boardWriteRequest(settled, markdown.value);
+        if (existing) {
+            if (existing.toolName === 'show_me') {
+                existing.board.update(request);
+            }
+            return;
+        }
+        // A card is not a board; past the card's size and still growing, it never becomes one again.
+        if (!this._boards || turn.proactive || markdown.value.length > MAX_SHOWN_CHARS || showMeIsCard({ markdown: markdown.value, board: settled.board, mode: settled.mode })) {
+            return;
+        }
+        const board = this._boards.preview(request);
+        this._previews.set(callId, { toolName: 'show_me', board });
+    }
+
+    /** Takes the preview of call `callId` when it is of `toolName`, for the call to adopt. */
+    private _takePreview<T extends Preview['toolName']>(callId: string | undefined, toolName: T): Extract<Preview, { toolName: T }> | undefined {
+        const preview = callId === undefined ? undefined : this._previews.get(callId);
+        if (preview?.toolName !== toolName) {
+            return undefined;
+        }
+        this._previews.delete(callId!);
+        return preview as Extract<Preview, { toolName: T }>;
+    }
+
+    private async _run(toolName: string, args: Record<string, unknown>, turn: ToolTurn, callId: string | undefined): Promise<string | ToolResult> {
         const { tabId } = turn;
         if (turn.proactive && toolName !== 'worker_status') {
             throw new Error('Nobody asked for this: the user has not spoken since this update. Tell them and let them decide.');
@@ -781,20 +954,24 @@ export class HostToolRouter {
                 research: job,
             };
         }
-        return this._act(toolName, args, turn);
+        return this._act(toolName, args, turn, callId);
     }
 
-    /** Carries out a call that passed the worker-lock and permission checks. */
-    private async _act(toolName: string, args: Record<string, unknown>, turn: ToolTurn): Promise<string> {
+    /** Carries out a call that passed the worker-lock and permission checks; `callId` adopts its preview. */
+    private async _act(toolName: string, args: Record<string, unknown>, turn: ToolTurn, callId?: string): Promise<string> {
         const { tabId } = turn;
         switch (toolName) {
-            case 'edit_file':
-                return this._requireHands().editFile({
+            case 'edit_file': {
+                const edit = {
                     path: requireString(args, 'path'),
                     oldText: typeof args.oldText === 'string' ? args.oldText : '',
                     newText: typeof args.newText === 'string' ? args.newText : '',
                     nearLine: typeof args.nearLine === 'number' ? args.nearLine : undefined,
-                });
+                };
+                // The final arguments win: a preview that typed something else is undone, and the edit runs anew.
+                const adopted = await this._takePreview(callId, 'edit_file')?.edit.commit(edit);
+                return adopted ?? this._requireHands().editFile(edit);
+            }
             case 'create_file':
                 return this._requireHands().createFile(requireString(args, 'path'), typeof args.content === 'string' ? args.content : '');
             case 'create_folder':
@@ -992,23 +1169,11 @@ export class HostToolRouter {
                     }
                     return 'Shown as a card under your reply in the chat; it is not read aloud. Say in a sentence what it is.';
                 }
-                const mode = args.mode ?? 'append';
-                if (mode !== 'append' && mode !== 'replace' && mode !== 'block') {
-                    throw new Error(`Unknown mode ${String(mode)}: use append, replace or block.`);
-                }
-                const block = optionalString(args, 'block');
-                if (mode === 'block' && !block) {
-                    throw new Error('Missing block: mode block replaces the block with that id.');
-                }
-                const title = optionalString(args, 'title');
-                const board = optionalString(args, 'board');
-                return this._requireBoards().write({
-                    markdown,
-                    mode,
-                    ...(block ? { block: block.trim() } : {}),
-                    ...(title ? { title } : {}),
-                    ...(board ? { board: board.trim() } : {}),
-                });
+                const request = boardWriteRequest(args, markdown);
+                // The final arguments win: the preview's tab stays only when this writes the board it drew.
+                // A call that does not get this far leaves its preview to `execute`, which undoes it.
+                this._takePreview(callId, 'show_me')?.board.end(request);
+                return this._requireBoards().write(request);
             }
             case 'board_point': {
                 const style = optionalString(args, 'style');
@@ -1230,6 +1395,33 @@ export class HostToolRouter {
         }
         return lines.join('\n');
     }
+}
+
+/** The board write a show_me call that goes on a board asks for; throws for arguments that make none. */
+function boardWriteRequest(args: Record<string, unknown>, markdown: string): BoardWriteRequest {
+    const mode = args.mode ?? 'append';
+    if (mode !== 'append' && mode !== 'replace' && mode !== 'block') {
+        throw new Error(`Unknown mode ${String(mode)}: use append, replace or block.`);
+    }
+    const block = optionalString(args, 'block');
+    if (mode === 'block' && !block) {
+        throw new Error('Missing block: mode block replaces the block with that id.');
+    }
+    const title = optionalString(args, 'title');
+    const board = optionalString(args, 'board');
+    return {
+        markdown,
+        mode,
+        ...(block ? { block: block.trim() } : {}),
+        ...(title ? { title } : {}),
+        ...(board ? { board: board.trim() } : {}),
+    };
+}
+
+/** A streamed field's value once it is written whole. */
+function completeValue(fields: Map<string, PartialField>, key: string): unknown {
+    const field = fields.get(key);
+    return field?.complete ? field.value : undefined;
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {

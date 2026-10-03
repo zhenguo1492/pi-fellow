@@ -9,6 +9,17 @@
 
 # 🎩 Pi Fellow: omp & pi in VS Code, with a Voice Pair Programmer
 
+<div align="center">
+ <img alt="Talking a rate limiter into the editor" width="800" src="docs/images/demo-loop.webp">
+</div>
+
+<details>
+<summary><b>▶ Watch the full two-minute demo</b> — talk through the design, watch it write, ask for a diagram</summary>
+
+https://github.com/user-attachments/assets/02e6e1bb-e581-4c16-b4a5-94bb766dd006
+
+</details>
+
 **Pi Fellow** puts the [omp (Oh My Pi)](https://github.com/can1357/oh-my-pi) and pi coding agents in the VS Code sidebar, as a chat view or as the CLI's full TUI, and adds a voice agent you talk to like a pair-programming partner: it discusses the design with you, writes code in your editor, and hands bigger tasks to an omp/pi worker.
 
 > Want to dive right in? Install `omp` or `pi`, open the **Pi Fellow** view and type `/login`. See [Install](#-install).

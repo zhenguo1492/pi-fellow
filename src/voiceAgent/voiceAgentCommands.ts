@@ -574,6 +574,7 @@ export function registerVoiceAgentCommands(context: vscode.ExtensionContext, wir
                 onMetrics: (turnId, metrics) => store.metrics(turnId, metrics),
                 onAudio: (event) => store.audio(event),
                 onAnchors: (anchors) => routeAnchors(anchors, boards, cursor),
+                onRemark: (text) => store.addUser(text, 'stt'),
                 // What a reply said out loud is the audio Alt+click reads its sentences from.
                 onSpoken: (turnId, pieces) => {
                     const entryId = store.entryIdOfTurn(turnId);

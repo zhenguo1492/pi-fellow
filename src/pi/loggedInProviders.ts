@@ -2,6 +2,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentLayout } from './agentBackend';
 
+// js-yaml is bundled by esbuild
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const yaml: { load(text: string): unknown } = require('js-yaml');
+
 /**
  * Providers with credentials stored by `/login` (OAuth or API key), excluding keys that only
  * come from env vars or `models.yml`/`models.json` provider config.
@@ -37,4 +41,32 @@ export async function readLoggedInProviders(layout: AgentLayout): Promise<Set<st
     } catch {
         return undefined;
     }
+}
+
+/**
+ * Custom providers the user declared in `models.json` (pi) / `models.yml` (omp): entries with
+ * their own `models` list. They have no `/login`, so the login store never names them.
+ * Entries without `models` only re-point a built-in provider (baseUrl, placeholder key) and are
+ * left out. Missing or unparsable file = none.
+ */
+export async function readCustomProviders(layout: AgentLayout): Promise<string[]> {
+    const file = layout.backend === 'pi' ? 'models.json' : 'models.yml';
+    let config: unknown;
+    try {
+        const text = await fs.readFile(path.join(layout.agentDir, file), 'utf8');
+        config = layout.backend === 'pi' ? JSON.parse(text) : yaml.load(text);
+    } catch {
+        return [];
+    }
+    if (!config || typeof config !== 'object' || !('providers' in config)) {
+        return [];
+    }
+    const providers = config.providers;
+    if (!providers || typeof providers !== 'object') {
+        return [];
+    }
+    return Object.entries(providers)
+        .filter(([, p]: [string, unknown]) =>
+            !!p && typeof p === 'object' && 'models' in p && Array.isArray(p.models) && p.models.length > 0)
+        .map(([id]) => id);
 }

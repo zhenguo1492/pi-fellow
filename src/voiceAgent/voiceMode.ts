@@ -72,6 +72,8 @@ export interface VoiceModeOptions {
     onAudio?(event: ReplyAudioEvent): void;
     /** The reply points at code: called as the sentence the anchors precede starts playing. */
     onAnchors?(anchors: CodeAnchor[]): void;
+    /** The user made a short remark that went into the running reply instead of cutting it off (the transcript shows it). */
+    onRemark?(text: string): void;
     /**
      * Reply `turnId` has finished playing, not cut off, and every sentence it spoke was synthesized:
      * its audio, sentence by sentence as sent to TTS, for the replay cache.
@@ -669,6 +671,15 @@ export class VoiceMode {
                     this._pendingAnchors = undefined;
                     const onPlaying = anchors.length > 0 ? () => this._options.onAnchors?.(anchors) : undefined;
                     this._speaker.enqueue(this._turn.ctl.signal, effect.turnId, effect.text, onPlaying);
+                }
+                return;
+            case 'steer':
+                // Into the reply at its next turn boundary; one that has just ended takes it as a new message.
+                if (this._turn?.id === effect.turnId && this._options.agent.steer(effect.text)) {
+                    this._options.log(`Remark steered into reply ${effect.turnId}.`);
+                    this._options.onRemark?.(effect.text);
+                } else {
+                    queueMicrotask(() => this._dispatch({ type: 'steerFailed', text: effect.text, at: Date.now() }));
                 }
                 return;
             case 'cancelTurn':

@@ -71,7 +71,7 @@ let execution: FakeExecution;
 let sent: { text: string; enter: boolean }[];
 
 function hands(): PairHands {
-    return new PairHands('/work', {} as never, {} as never, {} as never);
+    return new PairHands('/work', { onDidChangeFollowing: () => ({ dispose() {} }) } as never, {} as never, {} as never);
 }
 
 /** Lets the output reader and the polling loop see what just happened. */

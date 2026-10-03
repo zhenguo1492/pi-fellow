@@ -3,7 +3,7 @@ import type { ExtensionUiQuestion } from '../shared/extensionUi';
 import type { DigestEntry } from './workerDigest';
 import { clip, formatDigest } from './workerDigest';
 import type { ObservationKind } from './floorArbiter';
-import type { HeldApproval, Proposal, SettledApproval, SettledProposal } from './hostTools';
+import type { HeldApproval, LateResult, Proposal, SettledApproval, SettledProposal } from './hostTools';
 import type { ResearchJob } from './research';
 import type { WorkerRequest, WorkerStatus, WorkerTask, WorkerTurn } from './workerController';
 import { DEFAULT_SPEAKER_NAMES } from '../shared/voiceSpeakers';
@@ -41,11 +41,13 @@ Each message starts with context blocks, then what started the turn:
 - <pending-delete>: a deletion you asked about, waiting for their yes.
 - <approval-pending>: your own change or command waiting on its card in the chat. <approval-settled>: one the user answered; done ran and the result is the tool's, rejected did nothing, failed was approved but did not work.
 - <research status="running"> and <research-result>: a background lookup you started, and its findings.
+- <late-result>: what an edit_file or show_me found out after it returned: an edit that could not be typed in or saved, a board's Mermaid or web page script errors. It also comes at the end of a tool result.
 - <interrupted>: your previous reply was cut off; it says what the user actually heard.
 - <board>: what the user marked on a board, with board, title, block, kind, lines, node, or message (an arrow's label: a sequence message, with its step, or a flowchart edge), and the selected text as its body; in a web page (kind="web"), the element they Alt+clicked: its selector in the page, tag, id, class and text, with its HTML (cut short) as the body. It comes once, in the turn after they mark it, and stays marked until they clear it. latest="true": made after their last selection in the editor, so "this" and "here" mean it; otherwise the editor selection is newer.
 - <board-edited>: the user saved the board's source: what changed and the new outline. Your point on it was cleared; take block ids from this outline.
 - <boards>: this conversation's boards, when you join or come back.
 Then <user>, the user's words, possibly followed by <attached>, files and images from the chat (never read their contents or paths aloud); or <worker-update>, when nobody spoke; or <voice-on>, when voice just came on.
+A <user during-reply="true"> message comes between your own steps: a short remark the user made while you were still working on a reply. Take it into account and go on from where you are, without starting over or repeating what you said.
 You cannot see other tabs, the worker's full conversation, or files you have not read: say so rather than guess. worker_status gives more of the worker's log.
 
 Dividing the work
@@ -157,6 +159,8 @@ export interface TurnInput {
     boardEdits?: BoardEditNotice[];
     /** The conversation's boards: first message in a voice context only. */
     boards?: BoardListing[];
+    /** What earlier edit_file and show_me calls found out after they returned, not yet told in a tool result. */
+    lateResults?: LateResult[];
 }
 
 const MAX_UPDATES = 20;
@@ -219,6 +223,9 @@ export function buildTurnMessage(input: TurnInput): string {
             blocks.push(`<research-result id="${job.id}"${failed} question="${attr(job.question)}">\n${job.result ?? ''}\n</research-result>`);
         }
     }
+    if (input.lateResults?.length) {
+        blocks.push(lateResultBlocks(input.lateResults));
+    }
     if (input.names && (input.names.bot !== DEFAULT_SPEAKER_NAMES.bot || input.names.user !== DEFAULT_SPEAKER_NAMES.user)) {
         blocks.push(`<names you="${attr(input.names.bot)}" user="${attr(input.names.user)}"/>`);
     }
@@ -268,6 +275,16 @@ export function buildTurnMessage(input: TurnInput): string {
         );
     }
     return blocks.join('\n');
+}
+
+/** `<late-result>` blocks, for the turn message and the end of a tool result. */
+export function lateResultBlocks(late: readonly LateResult[]): string {
+    return late.map((r) => `<late-result tool="${r.tool}">${r.text}</late-result>`).join('\n');
+}
+
+/** A short remark the user made while a reply ran, steered into that reply (VoiceAgent.steer). */
+export function remarkMessage(text: string): string {
+    return `<user source="stt" during-reply="true">${text}</user>`;
 }
 
 /** The whole reply of a turn that chose not to speak (design §5.9, §7.7 invariant 5). */

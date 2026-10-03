@@ -127,9 +127,29 @@ function setup(confirm = true) {
     const edits: string[] = [];
     const commands: string[] = [];
     const opened: string[] = [];
+    /** Each edit preview started: where, the replacement texts it was given, and how it ended. */
+    const previews: Array<{ edit: { path: string; oldText: string; nearLine?: number }; texts: string[]; ended?: string }> = [];
     /** The discoverPreviewCommands setting, read on every list_viewers as PairHands does. */
     const settings = { thirdPartyCommands: false };
     const hands: EditorHands = {
+        finishTyping: () => {},
+        takeLateResults: () => [],
+        previewEdit: (edit) => {
+            const preview: (typeof previews)[number] = { edit, texts: [] };
+            previews.push(preview);
+            return {
+                update: (text) => preview.texts.push(text),
+                // Like PairHands: the final arguments win; a preview that typed something else is undone.
+                commit: async (final) => {
+                    const same = final.path === edit.path && final.oldText === edit.oldText && final.newText.startsWith(preview.texts.at(-1) ?? '');
+                    preview.ended = same ? 'committed' : 'undone';
+                    return same ? `typed ${final.path}` : undefined;
+                },
+                drop: () => {
+                    preview.ended = 'dropped';
+                },
+            };
+        },
         openFile: async (target) => `opened ${target.path}`,
         listViewers: async (path) => ({ path, languageId: undefined, ...findViewers([DIAGRAMS, MARKDOWN], path, undefined, settings) }),
         openWith: async (path, viewer, toSide) => {
@@ -191,7 +211,7 @@ function setup(confirm = true) {
         hands,
     );
     const turn = (seq: number, userAt = seq * 1000, tabId = 'tab-1'): ToolTurn => ({ tabId, seq, userAt });
-    return { worker, router, turn, edits, commands, opened, settings };
+    return { worker, router, turn, edits, commands, opened, settings, previews };
 }
 
 describe('HostToolRouter: tell_worker / confirm_task', () => {
@@ -386,10 +406,63 @@ describe('HostToolRouter: working itself and directing the worker', () => {
     });
 });
 
+describe('HostToolRouter: calls typed and drawn while the model writes them', () => {
+    /** The arguments' JSON as streamed, cut after `upTo` characters. */
+    const streamed = (args: Record<string, unknown>, upTo: number) => JSON.stringify(args).slice(0, upTo);
+    const edit = { path: 'a.ts', oldText: 'return 1;', newText: 'return compute(2);' };
+    const json = JSON.stringify(edit);
+
+    it('starts typing an edit once its place is written, follows newText as it grows, and the call adopts it', async () => {
+        const { router, turn, previews, edits } = setup(false);
+        router.preview('t1', 'edit_file', streamed(edit, json.indexOf('"newText"')), turn(1));
+        expect(previews).toEqual([]);
+        router.preview('t1', 'edit_file', streamed(edit, json.indexOf('compute')), turn(1));
+        router.preview('t1', 'edit_file', streamed(edit, json.indexOf('(2)')), turn(1));
+        expect(previews).toEqual([{ edit: { path: 'a.ts', oldText: 'return 1;' }, texts: ['return ', 'return compute'] }]);
+
+        expect(await router.execute('edit_file', edit, turn(1), 't1')).toEqual({ text: 'typed a.ts', isError: false });
+        expect([previews[0].ended, edits]).toEqual(['committed', []]);
+    });
+
+    it('runs the final arguments when they differ from what was typed', async () => {
+        const { router, turn, previews, edits } = setup(false);
+        router.preview('t1', 'edit_file', streamed(edit, json.indexOf('(2)')), turn(1));
+        const final = { ...edit, newText: 'return other();' };
+        expect(await router.execute('edit_file', final, turn(1), 't1')).toEqual({ text: 'edited a.ts', isError: false });
+        expect([previews[0].ended, edits]).toEqual(['undone', ['a.ts']]);
+    });
+
+    it('undoes a preview whose call is dropped, or does not run it (held for approval)', async () => {
+        const { worker, router, turn, previews } = setup(false);
+        router.preview('t1', 'edit_file', streamed(edit, json.length - 3), turn(1));
+        router.dropPreview('t1');
+        expect(previews[0].ended).toBe('dropped');
+
+        router.preview('t2', 'edit_file', streamed(edit, json.length - 3), turn(1));
+        // Asked to approve on the way: nothing it typed may stay before the user says yes.
+        worker.level = 'ask';
+        expect((await router.execute('edit_file', edit, turn(1), 't2')).text).toMatch(/Waiting for the user's approval/);
+        expect(previews[1].ended).toBe('dropped');
+    });
+
+    it('types nothing ahead where the finished call could not run unasked', () => {
+        const { worker, router, turn, previews } = setup(false);
+        const almost = streamed(edit, json.length - 3);
+        router.preview('t1', 'edit_file', almost, { tabId: 'tab-1', seq: 1, userAt: 1000, proactive: true });
+        worker.level = 'plan';
+        router.preview('t2', 'edit_file', almost, turn(1));
+        worker.level = 'ask';
+        router.preview('t3', 'edit_file', almost, turn(1));
+        expect(previews).toEqual([]);
+    });
+});
+
 class FakeBoards implements BoardHands {
     writes: BoardWriteRequest[] = [];
     points: Array<{ target: BoardTarget; style: BoardMarkStyle | undefined }> = [];
     views: BoardViewRequest[] = [];
+    /** What drawings reported after their write returned. */
+    late: string[] = [];
     async write(request: BoardWriteRequest) {
         this.writes.push(request);
         return 'Board b1 "Login"\nh1 heading "Login"';
@@ -401,6 +474,21 @@ class FakeBoards implements BoardHands {
     async view(request: BoardViewRequest) {
         this.views.push(request);
         return 'Done.';
+    }
+    takeLateResults() {
+        return this.late.splice(0);
+    }
+    /** Each preview: the requests it drew, and the write it ended for ('dropped' when none). */
+    previews: Array<{ drawn: BoardWriteRequest[]; ended?: BoardWriteRequest | 'dropped' }> = [];
+    preview(request: BoardWriteRequest) {
+        const preview: (typeof this.previews)[number] = { drawn: [request] };
+        this.previews.push(preview);
+        return {
+            update: (next: BoardWriteRequest) => void preview.drawn.push(next),
+            end: (next?: BoardWriteRequest) => {
+                preview.ended = next ?? 'dropped';
+            },
+        };
     }
 }
 
@@ -414,6 +502,29 @@ describe('HostToolRouter: show_me and the boards', () => {
         return { worker, turn, boards, router: new HostToolRouter(worker, () => undefined, () => true, noResearch, undefined, boards) };
     };
     const diagram = '```mermaid\nflowchart LR\n  A --> B\n```';
+
+    it('draws a board while show_me streams once it is past a card, with only the arguments written whole, and hands it to the write', async () => {
+        const { turn, boards, router } = withBoards();
+        const args = { title: 'Login', markdown: '# Login\n\nOne.\n\nTwo.\n\nThree.\n\nFour.' };
+        const json = JSON.stringify(args);
+        // Still a card's size: nothing is drawn.
+        router.preview('t1', 'show_me', json.slice(0, json.indexOf('Two')), turn(1));
+        expect(boards.previews).toEqual([]);
+        router.preview('t1', 'show_me', json.slice(0, json.indexOf('Four') + 2), turn(1));
+        expect(boards.previews[0].drawn).toEqual([{ title: 'Login', mode: 'append', markdown: '# Login\n\nOne.\n\nTwo.\n\nThree.\n\nFo' }]);
+
+        expect((await router.execute('show_me', args, turn(1), 't1')).isError).toBe(false);
+        expect(boards.previews[0].ended).toEqual({ title: 'Login', mode: 'append', markdown: args.markdown });
+        expect(boards.writes).toEqual([boards.previews[0].ended]);
+
+        // A board id still being written is no board id yet; a dropped call puts the board back.
+        const other = JSON.stringify({ board: 'b2', markdown: diagram });
+        router.preview('t2', 'show_me', other.slice(0, other.indexOf('b2') + 1), turn(2));
+        router.preview('t2', 'show_me', other.slice(0, other.indexOf('flowchart')), turn(2));
+        expect(boards.previews[1].drawn).toEqual([{ board: 'b2', mode: 'append', markdown: '```mermaid\n' }]);
+        router.dropPreview('t2');
+        expect(boards.previews[1].ended).toBe('dropped');
+    });
 
     it('shows short content as a card in any permission mode, touching nothing', async () => {
         const { worker, turn, boards, router } = withBoards();
@@ -440,6 +551,19 @@ describe('HostToolRouter: show_me and the boards', () => {
         expect(boards.writes).toEqual([{ markdown: diagram, title: 'Login', board: 'new', mode: 'append' }]);
         await router.execute('show_me', { markdown: '', mode: 'block', block: 'd1' }, turn(2));
         expect(boards.writes[1]).toEqual({ markdown: '', mode: 'block', block: 'd1' });
+    });
+
+    it("hands a drawing's late errors to the next tool result once, failed or not", async () => {
+        const { turn, boards, router } = withBoards();
+        expect((await router.execute('show_me', { markdown: diagram }, turn(1))).text).not.toContain('<late-result');
+        boards.late.push('Board b1 "Login": d1 did not render: Parse error. Fix the Mermaid source and rewrite it with show_me board "b1", mode "block", block "d1".');
+        const next = await router.execute('board_point', { block: 'c1', style: 'circle' }, turn(1));
+        expect(next).toEqual({
+            text: 'Unknown style circle: use one of highlight, underline, box.\n\n<late-result tool="show_me">Board b1 "Login": d1 did not render: Parse error. Fix the Mermaid source and rewrite it with show_me board "b1", mode "block", block "d1".</late-result>',
+            isError: true,
+        });
+        expect((await router.execute('board_point', { block: 'c1' }, turn(1))).text).toBe('Pointed.');
+        expect(router.takeLateResults()).toEqual([]);
     });
 
     it('refuses block mode without a block, an unknown mode, and a board without the boards', async () => {

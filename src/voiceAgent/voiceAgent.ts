@@ -8,7 +8,7 @@ import { readTarget, type FocusTarget } from './piFocus';
 import { ResearchRunner, type ResearchJob } from './research';
 import { VoiceLlm, type VoiceSkill } from './voiceLlm';
 import { ToneDial, type Humor } from './tone';
-import { SilenceGate, buildTurnMessage, tuiQuestionLine, voiceSystemPrompt, type EditorSnapshot, type OpeningReason, type TurnInput } from './voicePrompt';
+import { SilenceGate, buildTurnMessage, remarkMessage, tuiQuestionLine, voiceSystemPrompt, type EditorSnapshot, type OpeningReason, type TurnInput } from './voicePrompt';
 import { provisionalTaskKey, taskKey, type WorkerController, type WorkerTask } from './workerController';
 import { WorkerDigest, clip, type DigestEntry } from './workerDigest';
 
@@ -159,8 +159,33 @@ interface RunningTurn {
     key: string;
     ctl: AbortController;
     turn: ToolTurn;
+    llm: VoiceLlm;
     /** Why it is being cut off, when not by a new message or a task switch; goes into `<interrupted>`. */
     cause?: string;
+}
+
+/** Runs `fn`, logging what it throws: a host's callback failing must not end the reply's events. */
+function guarded(fn: () => void, log: (line: string) => void): void {
+    try {
+        fn();
+    } catch (err: unknown) {
+        log(`Voice turn listener failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+}
+
+/**
+ * `listener` with every callback guarded. The RPC reader drops an event whose handler throws, so one
+ * failing callback would otherwise lose the rest of that event: a host tool call left unanswered
+ * holds the reply forever.
+ */
+function guardListener(listener: VoiceTurnListener, log: (line: string) => void): VoiceTurnListener {
+    const safe: Record<string, unknown> = {};
+    for (const [name, callback] of Object.entries(listener)) {
+        if (typeof callback === 'function') {
+            safe[name] = (...args: unknown[]) => guarded(() => callback.apply(listener, args), log);
+        }
+    }
+    return safe as VoiceTurnListener;
 }
 
 /** How often the arbiter is asked when nothing else prompts it (§7.7 Tick). */
@@ -290,6 +315,21 @@ export class VoiceAgent {
         });
     }
 
+    /**
+     * A short remark the user made while a reply runs, which voice mode found to be no barge-in: it goes
+     * into that reply at its next turn boundary (omp/pi `steer`, after the tool calls of the message
+     * being written) instead of cutting it off. False when no user reply is running to take it: the
+     * caller sends it as a new message.
+     */
+    steer(text: string): boolean {
+        const running = this._turn;
+        if (!running || running.ctl.signal.aborted || running.turn.proactive || !running.llm.steer(remarkMessage(text))) {
+            return false;
+        }
+        this._lastUserAt = Date.now();
+        return true;
+    }
+
     /** The voice model in use (`provider/id`); undefined until the omp process has started. */
     get model(): string | undefined {
         return this._model;
@@ -376,6 +416,7 @@ export class VoiceAgent {
         this._stopped = true;
         clearInterval(this._tick);
         this._turn?.ctl.abort();
+        this._router.finishTyping();
         this._research.stopAll();
         for (const subscription of this._subscriptions) {
             subscription.dispose();
@@ -497,6 +538,7 @@ export class VoiceAgent {
             board: markIsNew ? mark : undefined,
             boardEdits: this._options.boards?.takeEdits(),
             boards: fresh ? this._options.boards?.list() : undefined,
+            lateResults: this._router.takeLateResults(),
         };
         input.tone = this._tone.next(input, this._options.humor?.() ?? 'off');
         const message = buildTurnMessage(input);
@@ -565,6 +607,7 @@ export class VoiceAgent {
             interrupted: this._takeInterrupted(),
             // Edits and the user's mark wait for the user's turn; the board list comes with the context.
             boards: fresh ? this._options.boards?.list() : undefined,
+            lateResults: this._router.takeLateResults(),
         };
         input.tone = this._tone.next(input, this._options.humor?.() ?? 'off');
         const message = buildTurnMessage(input);
@@ -644,21 +687,46 @@ export class VoiceAgent {
         };
     }
 
+    /**
+     * Runs one prompt to its end. Every way it ends (the reply done, cut off, a network or provider
+     * error, the process dying or hanging, a listener throwing) goes through the same exit: the turn
+     * is cleared, previews of calls never sent are undone, and `listener.onEnd` gets the result once.
+     * Never rejects.
+     */
     private async _runTurn(
         llm: VoiceLlm,
         key: string,
         message: string,
         turn: ToolTurn,
-        listener: VoiceTurnListener,
+        given: VoiceTurnListener,
         signal?: AbortSignal,
         images?: ImageContent[],
     ): Promise<VoiceTurnResult> {
+        const listener = guardListener(given, this._options.log);
         const ctl = new AbortController();
-        const current: RunningTurn = { key, ctl, turn };
+        const current: RunningTurn = { key, ctl, turn, llm };
         this._turn = current;
         this._lastTurn = turn;
         const cutOff = () => ctl.abort();
         signal?.addEventListener('abort', cutOff, { once: true });
+        /** Calls the model is writing that the router may be typing or drawing ahead (by tool call id). */
+        const previewed = new Set<string>();
+        const dropPreviews = () => {
+            for (const id of previewed) {
+                this._router.dropPreview(id);
+            }
+            previewed.clear();
+        };
+        // Cut off: the reply's edits still being typed go in at once, and calls it was still writing never come.
+        // Finished, its edits type on while the next turn starts.
+        ctl.signal.addEventListener(
+            'abort',
+            () => {
+                this._router.finishTyping();
+                dropPreviews();
+            },
+            { once: true },
+        );
         /** What the user was shown: the reply without `<silent/>` and without anchors. */
         let reply = '';
         const gate = new SilenceGate();
@@ -677,50 +745,75 @@ export class VoiceAgent {
         const lookups: string[] = [];
         const cancelled = new Set<string>();
         const executing: Promise<void>[] = [];
-        listener.onPrompt?.(message);
-        const running = llm.prompt(message, ctl.signal, {
-            onText: (delta) => {
-                const shown = gate.push(delta);
-                if (shown) {
-                    show(shown);
-                }
-            },
-            onToolStart: (call) => listener.onToolStart?.(call.id, call.toolName),
-            onToolCall: (call) => {
-                listener.onToolStart?.(call.toolCallId, call.toolName, call.arguments);
-                executing.push(
-                    this._router.execute(call.toolName, call.arguments, turn).then((result) => {
-                        toolCalls.push({ name: call.toolName, args: call.arguments, result });
-                        listener.onToolCall?.(call.toolCallId, call.toolName, call.arguments, result);
-                        this._options.onChange?.();
-                        if (!cancelled.has(call.id)) {
-                            llm.sendToolResult(call.id, result.text, result.isError);
+        let error: string | undefined;
+        try {
+            listener.onPrompt?.(message);
+            const running = llm.prompt(
+                message,
+                ctl.signal,
+                {
+                    onText: (delta) => {
+                        const shown = gate.push(delta);
+                        if (shown) {
+                            show(shown);
                         }
-                    }),
-                );
-            },
-            onToolCancel: (callId) => cancelled.add(callId),
-            onBuiltinTool: (description, call) => {
-                lookups.push(description);
-                listener.onLookup?.({ id: call.id, name: call.toolName, args: call.args, description });
-                const target = call.toolName === 'read' ? readTarget(call.args) : undefined;
-                if (target) {
-                    this._options.onRead?.(target);
-                }
-            },
-            onBuiltinToolEnd: (id, result) => listener.onLookupEnd?.(id, result),
-            onUsage: (usage) => listener.onUsage?.(usage),
-        }, images);
-        // Aborted while queued: the prompt still goes in (the context keeps the user's words), cut off at once.
-        if (signal?.aborted) {
-            ctl.abort();
-        }
-        const { error } = await running;
-        // A cancelled run can settle while a tool call is still executing; it still takes effect.
-        await Promise.all(executing);
-        signal?.removeEventListener('abort', cutOff);
-        if (this._turn === current) {
-            this._turn = undefined;
+                    },
+                    onToolStart: (call) => listener.onToolStart?.(call.id, call.toolName),
+                    onToolDelta: (call) => {
+                        if (!ctl.signal.aborted) {
+                            previewed.add(call.id);
+                            this._router.preview(call.id, call.toolName, call.json, turn);
+                        }
+                    },
+                    onToolDropped: (id) => {
+                        previewed.delete(id);
+                        this._router.dropPreview(id);
+                    },
+                    onToolCall: (call) => {
+                        previewed.delete(call.toolCallId);
+                        listener.onToolStart?.(call.toolCallId, call.toolName, call.arguments);
+                        executing.push(
+                            this._router.execute(call.toolName, call.arguments, turn, call.toolCallId).then((result) => {
+                                toolCalls.push({ name: call.toolName, args: call.arguments, result });
+                                listener.onToolCall?.(call.toolCallId, call.toolName, call.arguments, result);
+                                if (!cancelled.has(call.id)) {
+                                    llm.sendToolResult(call.id, result.text, result.isError);
+                                }
+                                guarded(() => this._options.onChange?.(), this._options.log);
+                            }),
+                        );
+                    },
+                    onToolCancel: (callId) => cancelled.add(callId),
+                    onBuiltinTool: (description, call) => {
+                        lookups.push(description);
+                        listener.onLookup?.({ id: call.id, name: call.toolName, args: call.args, description });
+                        const target = call.toolName === 'read' ? readTarget(call.args) : undefined;
+                        if (target) {
+                            guarded(() => this._options.onRead?.(target), this._options.log);
+                        }
+                    },
+                    onBuiltinToolEnd: (id, result) => listener.onLookupEnd?.(id, result),
+                    onUsage: (usage) => listener.onUsage?.(usage),
+                },
+                images,
+            );
+            // Aborted while queued: the prompt still goes in (the context keeps the user's words), cut off at once.
+            if (signal?.aborted) {
+                ctl.abort();
+            }
+            ({ error } = await running);
+            // A cancelled run can settle while a tool call is still executing; it still takes effect. Edits and
+            // drawings return before they finish, so the turn ends while they go on (the next edit to a file waits for them).
+            await Promise.all(executing);
+        } catch (err: unknown) {
+            error = err instanceof Error ? err.message : String(err);
+        } finally {
+            signal?.removeEventListener('abort', cutOff);
+            if (this._turn === current) {
+                this._turn = undefined;
+            }
+            // Calls the model began but that never ran (it skipped them, or the run ended without them).
+            dropPreviews();
         }
         this._arbiter.turnEnded(Date.now());
         this._refreshUsage(llm);

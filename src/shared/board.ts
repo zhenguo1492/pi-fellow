@@ -257,6 +257,37 @@ export function showMeCallIsCard(args: Record<string, unknown>): boolean {
     return typeof args.markdown === 'string' && showMeIsCard({ markdown: args.markdown, board: args.board, mode: args.mode });
 }
 
+/**
+ * The part of show_me markdown still being written whose blocks are whole: up to the last blank line
+ * outside a code fence, or the end of the last closed fence. A board preview draws only that, so a
+ * half-written diagram or table never shows as an error.
+ */
+export function completeBlocks(markdown: string): string {
+    let fence: { char: string; length: number } | undefined;
+    let safe = 0;
+    let offset = 0;
+    for (const line of markdown.split('\n')) {
+        const end = offset + line.length + 1;
+        // The last line has no line break yet: it may still grow.
+        if (end > markdown.length) {
+            break;
+        }
+        const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+        if (fence) {
+            if (marker && marker[0] === fence.char && marker.length >= fence.length && line.trim() === marker) {
+                fence = undefined;
+                safe = end;
+            }
+        } else if (marker) {
+            fence = { char: marker[0], length: marker.length };
+        } else if (!line.trim()) {
+            safe = end;
+        }
+        offset = end;
+    }
+    return markdown.slice(0, safe);
+}
+
 // ── Pointing ──
 
 export type BoardMarkStyle = 'highlight' | 'underline' | 'box';
@@ -622,10 +653,32 @@ export interface BoardViewRequest {
 
 /** The boards as the host tools use them; each resolves with a report for the model and throws on failure. */
 export interface BoardHands {
-    /** Report starts with `Board <id> ` (the Bot view's board card reads the id from it). */
+    /**
+     * Resolves once the board is written and its drawing started, without waiting for the page to draw it.
+     * Report starts with `Board <id> ` (the Bot view's board card reads the id from it).
+     */
     write(request: BoardWriteRequest): Promise<string>;
     point(target: BoardTarget, style: BoardMarkStyle | undefined): Promise<string>;
     view(request: BoardViewRequest): Promise<string>;
+    /** What drawings started by `write` reported after it returned (Mermaid and web page script errors); each is handed out once. */
+    takeLateResults(): string[];
+    /**
+     * The model is still writing a show_me call that goes on a board: draws its whole blocks so far on
+     * the board it would write, without writing anything yet. Its `end` says what came of it.
+     */
+    preview(request: BoardWriteRequest): BoardPreview;
+}
+
+/** A board write drawn while its call streams: on the board it targets, nothing written to its file or index. */
+export interface BoardPreview {
+    /** The call's arguments as written so far; its markdown may stop mid-block. */
+    update(request: BoardWriteRequest): void;
+    /**
+     * Ends it. `next`: the write the call turned into, about to run: when it writes the same board, the
+     * preview's tab stays for it. Otherwise (or with no write: the call was dropped) the board goes
+     * back to what it showed, and a tab the preview opened closes.
+     */
+    end(next?: BoardWriteRequest): void;
 }
 
 // ── The voice turn message ──

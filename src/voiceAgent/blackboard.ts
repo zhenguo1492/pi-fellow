@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
     appendToBoard,
+    completeBlocks,
     defaultMarkStyle,
     describeBoardEdit,
     diagramType,
@@ -21,6 +22,7 @@ import {
     type BoardContextSource,
     type BoardEditNotice,
     type BoardHands,
+    type BoardPreview,
     type BoardHostMessage,
     type BoardListing,
     type BoardMarkStyle,
@@ -42,6 +44,8 @@ const RENDER_TIMEOUT_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 3_000;
 /** How long a moved board's tab may take to show up in its new group. */
 const MOVE_SETTLE_MS = 2_000;
+/** How often a board drawn while its show_me call streams is redrawn. */
+const PREVIEW_DRAW_MS = 250;
 
 interface BoardEntry {
     id: string;
@@ -86,6 +90,18 @@ export async function pruneBoardFolders(sessionDir: string, keptSessionFiles: re
 
 function boardFile(folder: string, id: string): string {
     return path.resolve(folder, `${id}.md`);
+}
+
+/**
+ * The board a write goes to: a new one, with the next id (ids are never reused: boards are never
+ * dropped from the index), or the one named, else the current one.
+ */
+function writeTarget(index: BoardIndex, request: Pick<BoardWriteRequest, 'board'>): { id: string; creating: boolean } {
+    const creating = request.board === 'new' || (request.board === undefined && !index.boards.some((b) => b.id === index.current));
+    if (creating) {
+        return { id: `b${Math.max(0, ...index.boards.map((b) => Number(b.id.slice(1)) || 0)) + 1}`, creating };
+    }
+    return { id: request.board ?? index.current ?? '', creating };
 }
 
 async function readBoard(file: string): Promise<string> {
@@ -209,6 +225,8 @@ class BoardPanel {
     private seq = 0;
     private queue: BoardHostMessage[] = [];
     private renders: { version: number; resolve: (errors: RenderErrors | undefined) => void }[] = [];
+    /** Settles once the latest render sent is drawn, or given up on. */
+    private drawn: Promise<unknown> = Promise.resolve();
     private readonly requests = new Map<number, (reply: BoardReply | undefined) => void>();
 
     constructor(
@@ -250,22 +268,33 @@ class BoardPanel {
                 resolve(errors);
             },
         });
+        this.drawn = promise;
         return promise;
     }
 
-    /** Resolves with the webview's reply, undefined when it did not answer in time or the tab closed. */
+    /**
+     * Resolves with the webview's reply, undefined when it did not answer in time or the tab closed. The
+     * page handles its messages in order, so a request sent while a render is drawing (a point right
+     * after show_me) is answered once that is drawn: the wait for the reply starts then.
+     */
     request(build: (seq: number) => BoardHostMessage): Promise<BoardReply | undefined> {
         const seq = ++this.seq;
-        // Before the webview is ready the reply also waits for the first load.
-        const timeout = this.ready ? REQUEST_TIMEOUT_MS : RENDER_TIMEOUT_MS;
         const { promise, resolve } = Promise.withResolvers<BoardReply | undefined>();
-        const timer = setTimeout(() => {
-            this.requests.delete(seq);
-            resolve(undefined);
-        }, timeout);
+        let timer: NodeJS.Timeout | undefined;
         this.requests.set(seq, (reply) => {
             clearTimeout(timer);
             resolve(reply);
+        });
+        void this.drawn.then(() => {
+            if (!this.requests.has(seq)) {
+                return;
+            }
+            // Before the webview is ready the reply also waits for the first load.
+            const timeout = this.ready ? REQUEST_TIMEOUT_MS : RENDER_TIMEOUT_MS;
+            timer = setTimeout(() => {
+                this.requests.delete(seq);
+                resolve(undefined);
+            }, timeout);
         });
         const message = build(seq);
         if (this.ready) {
@@ -358,6 +387,8 @@ export class Blackboards implements BoardHands, BoardContextSource, vscode.Dispo
     private bound: { sessionFile: string; folder: string; index?: BoardIndex } | undefined;
     /** Saved source edits not yet handed to a turn; `before`: the board before the first of them. */
     private edits: { before: string; notice: BoardEditNotice }[] = [];
+    /** What drawings of the bound context reported after write returned, not yet handed out. */
+    private late: string[] = [];
     /** Orders user marks against editor selections. */
     private clock = 0;
     private editorSelectionAt = 0;
@@ -407,6 +438,7 @@ export class Blackboards implements BoardHands, BoardContextSource, vscode.Dispo
                 }
             }
             this.edits = [];
+            this.late = [];
             this.bound = sessionFile !== undefined && folder !== undefined ? { sessionFile, folder } : undefined;
         }
         if (folder === undefined) {
@@ -457,13 +489,12 @@ export class Blackboards implements BoardHands, BoardContextSource, vscode.Dispo
 
     async write(request: BoardWriteRequest): Promise<string> {
         const { folder, index } = await this.requireBound();
-        const creating = request.board === 'new' || (request.board === undefined && !index.boards.some((b) => b.id === index.current));
-        if (creating && request.mode === 'block') {
+        const target = writeTarget(index, request);
+        if (target.creating && request.mode === 'block') {
             throw new Error('Mode block rewrites a block of an existing board; name the board or use append.');
         }
-        // Ids are never reused: boards are never dropped from the index.
-        const newId = `b${Math.max(0, ...index.boards.map((b) => Number(b.id.slice(1)) || 0)) + 1}`;
-        const entry = creating ? { id: newId, title: '', open: true } : this.entryOf(index, request.board);
+        const creating = target.creating;
+        const entry = creating ? { id: target.id, title: '', open: true } : this.entryOf(index, request.board);
         const file = boardFile(folder, entry.id);
         const dirty = vscode.workspace.textDocuments.some((d) => d.isDirty && d.uri.scheme === 'file' && path.resolve(d.uri.fsPath) === file);
         if (!creating && dirty) {
@@ -512,19 +543,121 @@ export class Blackboards implements BoardHands, BoardContextSource, vscode.Dispo
 
         const board = await this.show(folder, index, entry, this.options.following() ? 'keep' : 'none', markdown);
         board.retitle(entry.title);
-        const errors = await board.render(markdown);
         const doc = parseBoard(markdown);
-        const report = [`${label(entry)}: ${happened}.`, formatOutline(doc)];
-        if (!errors) {
-            report.push('Rendering was not confirmed: the board did not answer in time.');
-        } else {
+        // Drawn in the background: block ids and the outline come from the source, the drawing's errors later.
+        void board.render(markdown).then((errors) => {
+            if (!errors) {
+                this.options.log(`${label(entry)}: the board did not confirm drawing it.`);
+                return;
+            }
+            // Redrawn since (a newer write, the user's saved edit) or another context bound: its errors would be about a page gone.
+            if (board.markdown !== markdown || this.bound?.folder !== folder) {
+                return;
+            }
             for (const e of errors) {
                 const web = doc.blocks.find((b) => b.id === e.block)?.kind === 'web';
                 const what = web ? `${e.block} reported: ${e.message}. Fix the HTML` : `${e.block} did not render: ${e.message}. Fix the Mermaid source`;
-                report.push(`${what} and rewrite it with show_me mode "block", block "${e.block}".`);
+                this.late.push(`${label(entry)}: ${what} and rewrite it with show_me board "${entry.id}", mode "block", block "${e.block}".`);
             }
+        });
+        return `${label(entry)}: ${happened}.\n${formatOutline(doc)}`;
+    }
+
+    takeLateResults(): string[] {
+        const late = this.late;
+        this.late = [];
+        return late;
+    }
+
+    /**
+     * Draws a show_me call's whole blocks on the board it targets while the model writes it: the tab
+     * opens at once (a new page takes seconds to load the board bundle), nothing goes to the board's
+     * file or index. A target that changes while the call is written (its board id came after its
+     * markdown) stops the drawing; `end` puts the board back unless the write takes it over.
+     */
+    preview(first: BoardWriteRequest): BoardPreview {
+        const none: BoardPreview = { update() {}, end() {} };
+        const bound = this.bound;
+        const index = bound?.index;
+        if (!bound || !index) {
+            return none;
         }
-        return report.join('\n');
+        const target = writeTarget(index, first);
+        const entry = target.creating ? { id: target.id, title: first.title?.trim() || 'Board', open: true } : index.boards.find((b) => b.id === target.id);
+        const file = boardFile(bound.folder, target.id);
+        const dirty = vscode.workspace.textDocuments.some((d) => d.isDirty && d.uri.scheme === 'file' && path.resolve(d.uri.fsPath) === file);
+        if (!entry || dirty || (target.creating && first.mode === 'block')) {
+            return none;
+        }
+        const existing = this.panels.get(file);
+        const board = existing ?? this.createPanel(bound.folder, entry, '', true);
+        if (existing && this.options.following()) {
+            existing.panel.reveal(existing.panel.viewColumn, true);
+        }
+        /** What the tab showed before, to go back to. */
+        const shown = board.markdown;
+        /** The board's document the call's markdown goes into. */
+        let before: string | undefined = target.creating ? '' : existing?.markdown;
+        let latest = first;
+        let drawn: string | undefined;
+        let timer: NodeJS.Timeout | undefined;
+        let off = false;
+        const draw = () => {
+            timer = undefined;
+            const blocks = completeBlocks(latest.markdown);
+            if (off || before === undefined || !blocks.trim()) {
+                return;
+            }
+            let markdown: string;
+            try {
+                markdown =
+                    latest.mode === 'replace' ? appendToBoard('', blocks) : latest.mode === 'block' && latest.block ? replaceBoardBlock(before, latest.block, blocks) : appendToBoard(before, blocks);
+            } catch {
+                return;
+            }
+            if (markdown !== drawn) {
+                drawn = markdown;
+                void board.render(markdown);
+            }
+        };
+        if (before === undefined) {
+            void readBoard(file).then((text) => {
+                before = text;
+                draw();
+            });
+        } else {
+            timer = setTimeout(draw, PREVIEW_DRAW_MS);
+        }
+        return {
+            update: (request) => {
+                const now = writeTarget(index, request);
+                if (now.id !== target.id || now.creating !== target.creating) {
+                    off = true;
+                }
+                latest = request;
+                if (target.creating && request.title?.trim()) {
+                    board.retitle(request.title.trim());
+                }
+                timer ??= setTimeout(draw, PREVIEW_DRAW_MS);
+            },
+            end: (next) => {
+                clearTimeout(timer);
+                const after = next && writeTarget(index, next);
+                const kept = !off && after !== undefined && after.id === target.id && after.creating === target.creating;
+                // Nothing more is drawn either way: the write draws what follows.
+                off = true;
+                if (kept) {
+                    return;
+                }
+                if (!existing) {
+                    // A tab of its own: closed as if it never opened, the index untouched.
+                    board.quiet = true;
+                    board.panel.dispose();
+                } else if (drawn !== undefined) {
+                    void board.render(shown);
+                }
+            },
+        };
     }
 
     point(target: BoardTarget, style: BoardMarkStyle | undefined): Promise<string> {

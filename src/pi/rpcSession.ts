@@ -14,7 +14,7 @@ import type {
 import { EventRouter } from './events';
 import type { AgentBackend } from './agentBackend';
 import { getAgentLayout, getPiAgentDir, describeCliInvocation, resolvePiCliInvocation } from './piCliPaths';
-import { readLoggedInProviders } from './loggedInProviders';
+import { readCustomProviders, readLoggedInProviders } from './loggedInProviders';
 import { applyPiCliDefaultModel } from './piCliSync';
 import { PiRpcBridge } from './piRpcBridge';
 import { parseContextReport } from './contextReport';
@@ -762,7 +762,7 @@ export class PiRpcSessionManager {
                 ? undefined
                 : await this._loggedInProviders();
             const visible = loggedIn ? available.filter((m) => loggedIn.has(m.provider)) : available;
-            // No stored login at all (env-var / models.json keys only): don't leave the picker empty.
+            // No stored login at all (env-var / built-in override keys only): don't leave the picker empty.
             models = (visible.length > 0 ? visible : available).map((m) => ({
                 provider: m.provider,
                 id: m.id,
@@ -780,18 +780,29 @@ export class PiRpcSessionManager {
         this._setCatalog(models, skills);
     }
 
-    /** Stored `/login` credentials; omp on runtimes without `node:sqlite` falls back to RPC auth status. */
+    /**
+     * Stored `/login` credentials plus custom providers declared in models.json / models.yml;
+     * omp on runtimes without `node:sqlite` falls back to RPC auth status for the logins.
+     */
     private async _loggedInProviders(): Promise<Set<string> | undefined> {
-        const stored = await readLoggedInProviders(getAgentLayout(this.backend));
-        if (stored || this.backend !== 'omp') {
-            return stored;
+        const layout = getAgentLayout(this.backend);
+        const [stored, custom] = await Promise.all([readLoggedInProviders(layout), readCustomProviders(layout)]);
+        let loggedIn = stored;
+        if (!loggedIn && this.backend === 'omp') {
+            try {
+                const providers = await this._bridge.getLoginProviders();
+                loggedIn = new Set(providers.filter((p) => p.authenticated).map((p) => p.id));
+            } catch {
+                /* login status unknown */
+            }
         }
-        try {
-            const providers = await this._bridge.getLoginProviders();
-            return new Set(providers.filter((p) => p.authenticated).map((p) => p.id));
-        } catch {
+        if (!loggedIn) {
             return undefined;
         }
+        for (const id of custom) {
+            loggedIn.add(id);
+        }
+        return loggedIn;
     }
 
     async listSlashCommands(): Promise<SlashCommandListItem[]> {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { echoSource, floorFree, initialState, phaseOf, reduce, type ConvEvent, type ConvState, type Effect } from '../../../voiceAgent/conversation';
+import { echoSource, floorFree, initialState, isRemark, phaseOf, reduce, type ConvEvent, type ConvState, type Effect } from '../../../voiceAgent/conversation';
 
 function run(events: ConvEvent[], from: ConvState = initialState()): { state: ConvState; effects: Effect[] } {
     let state = from;
@@ -337,9 +337,9 @@ describe('conversation: a sound not yet found to be the user (voiceprint check o
         );
         expect(rest.effects).toEqual([]);
         expect([rest.state.muteSegment, rest.state.sttDiscard, rest.state.bot?.turnId]).toEqual([false, 0, 1]);
-        // Speech after that counts again.
+        // Speech after that counts again; over a reply still silent it cuts nothing until its words are in.
         const next = run([{ type: 'userSpeechStart', at }], rest.state);
-        expect(next.effects).toMatchObject([{ type: 'cancelTurn', turnId: 1 }]);
+        expect([next.effects, next.state.userSpeaking]).toEqual([[], true]);
     });
 
     it('whose words pass the check only once done still cut the reply off, keeping when they ended', () => {
@@ -465,6 +465,94 @@ describe('conversation: bot status', () => {
         });
         // The typed prompt's exchange does not inherit the cut-off reply's first text or sound.
         expect(cut.state.metrics).toEqual({ promptAt: 800 });
+    });
+});
+
+describe('conversation: remarks while a reply is still silent (steer, not barge-in)', () => {
+    /** A reply at work, nothing of it voiced yet (thinking, or at its tool calls). */
+    const working = run([
+        { type: 'userSpeechStart', at },
+        { type: 'userSpeechEnd', at, silenceAt: at },
+        { type: 'transcript', text: 'rename the parser', at },
+    ]).state;
+    const remark = (text: string, from = working): ConvEvent[] => [
+        { type: 'userSpeechStart', at },
+        { type: 'userSpeechEnd', at, silenceAt: at },
+        { type: 'transcript', text, at },
+    ];
+    const spoken = (effects: Effect[]) => effects.flatMap((e) => (e.type === 'speak' ? [e.text] : [])).join(' ');
+
+    it('holds the reply while the user speaks, steers a short remark into it, then speaks what it held', () => {
+        const talking = run([{ type: 'userSpeechStart', at }, { type: 'llmText', turnId: 1, delta: 'Sure, renaming it now. ', at }], working);
+        // Nothing cut, nothing said over the user.
+        expect(talking.effects).toEqual([]);
+        const done = run(
+            [
+                { type: 'userSpeechEnd', at, silenceAt: at },
+                { type: 'transcript', text: 'use camel case', at },
+            ],
+            talking.state,
+        );
+        expect(done.effects[0]).toEqual({ type: 'steer', turnId: 1, text: 'use camel case' });
+        expect(spoken(done.effects)).toBe('Sure, renaming it now.');
+        expect([done.state.bot?.turnId, done.state.userBuffer]).toEqual([1, []]);
+    });
+
+    it('cuts the reply off for a stop word or a long new request, which goes out as a new prompt', () => {
+        for (const text of ['wait, not that one', '等等', 'actually forget the parser and instead go through every test file and update the imports to the new paths']) {
+            const { effects } = run(remark(text), working);
+            expect(effects).toMatchObject([
+                { type: 'cancelTurn', turnId: 1 },
+                { type: 'prompt', turnId: 2, text, interrupted: expect.stringContaining('heard none of it') },
+            ]);
+        }
+    });
+
+    it('cuts at once when the user speaks over the reply’s voice', () => {
+        const voiced = run(
+            [
+                { type: 'llmText', turnId: 1, delta: 'Renaming it now. ', at },
+                { type: 'sentencePlaying', turnId: 1, text: 'Renaming it now.', durationMs: 900, at },
+            ],
+            working,
+        );
+        const { effects } = run([{ type: 'userSpeechStart', at }], voiced.state);
+        expect(effects).toMatchObject([{ type: 'cancelTurn', turnId: 1 }]);
+    });
+
+    it('speaks what it held when the words come to nothing, and ends a reply generated meanwhile', () => {
+        const { effects, state } = run(
+            [
+                { type: 'userSpeechStart', at },
+                { type: 'llmText', turnId: 1, delta: 'Done, it is renamed.', at },
+                { type: 'llmEnd', turnId: 1, at },
+                { type: 'userSpeechEnd', at, silenceAt: at },
+                { type: 'transcript', text: ' ', at },
+            ],
+            working,
+        );
+        expect(spoken(effects)).toBe('Done, it is renamed.');
+        expect(state.bot?.llmDone).toBe(true);
+    });
+
+    it('sends a remark as a new prompt when the reply ended before it could take it in', () => {
+        const finished = run([{ type: 'userSpeechStart', at }, { type: 'llmEnd', turnId: 1, at }, { type: 'userSpeechEnd', at, silenceAt: at }, { type: 'transcript', text: 'thanks', at }], working);
+        expect(finished.effects).toMatchObject([{ type: 'cancelTurn', turnId: 1 }, { type: 'prompt', turnId: 2, text: 'thanks' }]);
+
+        const steered = run(remark('use camel case'), working);
+        const failed = run([{ type: 'steerFailed', text: 'use camel case', at }], steered.state);
+        expect(failed.effects).toMatchObject([{ type: 'cancelTurn', turnId: 1 }, { type: 'prompt', turnId: 2, text: 'use camel case', source: 'stt' }]);
+    });
+
+    it('takes as remarks only short words without a stop word', () => {
+        expect(['use camel case', 'and the tests too', '好的', '顺便把测试也跑一下'].map(isRemark)).toEqual([true, true, true, true]);
+        expect(['stop', 'no, the other file', '不对，是另一个文件', '', 'one two three four five six seven eight nine ten eleven twelve thirteen'].map(isRemark)).toEqual([
+            false,
+            false,
+            false,
+            false,
+            false,
+        ]);
     });
 });
 

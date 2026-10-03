@@ -3,10 +3,14 @@
  * voice-loop prototype. Pure reducer: `reduce(state, event) → { state, effects }`. The executor
  * (voiceMode.ts) feeds it microphone, STT, reply and playback events and runs the effects.
  *
- * - The user always wins: speech start (or a typed message) cancels the reply in progress. With the
- *   voiceprint check on, speech is first only a sound (`soundDetected`): it holds the floor, so no
- *   reply goes out or starts over it, but only once it is found to be the user's voice does it
- *   become `userSpeaking` and cut the reply off (or its words do, when they come in).
+ * - The user always wins: speech over the reply's voice (or a typed message) cancels the reply in
+ *   progress. With the voiceprint check on, speech is first only a sound (`soundDetected`): it holds
+ *   the floor, so no reply goes out or starts over it, but only once it is found to be the user's
+ *   voice does it become `userSpeaking` and cut the reply off (or its words do, when they come in).
+ * - Speech while the reply is still silent (thinking, or working through tool calls) cuts nothing
+ *   yet: the reply's text is held while the user has the floor. A short remark (`isRemark`) then goes
+ *   into the running reply at its next turn boundary (`steer`, pi's Agent.steer) and the held text is
+ *   spoken; anything longer, or a stop word, cuts the reply off and goes out as a new prompt.
  * - A prompt goes out only once the user has stopped talking AND every transcription has landed,
  *   so an utterance split by a pause is one turn.
  * - A reply cut off leaves an `<interrupted>` note saying what the user actually heard; it goes
@@ -114,6 +118,8 @@ export type ConvEvent =
     | { type: 'transcript'; text: string; at: number }
     /** A message typed while voice mode is on: it cuts the reply off like speech does. */
     | { type: 'typed'; text: string; attachments?: VoiceAttachments; at: number }
+    /** A remark could not be steered into the reply (it had just ended): it goes out as a new prompt. */
+    | { type: 'steerFailed'; text: string; at: number }
     /** The voice agent wants to speak up on its own (design §5.9). */
     | { type: 'proactiveStart'; at: number }
     | { type: 'llmText'; turnId: number; delta: string; at: number }
@@ -137,6 +143,8 @@ export type Effect =
     /** A proactive turn got the floor: scope its reply to `turnId`. */
     | { type: 'adopt'; turnId: number }
     | { type: 'speak'; turnId: number; text: string }
+    /** A short remark of the user's goes into the running reply `turnId` at its next turn boundary, which goes on. */
+    | { type: 'steer'; turnId: number; text: string }
     /** Stop everything of this turn: generation, pending TTS, queued and playing audio. `metrics`: the cut-off exchange's hops. */
     | { type: 'cancelTurn'; turnId: number; metrics: Metrics };
 
@@ -146,6 +154,27 @@ export interface Step {
 }
 
 const RECENT_REPLIES = 2;
+/** A remark steered into a running reply: at most this many words, or CJK characters, and no stop word. */
+const REMARK_MAX_WORDS = 12;
+const REMARK_MAX_CJK = 20;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+/** Words that mean the user wants the reply to stop or change course: those cut it off. */
+const STOP_WORDS = /\b(stop|wait|hold on|cancel|no|nope|never ?mind|forget it|scratch that|quiet|shut up)\b/i;
+const STOP_CJK = /(停|等等|等一下|等下|别|不要|不对|不是|取消|算了|闭嘴|安静)/;
+
+/**
+ * Words said while a reply is silently at work that it can take in without starting over: short,
+ * and not a stop word ("stop", "no", "等等", "不对"…), which cut the reply off instead.
+ */
+export function isRemark(text: string): boolean {
+    const t = text.trim();
+    if (!t || STOP_WORDS.test(t) || STOP_CJK.test(t)) {
+        return false;
+    }
+    const cjk = t.match(CJK)?.length ?? 0;
+    const words = t.replace(CJK, ' ').split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+    return cjk <= REMARK_MAX_CJK && words <= REMARK_MAX_WORDS;
+}
 
 export function initialState(active = true, voiced = true): ConvState {
     return {
@@ -192,6 +221,16 @@ export function phaseOf(s: ConvState): Phase {
 /** Nobody is talking and nothing is waiting to be said: the voice agent may speak up. */
 export function floorFree(s: ConvState): boolean {
     return s.active && !s.userSpeaking && !s.soundDetected && s.sttPending === 0 && s.userBuffer.length === 0 && !s.bot;
+}
+
+/** The reply's voice is synthesizing or coming out: speaking over it is a barge-in. */
+function botAudible(s: ConvState): boolean {
+    return s.botSpeaking || s.ttsActive;
+}
+
+/** The user has the floor: talking, a sound being checked, words being transcribed or waiting to go out. A reply's text waits meanwhile. */
+function userHolds(s: ConvState): boolean {
+    return s.userSpeaking || s.soundDetected || s.sttPending > 0 || s.userBuffer.length > 0;
 }
 
 /** What an echo of the bot would repeat: the reply in progress and the one before it. */
@@ -263,6 +302,18 @@ function tryPrompt(s: ConvState, at: number): Step {
     }
     const text = s.userBuffer.map((part) => part.text).filter(Boolean).join(' ');
     const source = s.userBuffer.every((part) => part.source === 'text') ? 'text' : 'stt';
+    const bot = s.bot;
+    if (bot) {
+        // The reply went on silently while they spoke: a remark goes into it, anything else replaces it.
+        if (source === 'stt' && !bot.llmDone && isRemark(text)) {
+            const resumed = resume({ ...s, userBuffer: [] }, at);
+            return { state: resumed.state, effects: [{ type: 'steer', turnId: bot.turnId, text }, ...resumed.effects] };
+        }
+        const cut = interrupt(s, at);
+        // The new exchange keeps when the words ended and were transcribed.
+        const next = tryPrompt({ ...cut.state, metrics: { silenceAt: s.metrics.silenceAt, endDetectedAt: s.metrics.endDetectedAt, sttDoneAt: s.metrics.sttDoneAt } }, at);
+        return { state: next.state, effects: [...cut.effects, ...next.effects] };
+    }
     const attached = s.userBuffer.flatMap((part) => (part.attachments ? [part.attachments] : []));
     const attachments: VoiceAttachments | undefined = attached.length
         ? {
@@ -275,6 +326,19 @@ function tryPrompt(s: ConvState, at: number): Step {
     const interrupted = s.interruptedNote;
     const { state, turnId } = newBot({ ...s, userBuffer: [], interruptedNote: undefined, metrics: { ...s.metrics, promptAt: at } });
     return { state, effects: [{ type: 'prompt', turnId, text, source, ...(interrupted ? { interrupted } : {}), ...(attachments ? { attachments } : {}) }] };
+}
+
+/** The user gave the floor back to a reply that went on silently: the text it held goes to TTS, and a reply generated meanwhile ends. */
+function resume(s: ConvState, at: number): Step {
+    const bot = s.bot;
+    if (!bot || userHolds(s) || !s.voiced) {
+        return { state: s, effects: [] };
+    }
+    const { sentences, rest } = takeSentences(s.textBuffer, !s.ttsActive);
+    const tail = bot.llmDone ? flushSentence(rest) : undefined;
+    const spoken = tail ? [...sentences, tail] : sentences;
+    const next = toTts({ ...s, textBuffer: bot.llmDone ? '' : rest }, spoken.length, at);
+    return { state: bot.llmDone ? maybeFinish(next) : next, effects: spoken.map((text) => ({ type: 'speak', turnId: bot.turnId, text })) };
 }
 
 /** Reply fully generated and its audio over (or dropped): close the exchange, and the bot falls silent. */
@@ -291,13 +355,18 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
             if (s.muteSegment) {
                 return { state: s, effects: [] }; // the speech a typed message voided: it cuts nothing off
             }
-            const cut = interrupt(s, ev.at);
+            // Over the reply's voice it is a barge-in, cut off at once. A reply still silent (thinking, or at
+            // its tool calls) goes on, its text held, until the words show whether it can take them in.
+            const cut = s.bot && !botAudible(s) ? { state: s, effects: [] } : interrupt(s, ev.at);
             return { state: { ...cut.state, userSpeaking: true, soundDetected: false }, effects: cut.effects };
         }
         case 'userSoundStart':
             return { state: s.userSpeaking || s.muteSegment ? s : { ...s, soundDetected: true }, effects: [] };
-        case 'userSoundEnd':
-            return tryPrompt({ ...s, soundDetected: false, muteSegment: false }, ev.at);
+        case 'userSoundEnd': {
+            const prompted = tryPrompt({ ...s, soundDetected: false, muteSegment: false }, ev.at);
+            const resumed = resume(prompted.state, ev.at);
+            return { state: resumed.state, effects: [...prompted.effects, ...resumed.effects] };
+        }
         case 'userSpeechEnd': {
             if (s.muteSegment) {
                 // Its transcript still comes: drop it when it lands.
@@ -321,9 +390,9 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
             }
             // Heard before the voice moved to another window: nobody here is listening for the answer.
             const text = s.active ? ev.text.trim() : '';
-            // Words the voiceprint check let through only once they were done still cut the reply off;
-            // the new exchange keeps when they ended.
-            const cut = text ? interrupt(s, ev.at) : { state: s, effects: [] };
+            // Words the voiceprint check let through only once they were done still cut the reply off
+            // when it is speaking; the new exchange keeps when they ended. A silent reply waits for tryPrompt.
+            const cut = text && s.bot && botAudible(s) ? interrupt(s, ev.at) : { state: s, effects: [] };
             const metrics = cut.effects.length ? { silenceAt: s.metrics.silenceAt, endDetectedAt: s.metrics.endDetectedAt } : s.metrics;
             const next: ConvState = {
                 ...cut.state,
@@ -332,7 +401,9 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
                 metrics: { ...metrics, sttDoneAt: ev.at },
             };
             const prompted = tryPrompt(next, ev.at);
-            return { state: prompted.state, effects: [...cut.effects, ...prompted.effects] };
+            // Nothing came of it (a noise): a reply that went on silently speaks what it held.
+            const resumed = resume(prompted.state, ev.at);
+            return { state: resumed.state, effects: [...cut.effects, ...prompted.effects, ...resumed.effects] };
         }
         case 'typed': {
             // Typing wins over talking: words still being spoken, transcribed or waiting to go out count
@@ -356,6 +427,12 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
             const next = tryPrompt(voided, ev.at);
             return { state: next.state, effects: [...cut.effects, ...next.effects] };
         }
+        case 'steerFailed': {
+            // The reply it was meant for had just ended: the remark is a new message.
+            const cut = interrupt(s, ev.at);
+            const next = tryPrompt({ ...cut.state, userBuffer: [...cut.state.userBuffer, { text: ev.text, source: 'stt' }] }, ev.at);
+            return { state: next.state, effects: [...cut.effects, ...next.effects] };
+        }
         case 'proactiveStart': {
             if (!floorFree(s)) {
                 return { state: s, effects: [] };
@@ -373,6 +450,10 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
             if (!s.voiced) {
                 return { state: { ...next, metrics }, effects: [] };
             }
+            // The user has the floor over a reply still silent: its text waits for them (resume).
+            if (userHolds(s)) {
+                return { state: { ...next, textBuffer: s.textBuffer + ev.delta, metrics }, effects: [] };
+            }
             // Nothing synthesizing, queued or playing (start of reply, or TTS ran dry): cut early at a comma.
             const { sentences, rest } = takeSentences(s.textBuffer + ev.delta, !s.ttsActive);
             return {
@@ -383,6 +464,10 @@ export function reduce(s: ConvState, ev: ConvEvent): Step {
         case 'llmEnd': {
             if (s.bot?.turnId !== ev.turnId) {
                 return { state: s, effects: [] };
+            }
+            if (s.voiced && userHolds(s)) {
+                // Generated while the user has the floor: its held text waits for them (resume).
+                return { state: withBot({ ...s, metrics: { ...s.metrics, llmDoneAt: ev.at } }, ev.turnId, (b) => ({ ...b, llmDone: true })), effects: [] };
             }
             const tail = flushSentence(s.textBuffer);
             const done = withBot({ ...s, textBuffer: '', metrics: { ...s.metrics, llmDoneAt: ev.at } }, ev.turnId, (b) => ({

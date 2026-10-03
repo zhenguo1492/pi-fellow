@@ -21,6 +21,10 @@ export interface VoiceTurnHandlers {
      * `id` is the model's tool call id; the finished call arrives through `onToolCall` with it as `toolCallId`.
      */
     onToolStart(call: { id: string; toolName: string }): void;
+    /** The arguments of a host tool call the model is still writing: the raw JSON streamed so far (`toolcall_delta`). */
+    onToolDelta(call: { id: string; toolName: string; json: string }): void;
+    /** A host tool call that will never run: its message was cut off at the output token limit (omp and pi fail its calls). */
+    onToolDropped(id: string): void;
     onToolCall(call: HostToolCall): void;
     onToolCancel(callId: string): void;
     /** One of the voice agent's own lookup tools started; `description` is omp's intent line or name + target. */
@@ -65,12 +69,25 @@ const BUILTIN_TOOLS: Record<AgentBackend, string[]> = { omp: ['read', 'grep', 'g
 /** The voice system prompt names omp's tools. */
 const PI_TOOL_NOTE = 'Here the glob tool is called find: it finds files by glob pattern.';
 
+/** How long an aborted prompt may take to settle before its process counts as stuck and is replaced. */
+const ABORT_SETTLE_MS = 5000;
+
+/** The answer to a host tool call of a message cut off at the token limit, should one reach the host anyway. */
+const TRUNCATED_CALL =
+    'Not run: your message was cut off at the output token limit, so this call\'s arguments may be incomplete. Make the call again, shorter (split a long edit or board into several calls).';
+
 interface RunningTurn {
     promptId: string;
     signal: AbortSignal;
     handlers: VoiceTurnHandlers;
     /** Tool call ids of the lookups reported through `onBuiltinTool`, until they end. */
     lookups: Set<string>;
+    /** Host tool calls of the message being written, by content index, with their arguments' JSON so far. */
+    writing: Map<number, { id: string; toolName: string; json: string }>;
+    /** Host tool calls of messages cut off at the token limit: never run, whatever arrives. */
+    truncated: Set<string>;
+    /** The run has ended (`agent_end`): nothing more can be steered into it. */
+    ending: boolean;
     finish(error?: string): void;
 }
 
@@ -93,7 +110,7 @@ interface OmpFrame {
     toolCallId?: unknown;
     result?: unknown;
     isError?: unknown;
-    message?: { role?: unknown; usage?: OmpUsage; content?: unknown };
+    message?: { role?: unknown; usage?: OmpUsage; content?: unknown; stopReason?: unknown };
 }
 
 /** `usage` of an assistant message in omp's `message_end` frame. */
@@ -171,34 +188,74 @@ export class VoiceLlm {
 
     /**
      * Resolves when the run settles (omp: `agent_end` with `isTerminal !== false`; pi: `agent_settled`),
-     * with its error if any. Aborting `signal` aborts the run; text arriving after that is dropped.
-     * `images` go with the message as image parts; a model without vision gets a placeholder from omp/pi.
+     * with its error if any; it never rejects. Aborting `signal` aborts the run; text arriving after
+     * that is dropped, and a run that has not settled ABORT_SETTLE_MS later ends with an error while
+     * the process is replaced. `images` go with the message as image parts; a model without vision
+     * gets a placeholder from omp/pi.
      */
     prompt(message: string, signal: AbortSignal, handlers: VoiceTurnHandlers, images?: ImageContent[]): Promise<{ error?: string }> {
         if (this._turn) {
-            throw new Error('The voice agent is already answering');
+            return Promise.resolve({ error: 'The voice agent is already answering' });
         }
         if (this._exited) {
             return Promise.resolve({ error: 'The voice agent process exited' });
         }
         const promptId = `voice_prompt_${++this._promptSeq}`;
         const { promise, resolve } = Promise.withResolvers<{ error?: string }>();
-        const onAbort = () => this._write({ type: 'abort' });
-        this._turn = {
+        let stuck: NodeJS.Timeout | undefined;
+        const turn: RunningTurn = {
             promptId,
             signal,
             handlers,
             lookups: new Set(),
+            writing: new Map(),
+            truncated: new Set(),
+            ending: false,
             finish: (error) => {
+                clearTimeout(stuck);
                 signal.removeEventListener('abort', onAbort);
-                this._turn = undefined;
+                if (this._turn === turn) {
+                    this._turn = undefined;
+                }
                 resolve({ error });
             },
         };
+        const onAbort = () => {
+            this._write({ type: 'abort' });
+            // A process that never settles the aborted run would hold every later turn: replace it.
+            stuck = setTimeout(() => this._replaceStuck(turn), ABORT_SETTLE_MS);
+        };
+        this._turn = turn;
         signal.addEventListener('abort', onAbort, { once: true });
         // Written raw (not bridge.prompt) so a failed `prompt` response reaches _onEvent.
         this._write({ id: promptId, type: 'prompt', message, ...(images?.length ? { images } : {}) });
         return promise;
+    }
+
+    /**
+     * Delivers `message` into the running prompt (omp/pi `steer`): the agent takes it in at its next
+     * turn boundary, after the tool calls of the message being written, and answers it in the same
+     * run. False when no prompt is running, or it is aborted or ending.
+     */
+    steer(message: string): boolean {
+        const turn = this._turn;
+        if (!turn || turn.signal.aborted || turn.ending || this._exited) {
+            return false;
+        }
+        this._write({ type: 'steer', message });
+        return true;
+    }
+
+    /** The aborted `turn` never settled: it ends with an error, and the process counts as exited, so the next turn starts a new one. */
+    private _replaceStuck(turn: RunningTurn): void {
+        if (this._turn !== turn) {
+            return;
+        }
+        turn.finish('The voice agent did not stop when interrupted; it restarts.');
+        this._exited = true;
+        this._stopping = true;
+        this._onExit(new Error('it did not stop when interrupted'));
+        void this._bridge.stop();
     }
 
     sendToolResult(callId: string, text: string, isError: boolean): void {
@@ -273,13 +330,24 @@ export class VoiceLlm {
                 } else if (update?.type === 'toolcall_start') {
                     const call = startedCall(update, event.message?.content);
                     if (call && !BUILTIN_TOOLS[this._bridge.backend].includes(call.toolName)) {
+                        if (typeof update.contentIndex === 'number') {
+                            turn.writing.set(update.contentIndex, { ...call, json: '' });
+                        }
                         turn.handlers.onToolStart(call);
+                    }
+                } else if (update?.type === 'toolcall_delta') {
+                    // The deltas themselves: the partial message's parsed arguments lag behind them.
+                    const call = typeof update.contentIndex === 'number' ? turn.writing.get(update.contentIndex) : undefined;
+                    if (call) {
+                        call.json += String(update.delta ?? '');
+                        turn.handlers.onToolDelta({ id: call.id, toolName: call.toolName, json: call.json });
                     }
                 }
                 return;
             }
             case 'message_end': {
-                const usage = event.message?.role === 'assistant' ? event.message.usage : undefined;
+                const assistant = event.message?.role === 'assistant';
+                const usage = assistant ? event.message?.usage : undefined;
                 if (turn && usage) {
                     turn.handlers.onUsage({
                         at: Date.now(),
@@ -290,6 +358,16 @@ export class VoiceLlm {
                         cost: usage.cost?.total ?? 0,
                         ...(this._contextWindow ? { contextWindow: this._contextWindow } : {}),
                     });
+                }
+                if (turn && assistant) {
+                    // Cut off at the token limit: its calls' arguments may be incomplete, and omp and pi fail them.
+                    if (event.message?.stopReason === 'length') {
+                        for (const call of turn.writing.values()) {
+                            turn.truncated.add(call.id);
+                            turn.handlers.onToolDropped(call.id);
+                        }
+                    }
+                    turn.writing.clear();
                 }
                 return;
             }
@@ -315,15 +393,17 @@ export class VoiceLlm {
                 return;
             }
             case 'host_tool_call':
-                if (turn) {
+                if (!turn) {
+                    this.sendToolResult(String(event.id), 'No voice turn is active.', true);
+                } else if (turn.truncated.has(String(event.toolCallId ?? event.id))) {
+                    this.sendToolResult(String(event.id), TRUNCATED_CALL, true);
+                } else {
                     turn.handlers.onToolCall({
                         id: String(event.id),
                         toolCallId: String(event.toolCallId ?? event.id),
                         toolName: String(event.toolName),
                         arguments: (event.arguments ?? {}) as Record<string, unknown>,
                     });
-                } else {
-                    this.sendToolResult(String(event.id), 'No voice turn is active.', true);
                 }
                 return;
             case 'host_tool_cancel':
@@ -338,6 +418,7 @@ export class VoiceLlm {
                 if (!turn || event.isTerminal === false) {
                     return;
                 }
+                turn.ending = true;
                 const messages = event.messages as Array<{ stopReason?: string; errorMessage?: string }> | undefined;
                 const last = messages?.[messages.length - 1];
                 const error = last?.stopReason === 'error' ? (last.errorMessage ?? 'unknown error') : undefined;

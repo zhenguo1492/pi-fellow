@@ -22,6 +22,11 @@ const state = vi.hoisted(() => ({
     commands: [] as string[],
     /** What the fake page's `status` says besides its defaults. */
     status: {} as Record<string, unknown>,
+    /** The page is busy drawing: its replies wait in `held`, in order, until the test releases them. */
+    holding: false,
+    held: [] as (() => void)[],
+    /** What a render reports. */
+    renderErrors: [] as { block: string; message: string }[],
 }));
 
 vi.mock('vscode', () => ({
@@ -62,7 +67,7 @@ vi.mock('vscode', () => ({
             const reply = (message: BoardHostMessage) => {
                 switch (message.type) {
                     case 'render':
-                        return receive({ type: 'rendered', version: message.version, errors: [] });
+                        return receive({ type: 'rendered', version: message.version, errors: state.renderErrors });
                     case 'point':
                         return receive({ type: 'pointed', seq: message.seq });
                     case 'scroll':
@@ -106,7 +111,11 @@ vi.mock('vscode', () => ({
                     },
                     postMessage: async (message: BoardHostMessage) => {
                         panel.posted.push(message);
-                        queueMicrotask(() => reply(message));
+                        if (state.holding) {
+                            state.held.push(() => reply(message));
+                        } else {
+                            queueMicrotask(() => reply(message));
+                        }
                         return true;
                     },
                     onDidReceiveMessage: (listener: typeof receive) => {
@@ -155,6 +164,9 @@ beforeEach(async () => {
     state.activeColumn = 2;
     state.commands = [];
     state.status = {};
+    state.holding = false;
+    state.held = [];
+    state.renderErrors = [];
     boards = new Blackboards({ extensionUri: '/ext' as never, following: () => false, log: () => {} });
     await boards.bindSession(sessionFile, false);
 });
@@ -275,6 +287,82 @@ describe('Blackboards', () => {
         ]);
         expect(boards.takeEdits()).toEqual([]);
         expect(state.panels[0].posted.at(-1)).toMatchObject({ type: 'render', edited: true, markdown: '# T\n\nnew text\n\nadded\n' });
+    });
+
+    it('returns the outline before the page draws; a point waits for the drawing, and its errors come once as late results', async () => {
+        state.holding = true;
+        state.renderErrors = [{ block: 'd1', message: 'Parse error on line 2' }];
+        const written = await boards.write({ markdown: '# T\n\n```mermaid\ngraph TD\nA--\n```', mode: 'append' });
+        expect(written).toMatch(/^Board b1 "T": written\.\nh1 heading "T"\nd1 diagram /);
+        // Sent, not drawn yet.
+        expect([state.panels[0].posted.at(-1)?.type, state.held.length > 0]).toEqual(['render', true]);
+        expect(boards.takeLateResults()).toEqual([]);
+
+        // A marker right after: the page answers once it has drawn, however long the drawing takes.
+        vi.useFakeTimers();
+        try {
+            let answer: string | undefined;
+            const pointed = boards.point({ block: 'd1' }, undefined).then((text) => (answer = text));
+            await vi.advanceTimersByTimeAsync(10_000);
+            expect([answer, state.panels[0].posted.at(-1)?.type]).toEqual([undefined, 'point']);
+            state.held.splice(0).forEach((release) => release());
+            await pointed;
+            expect(answer).toMatch(/^Pointed at d1 on board b1/);
+        } finally {
+            vi.useRealTimers();
+        }
+        expect(boards.takeLateResults()).toEqual([
+            'Board b1 "T": d1 did not render: Parse error on line 2. Fix the Mermaid source and rewrite it with show_me board "b1", mode "block", block "d1".',
+        ]);
+        expect(boards.takeLateResults()).toEqual([]);
+    });
+
+    it('reports nothing for a drawing replaced before it was drawn, only for the one that is shown', async () => {
+        state.holding = true;
+        await boards.write({ markdown: '```mermaid\ngraph TD\nA--\n```', mode: 'append' });
+        await boards.write({ markdown: '```mermaid\ngraph TD\nB--\n```', mode: 'block', block: 'd1' });
+        state.renderErrors = [{ block: 'd1', message: 'Parse error' }];
+        state.held.splice(0).forEach((release) => release());
+        await vi.waitFor(() => expect(boards.takeLateResults()).toEqual([expect.stringMatching(/^Board b1 "Board": d1 did not render: Parse error\./)]));
+        expect(boards.takeLateResults()).toEqual([]);
+    });
+
+    it('draws a show_me call on a tab of its own while it streams, whole blocks only, and the write takes the tab over', async () => {
+        const renders = () => state.panels[0].posted.flatMap((m) => (m.type === 'render' ? [m.markdown] : []));
+        const preview = boards.preview({ markdown: '# Login\n\nThe cli', mode: 'append', title: 'Login' });
+        // The tab opens at once: its page loads while the model is still writing.
+        expect(state.panels.map((p) => p.title)).toEqual(['Board · Login']);
+        await vi.waitFor(() => expect(renders().at(-1)).toBe('# Login\n'));
+        preview.update({ markdown: '# Login\n\nThe client sends a token.\n\n```mermaid\ngraph TD\nA-->', mode: 'append', title: 'Login' });
+        // The diagram still being written is not drawn: it would show as an error.
+        await vi.waitFor(() => expect(renders().at(-1)).toBe('# Login\n\nThe client sends a token.\n'));
+        // Nothing is written until the call runs.
+        await expect(readIndex()).rejects.toThrow();
+
+        const final = { markdown: '# Login\n\nThe client sends a token.\n\n```mermaid\ngraph TD\nA-->B\n```', mode: 'append' as const, title: 'Login' };
+        preview.end(final);
+        expect(await boards.write(final)).toMatch(/^Board b1 "Login": written\./);
+        expect([state.panels.length, state.panels[0].disposed]).toEqual([1, false]);
+        expect(renders().at(-1)).toBe(final.markdown + '\n');
+        expect(await readIndex()).toEqual({ current: 'b1', boards: [{ id: 'b1', title: 'Login', open: true }] });
+    });
+
+    it('closes a tab it opened when its call is dropped, and puts a board it drew on back', async () => {
+        await boards.write({ markdown: '# T\n\nfirst', mode: 'append' });
+        const onNew = boards.preview({ board: 'new', markdown: '# Other\n\nx\n\n', mode: 'append' });
+        expect(state.panels).toHaveLength(2);
+        onNew.end();
+        expect(state.panels[1].disposed).toBe(true);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect((await readIndex()).boards.map((b) => b.id)).toEqual(['b1']);
+
+        const renders = () => state.panels[0].posted.flatMap((m) => (m.type === 'render' ? [m.markdown] : []));
+        const onOld = boards.preview({ markdown: 'second\n\n', mode: 'append' });
+        await vi.waitFor(() => expect(renders().at(-1)).toBe('# T\n\nfirst\n\nsecond\n'));
+        // The write that follows goes to another board: this one goes back to what it showed.
+        onOld.end({ markdown: 'second', mode: 'append', board: 'new' });
+        expect(renders().at(-1)).toBe('# T\n\nfirst\n');
+        expect(state.panels[0].disposed).toBe(false);
     });
 
     it('points at existing blocks only, and at lines only in code', async () => {

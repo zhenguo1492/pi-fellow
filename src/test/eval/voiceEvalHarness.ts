@@ -112,6 +112,9 @@ function looksLikeFolder(target: string): boolean {
 
 function fakeHands(rec: Recorded): EditorHands {
     return {
+        finishTyping: () => {},
+        takeLateResults: () => [],
+        previewEdit: () => ({ update() {}, commit: async () => undefined, drop() {} }),
         openFile: async (target) => {
             rec.opened.push(target.path);
             return `Opened ${target.path}.`;
@@ -123,7 +126,7 @@ function fakeHands(rec: Recorded): EditorHands {
         },
         editFile: async (edit) => {
             rec.edits.push(edit.path);
-            return `Edited ${edit.path} (typed). One Ctrl+Z in the editor undoes it.`;
+            return `Edit of ${edit.path} accepted: it is being typed into the user's editor now, and saved when done. One Ctrl+Z in the editor undoes it.`;
         },
         createFile: async (file) => {
             rec.edits.push(`create ${file}`);
@@ -184,6 +187,8 @@ function fakeBoards(rec: Recorded): BoardHands {
         },
         point: async (target) => `Pointed at ${target.block}.`,
         view: async (request) => `Done: ${request.action}.`,
+        takeLateResults: () => [],
+        preview: () => ({ update() {}, end() {} }),
     };
 }
 
@@ -287,6 +292,8 @@ export class VoiceEval {
                 text += delta;
             },
             onToolStart: () => {},
+            onToolDelta: () => {},
+            onToolDropped: () => {},
             onToolCall: (call) => {
                 pending.push(
                     this.router.execute(call.toolName, call.arguments, toolTurn).then((result) => {
